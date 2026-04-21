@@ -1,0 +1,43 @@
+# Build directories
+build/
+out/
+cmake-build-*/
+
+# CMake cache & generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+install_manifest.txt
+CTestTestfile.cmake
+_deps/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.clangd/
+compile_commands.json
+
+# JUCE generated
+JuceLibraryCode/
+
+# macOS
+.DS_Store
+
+# Linux
+*.o
+*.a
+*.so
+*.out
+
+# Scratch / test files
+test_cast.cpp
+test_find_juce.sh
+test_properties.cpp
+
+# Agent metadata
+.agents/
+plan.md

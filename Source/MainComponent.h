@@ -1,0 +1,261 @@
+#pragma once
+
+#include <JuceHeader.h>
+#include <atomic>
+
+#include "LockFreeQueue.h"
+#include "TrackCommand.h"
+#include "GlobalTransport.h"
+#include "PatternPool.h"
+#include "MidiPattern.h"
+#include "EuclideanPattern.h"
+#include "TopBarComponent.h"
+#include "BrowserComponent.h"
+#include "SessionView.h"
+#include "PatternEditor.h"
+#include "DeviceView.h"
+#include "SimplerProcessor.h"
+#include "ClipData.h"
+#include "AppAudioBuffer.h"
+#include "ProjectManager.h"
+
+struct Track
+{
+    std::atomic<float> gain     { 1.0f };
+    std::atomic<float> rmsLevel { 0.0f };
+
+    LockFreeQueue<TrackCommand, 128> commandQueue;
+    LockFreeQueue<Pattern*, 128>     garbageQueue;
+
+    Pattern* currentPattern {nullptr};
+    Pattern* pendingPattern {nullptr};
+    double   switchSample   {-1.0};
+    double   patternStartSample {-1.0};
+
+    juce::MidiBuffer midiBuffer;
+
+    void processPatternCommands(int64_t blockStartSample, int numSamples,
+                                const GlobalTransport& transport)
+    {
+        while (auto optCmd = commandQueue.pop())
+        {
+            TrackCommand cmd = *optCmd;
+            if (cmd.type == TrackCommand::Type::PlayPattern) {
+                if (pendingPattern && pendingPattern != currentPattern) garbageQueue.push(pendingPattern);
+                pendingPattern = cmd.patternPointer;
+                switchSample   = cmd.scheduledSample;
+            } else if (cmd.type == TrackCommand::Type::StopPattern) {
+                if (cmd.scheduledSample <= 0) {
+                    if (currentPattern) garbageQueue.push(currentPattern);
+                    if (pendingPattern && pendingPattern != currentPattern) garbageQueue.push(pendingPattern);
+                    currentPattern = nullptr;
+                    pendingPattern = nullptr;
+                    switchSample   = -1.0;
+                    patternStartSample = -1.0;
+                } else {
+                    if (pendingPattern && pendingPattern != currentPattern) garbageQueue.push(pendingPattern);
+                    pendingPattern = nullptr;
+                    switchSample   = cmd.scheduledSample;
+                }
+            }
+        }
+
+        midiBuffer.clear();
+
+        if (switchSample != -1.0 && switchSample >= blockStartSample && switchSample < blockStartSample + numSamples) {
+            // Switch happens IN THIS BLOCK
+            int samplesBefore = static_cast<int>(switchSample - blockStartSample);
+            int samplesAfter  = numSamples - samplesBefore;
+
+            if (currentPattern && samplesBefore > 0)
+                currentPattern->getEventsForBuffer(midiBuffer, blockStartSample, samplesBefore, transport, patternStartSample);
+
+            if (currentPattern && currentPattern != pendingPattern) 
+                garbageQueue.push(currentPattern);
+            
+            currentPattern = pendingPattern;
+            pendingPattern = nullptr;
+            patternStartSample = switchSample;
+            switchSample   = -1.0;
+
+            if (currentPattern && samplesAfter > 0)
+                currentPattern->getEventsForBuffer(midiBuffer, blockStartSample + samplesBefore, samplesAfter, transport, patternStartSample);
+        } else {
+            // No switch in this block, but check if we passed a switch that wasn't handled
+            // (render thread missed the exact block due to OS scheduling jitter).
+            if (switchSample != -1.0 && blockStartSample >= switchSample) {
+                if (currentPattern && currentPattern != pendingPattern) garbageQueue.push(currentPattern);
+                currentPattern = pendingPattern;
+                pendingPattern = nullptr;
+                patternStartSample = switchSample;
+                switchSample   = -1.0;
+                // BUG-2 FIX: generate events for the *current* block right now.
+                // Without this, the first block after a late switch was always
+                // silent — dropping the very first hit and introducing [0, blockSize]
+                // samples of jitter relative to tracks that caught their switch
+                // on-time.
+                if (currentPattern)
+                    currentPattern->getEventsForBuffer(midiBuffer, blockStartSample, numSamples, transport, patternStartSample);
+            } else if (currentPattern) {
+                currentPattern->getEventsForBuffer(midiBuffer, blockStartSample, numSamples, transport, patternStartSample);
+            }
+        }
+    }
+
+    void clear() {
+        gain.store(1.0f, std::memory_order_relaxed);
+        rmsLevel.store(0.0f, std::memory_order_relaxed);
+        currentPattern = nullptr;
+        pendingPattern = nullptr;
+        switchSample = -1.0;
+        patternStartSample = -1.0;
+        midiBuffer.clear();
+        while (commandQueue.pop()) {}
+        while (garbageQueue.pop()) {}
+    }
+
+    void moveFrom(Track& other) {
+        clear();
+        gain.store(other.gain.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        rmsLevel.store(other.rmsLevel.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        currentPattern = other.currentPattern;
+        pendingPattern = other.pendingPattern;
+        switchSample = other.switchSample;
+        patternStartSample = other.patternStartSample;
+        midiBuffer = other.midiBuffer;
+        while (auto opt = other.commandQueue.pop()) commandQueue.push(*opt);
+        while (auto opt = other.garbageQueue.pop()) garbageQueue.push(*opt);
+        other.currentPattern = nullptr;
+        other.pendingPattern = nullptr;
+    }
+};
+
+struct OscTrack : public Track
+{
+    double currentAngle = 0.0;
+    double angleDelta   = 0.0;
+};
+
+// ════════════════════════════════════════════════════════════════════════════
+//  RenderThread — Non-RT thread that pre-renders DSP into AppAudioBuffer
+// ════════════════════════════════════════════════════════════════════════════
+class MainComponent;
+
+class RenderThread : public juce::Thread
+{
+public:
+    explicit RenderThread(MainComponent& mc) : juce::Thread("DAW Render Thread"), owner(mc) {}
+    void run() override;
+
+private:
+    MainComponent& owner;
+};
+
+// ════════════════════════════════════════════════════════════════════════════
+//  MainComponent
+// ════════════════════════════════════════════════════════════════════════════
+class MainComponent : public juce::AudioAppComponent,
+                      public juce::MidiInputCallback,
+                      public juce::Timer,
+                      public juce::DragAndDropContainer
+{
+public:
+    MainComponent();
+    ~MainComponent() override;
+
+    void prepareToPlay (int samplesPerBlockExpected, double sampleRate) override;
+    void getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill) override;
+    void releaseResources() override;
+
+    void paint   (juce::Graphics& g) override;
+    void resized () override;
+
+    void handleIncomingMidiMessage (juce::MidiInput* source,
+                                    const juce::MidiMessage& message) override;
+    void timerCallback() override;
+
+    // ── State exposed to RenderThread (friend) ───────────────────────────────
+    friend class RenderThread;
+
+private:
+    // ── Persistent Settings ──────────────────────────────────────────────────
+    std::unique_ptr<juce::PropertiesFile> userSettings;
+    juce::File workspaceDirectory;
+    
+    bool ensureWorkspaceDirectory();
+    void initialiseWorkspace();
+    void finishInitialisation();
+
+    void saveDeviceSettings();
+    void loadDeviceSettings();
+
+    // ── Core state ───────────────────────────────────────────────────────────
+    double currentSampleRate = 0.0;
+    int    currentBufferSize = 512;
+    GlobalTransport transportClock;
+    ProjectManager  projectManager;
+    juce::File      currentProjectFile;
+    std::unique_ptr<juce::FileChooser> projectChooser;
+
+    void configureProjectMenu();
+    void syncProjectToUI();
+    void syncUIToProject();
+    void loadAudioFileIntoTrack(int trackIdx, const juce::File& file);
+
+    // ── Audio Graph Elements ─────────────────────────────────────────────────
+    Track masterTrack;
+    Track returnTrackA;
+    Track audioTracks[MAX_TRACKS];
+    std::atomic<int> numActiveTracks {0}; // written UI, read audio+render thread
+
+    // ── Clip Grid State (UI thread only) ─────────────────────────────────────
+    ClipData clipGrid[MAX_TRACKS][NUM_SCENES];
+    int selectedTrackIndex = -1;
+    int selectedSceneIndex = -1;
+
+    // ── UI Elements ──────────────────────────────────────────────────────────
+    std::unique_ptr<TopBarComponent> topBar;
+    BrowserComponent browser;
+    SessionView      sessionView;
+    DeviceView       deviceView;
+    PatternEditor    patternEditor;
+
+    // ── Level Meters ─────────────────────────────────────────────────────────
+    float masterLevelDisplay = 0.0f;
+    float audioLevelDisplay  = 0.0f;
+    float returnLevelDisplay = 0.0f;
+
+    // ── Sampler Engine ───────────────────────────────────────────────────────
+    SimplerProcessor samplerDSPs[MAX_TRACKS];
+    juce::File       loadedFiles[MAX_TRACKS];
+    juce::AudioFormatManager formatManager;
+    std::unique_ptr<juce::FileChooser> myChooser;
+
+    // ── Pattern Pooling ──────────────────────────────────────────────────────
+    PatternPool<MidiPattern>      midiPool;
+    PatternPool<EuclideanPattern> euclideanPool;
+
+    // ── Lock-Free Plugin Engine ──────────────────────────────────────────────
+    juce::AudioPluginFormatManager   pluginFormatManager;
+    juce::AudioPluginInstance*       activePlugin {nullptr}; // render-thread owned
+    LockFreeQueue<juce::AudioPluginInstance*, 4> pluginLoadQueue;
+    LockFreeQueue<juce::AudioPluginInstance*, 4> pluginGarbageQueue;
+    std::unique_ptr<juce::DocumentWindow>        pluginWindow;
+
+    // ── Lock-Free Hardware MIDI Input ────────────────────────────────────────
+    juce::MidiMessageCollector midiCollector;
+
+    // ── Application-Level Pre-Render Buffer ─────────────────────────────────
+    // Decouples DSP work from the hard RT deadline of the hardware callback.
+    // The render thread fills this asynchronously; getNextAudioBlock only reads.
+    AppAudioBuffer appBuffer;
+    RenderThread   renderThread;
+
+    // Scratch buffer used by the render thread (pre-allocated in prepareToPlay)
+    juce::AudioBuffer<float> renderScratch;
+
+    // Signal from audio thread → render thread: wake up and fill the buffer
+    juce::WaitableEvent renderWakeEvent { true }; // manual-reset
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
+};
