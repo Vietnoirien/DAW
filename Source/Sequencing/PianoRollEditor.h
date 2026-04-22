@@ -44,7 +44,7 @@ public:
             if (x >= 0 && x < bounds.getWidth())
             {
                 g.setColour(juce::Colour(0xffb0b0d0));
-                g.setFont(juce::Font(11.0f, juce::Font::bold));
+                g.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
                 g.drawText(juce::String(bar + 1),
                            (int)x + 3, 0, 40, bounds.getHeight() - 2,
                            juce::Justification::centredLeft);
@@ -366,7 +366,7 @@ public:
             if (noteInOctave == 0)
             {
                 g.setColour(juce::Colour(0xff333355));
-                g.setFont(juce::Font(10.0f, juce::Font::bold));
+                g.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
                 g.drawText("C" + juce::String(octave),
                            2, y, bounds.getWidth() - 4, noteHeight,
                            juce::Justification::centredLeft);

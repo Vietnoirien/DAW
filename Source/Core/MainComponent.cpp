@@ -252,26 +252,34 @@ MainComponent::MainComponent()
     // ── Pattern Editor ────────────────────────────────────────────────────────
     patternEditor.onEuclideanChanged = [this](int k, int n) {
         if (selectedTrackIndex < 0) return;
-        
-        double scheduleTime = transportClock.getIsPlaying() ? transportClock.getNextBarPosition() : 0.0;
-        
-        if (selectedSceneIndex >= 0) {
-            auto& clip = clipGrid[selectedTrackIndex][selectedSceneIndex];
-            if (trackInstruments[selectedTrackIndex] == "DrumRack") {
-                auto& pad = clip.drumPatterns[selectedDrumPadIndex];
-                pad.steps = n;
-                pad.pulses = k;
-                pad.hitMap.clear();
-                regenerateDrumRackMidi(clip);
-                sessionView.setClipData(selectedTrackIndex, selectedSceneIndex, clip);
-                
+        if (selectedSceneIndex < 0) return;
+
+        auto& clip = clipGrid[selectedTrackIndex][selectedSceneIndex];
+
+        if (trackInstruments[selectedTrackIndex] == "DrumRack") {
+            auto& pad = clip.drumPatterns[selectedDrumPadIndex];
+            pad.steps = n;
+            pad.pulses = k;
+            pad.hitMap.clear();
+            regenerateDrumRackMidi(clip);
+            sessionView.setClipData(selectedTrackIndex, selectedSceneIndex, clip);
+
+            // Only reschedule if this clip is already playing
+            if (clip.isPlaying) {
+                double scheduleTime = transportClock.getIsPlaying() ? transportClock.getNextBarPosition() : 0.0;
                 auto* p = midiPool.rentPattern();
                 p->setNotes(clip.midiNotes, clip.patternLengthBars);
                 audioTracks[selectedTrackIndex].commandQueue.push(
                     { TrackCommand::Type::PlayPattern, p, scheduleTime });
-            } else {
-                clip.euclideanSteps = n;
-                clip.euclideanPulses = k;
+            }
+        } else {
+            clip.euclideanSteps = n;
+            clip.euclideanPulses = k;
+            clip.hitMap.clear(); // will be regenerated on launch
+
+            // Only reschedule if this clip is already playing
+            if (clip.isPlaying) {
+                double scheduleTime = transportClock.getIsPlaying() ? transportClock.getNextBarPosition() : 0.0;
                 auto* p = euclideanPool.rentPattern();
                 p->generate(k, n);
                 clip.hitMap.assign(p->getHitMap().begin(), p->getHitMap().end());
@@ -283,23 +291,30 @@ MainComponent::MainComponent()
 
     patternEditor.onEuclideanHitMapChanged = [this](const std::vector<uint8_t>& map) {
         if (selectedTrackIndex < 0) return;
-        
-        double scheduleTime = transportClock.getIsPlaying() ? transportClock.getNextBarPosition() : 0.0;
-        
-        if (selectedSceneIndex >= 0) {
-            auto& clip = clipGrid[selectedTrackIndex][selectedSceneIndex];
-            if (trackInstruments[selectedTrackIndex] == "DrumRack") {
-                auto& pad = clip.drumPatterns[selectedDrumPadIndex];
-                pad.hitMap = map;
-                regenerateDrumRackMidi(clip);
-                sessionView.setClipData(selectedTrackIndex, selectedSceneIndex, clip);
-                
+        if (selectedSceneIndex < 0) return;
+
+        auto& clip = clipGrid[selectedTrackIndex][selectedSceneIndex];
+
+        if (trackInstruments[selectedTrackIndex] == "DrumRack") {
+            auto& pad = clip.drumPatterns[selectedDrumPadIndex];
+            pad.hitMap = map;
+            regenerateDrumRackMidi(clip);
+            sessionView.setClipData(selectedTrackIndex, selectedSceneIndex, clip);
+
+            // Only reschedule if this clip is already playing
+            if (clip.isPlaying) {
+                double scheduleTime = transportClock.getIsPlaying() ? transportClock.getNextBarPosition() : 0.0;
                 auto* p = midiPool.rentPattern();
                 p->setNotes(clip.midiNotes, clip.patternLengthBars);
                 audioTracks[selectedTrackIndex].commandQueue.push(
                     { TrackCommand::Type::PlayPattern, p, scheduleTime });
-            } else {
-                clip.hitMap = map;
+            }
+        } else {
+            clip.hitMap = map;
+
+            // Only reschedule if this clip is already playing
+            if (clip.isPlaying) {
+                double scheduleTime = transportClock.getIsPlaying() ? transportClock.getNextBarPosition() : 0.0;
                 auto* p = euclideanPool.rentPattern();
                 p->setHitMap(map);
                 audioTracks[selectedTrackIndex].commandQueue.push(
@@ -310,6 +325,7 @@ MainComponent::MainComponent()
 
     patternEditor.onMidiNotesChanged = [this](const std::vector<MidiNote>& notes) {
         if (selectedTrackIndex < 0) return;
+        if (selectedSceneIndex < 0) return;
 
         // Auto-compute pattern length from note content:
         // find the furthest beat (note end) and round up to the nearest bar.
@@ -318,20 +334,22 @@ MainComponent::MainComponent()
             maxBeat = std::max(maxBeat, n.startBeat + n.lengthBeats);
         const double autoLengthBars = std::max(1.0, std::ceil(maxBeat / 4.0));
 
-        // Always update the clip data regardless of playback state
-        if (selectedSceneIndex >= 0) {
-            clipGrid[selectedTrackIndex][selectedSceneIndex].midiNotes        = notes;
-            clipGrid[selectedTrackIndex][selectedSceneIndex].patternLengthBars = autoLengthBars;
-            
+        // Always persist the edited notes to the clip data model
+        auto& clip = clipGrid[selectedTrackIndex][selectedSceneIndex];
+        clip.midiNotes         = notes;
+        clip.patternLengthBars = autoLengthBars;
+
+        // Only push to the audio engine if this clip is already playing.
+        // This lets the user edit patterns freely without auto-starting playback.
+        if (clip.isPlaying) {
             double scheduleTime = transportClock.getIsPlaying() ? transportClock.getNextBarPosition() : 0.0;
 
-            // 1. FlushNotes: immediately release any voices that were triggered by
-            //    the old pattern. This prevents stuck notes when a note is deleted
-            //    while the synth is playing.
+            // FlushNotes: immediately release any voices triggered by the old pattern
+            // to prevent stuck notes when a note is deleted while the synth is playing.
             audioTracks[selectedTrackIndex].commandQueue.push(
                 { TrackCommand::Type::FlushNotes, nullptr, -1.0 });
 
-            // 2. Schedule the new pattern at the next bar boundary for clean timing.
+            // Schedule the updated pattern at the next bar boundary for clean timing.
             auto* p = midiPool.rentPattern();
             p->setNotes(notes, autoLengthBars);
             audioTracks[selectedTrackIndex].commandQueue.push(

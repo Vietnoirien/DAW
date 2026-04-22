@@ -20,7 +20,7 @@ public:
         g.drawRoundedRectangle (b, 6.0f, 1.0f);
 
         g.setColour (juce::Colours::white);
-        g.setFont (juce::Font (13.0f, juce::Font::bold));
+        g.setFont (juce::Font (juce::FontOptions (13.0f, juce::Font::bold)));
         g.drawText (displayLabel, b.toNearestInt(), juce::Justification::centred);
     }
 

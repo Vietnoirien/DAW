@@ -17,6 +17,7 @@ public:
         bpmSlider.setSliderStyle(juce::Slider::LinearBar);
         bpmSlider.setRange(20.0, 300.0, 1.0);
         bpmSlider.setValue(transport.getBpm());
+        bpmSlider.setDoubleClickReturnValue(true, 120.0);
         bpmSlider.onValueChange = [this] { transport.setBpm(bpmSlider.getValue()); };
 
         settingsBtn.onClick = [this] { openAudioSettings(); };

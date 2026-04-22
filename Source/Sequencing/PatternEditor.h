@@ -79,7 +79,7 @@ public:
             // Numerotation (draw just outside the circle)
             juce::Point<float> numP (center.x + std::cos(angle) * (radius + 20.0f), center.y + std::sin(angle) * (radius + 20.0f));
             g.setColour(isActiveStep ? juce::Colours::white : juce::Colours::lightgrey);
-            g.setFont(juce::Font(12.0f, isActiveStep ? juce::Font::bold : juce::Font::plain));
+            g.setFont(juce::Font(juce::FontOptions(12.0f, isActiveStep ? juce::Font::bold : juce::Font::plain)));
             g.drawText(juce::String(i + 1), numP.x - 10.0f, numP.y - 10.0f, 20.0f, 20.0f, juce::Justification::centred);
         }
 
@@ -88,7 +88,7 @@ public:
         juce::Rectangle<float> rightBtn(bounds.getRight() + 10.0f, bounds.getCentreY() - 15.0f, 30.0f, 30.0f);
         
         g.setColour(juce::Colours::white.withAlpha(0.6f));
-        g.setFont(juce::Font(24.0f, juce::Font::bold));
+        g.setFont(juce::Font(juce::FontOptions(24.0f, juce::Font::bold)));
         g.drawText("<", leftBtn, juce::Justification::centred);
         g.drawText(">", rightBtn, juce::Justification::centred);
     }
@@ -148,6 +148,7 @@ public:
             sl.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 50, 20);
             sl.setRange(min, max, 1);
             sl.setValue(val);
+            sl.setDoubleClickReturnValue(true, val);
             sl.addListener(this);
             sl.setName(name);
             addAndMakeVisible(sl);

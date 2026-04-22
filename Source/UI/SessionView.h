@@ -51,7 +51,7 @@ public:
             }
 
             g.setColour (juce::Colours::white.withAlpha (0.9f));
-            g.setFont (juce::Font (11.0f));
+            g.setFont (juce::Font (juce::FontOptions (11.0f)));
             g.drawText (data.name, b.reduced (24, 0).toNearestInt(), juce::Justification::centredLeft);
 
             float tx = b.getX() + 12.0f, ty = b.getCentreY();
@@ -84,7 +84,7 @@ public:
             if (isHovered)
             {
                 g.setColour (juce::Colour (0xff7777bb));
-                g.setFont (juce::Font (16.0f));
+                g.setFont (juce::Font (juce::FontOptions (16.0f)));
                 g.drawText ("+", b.toNearestInt(), juce::Justification::centred);
             }
         }
@@ -147,11 +147,11 @@ public:
         g.setColour (badgeC.withAlpha (0.25f));
         g.fillRoundedRectangle (bBox.toFloat(), 3.0f);
         g.setColour (badgeC);
-        g.setFont (juce::Font (10.0f, juce::Font::bold));
+        g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::bold)));
         g.drawText (badge, bBox, juce::Justification::centred);
 
         g.setColour (isSelected ? juce::Colours::white : juce::Colours::lightgrey);
-        g.setFont (juce::Font (12.0f, juce::Font::bold));
+        g.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
         g.drawText (trackName, 24, 0, getWidth() - 58, getHeight(), juce::Justification::centredLeft);
 
         if (hasInstrument)
@@ -160,7 +160,7 @@ public:
             g.setColour (instrumentName == "Oscillator" ? juce::Colour (0xff1a4a7a) : juce::Colour (0xff226644));
             g.fillRoundedRectangle (tag, 3.0f);
             g.setColour (juce::Colours::white);
-            g.setFont (juce::Font (8.5f, juce::Font::bold));
+            g.setFont (juce::Font (juce::FontOptions (8.5f, juce::Font::bold)));
             juce::String shortName = instrumentName == "Oscillator" ? "OSCL" : "SMPLR";
             g.drawText (shortName, tag.toNearestInt(), juce::Justification::centred);
         }
@@ -250,6 +250,7 @@ public:
         volFader.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 50, 16);
         volFader.setRange (0.0, 1.0);
         volFader.setValue (1.0);
+        volFader.setDoubleClickReturnValue (true, 1.0);
         volFader.onValueChange = [this] {
             if (onVolumeChanged) onVolumeChanged ((float) volFader.getValue());
         };
@@ -257,6 +258,7 @@ public:
 
         sendAKnob.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
         sendAKnob.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+        sendAKnob.setDoubleClickReturnValue (true, 0.0);
         addAndMakeVisible (sendAKnob);
 
         // ── Mute button ───────────────────────────────────────────────────────
@@ -321,7 +323,7 @@ public:
         g.setColour (isSelected ? juce::Colour (0xff555577) : juce::Colour (0xff252540));
         g.drawRect (getLocalBounds(), isSelected ? 2 : 1);
         g.setColour (juce::Colours::grey);
-        g.setFont (juce::Font (10.0f));
+        g.setFont (juce::Font (juce::FontOptions (10.0f)));
         g.drawText ("Send A", sendAKnob.getX(), sendAKnob.getY() - 14, sendAKnob.getWidth(), 14, juce::Justification::centred);
     }
 
@@ -418,6 +420,7 @@ public:
         volFader.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 50, 16);
         volFader.setRange (0.0, 1.0);
         volFader.setValue (1.0);
+        volFader.setDoubleClickReturnValue (true, 1.0);
         volFader.onValueChange = [this] {
             if (onVolumeChanged) onVolumeChanged ((float) volFader.getValue());
         };
@@ -430,7 +433,7 @@ public:
         g.setColour (juce::Colour (0xff252540));
         g.drawRect (getLocalBounds(), 1);
         g.setColour (juce::Colours::lightgrey);
-        g.setFont (juce::Font (11.0f, juce::Font::bold));
+        g.setFont (juce::Font (juce::FontOptions (11.0f, juce::Font::bold)));
         g.drawText (trackName, 0, 0, getWidth(), SV_HEADER_H, juce::Justification::centred);
     }
 
@@ -585,11 +588,11 @@ public:
         g.strokePath (dashed, juce::PathStrokeType (1.3f));
 
         // + icon
-        g.setFont (juce::Font (22.0f));
+        g.setFont (juce::Font (juce::FontOptions (22.0f)));
         g.setColour (isDragOver ? juce::Colour (0xff55dd99) : juce::Colour (0xff2e2e5a));
         g.drawText ("+", dzX, dzH / 2 - 20, SV_TRACK_W, 28, juce::Justification::centred);
 
-        g.setFont (juce::Font (10.0f));
+        g.setFont (juce::Font (juce::FontOptions (10.0f)));
         g.setColour (juce::Colour (0xff2e2e5a));
         g.drawText ("Drop instrument", dzX, dzH / 2 + 10, SV_TRACK_W, 20, juce::Justification::centred);
     }
@@ -727,7 +730,7 @@ public:
 
         // SCENE label above the launch buttons
         g.setColour (juce::Colour (0xff445544));
-        g.setFont (juce::Font (9.0f, juce::Font::bold));
+        g.setFont (juce::Font (juce::FontOptions (9.0f, juce::Font::bold)));
         g.drawText ("SCENE", getWidth() - SV_SCENE_W, 0, SV_SCENE_W, SV_HEADER_H, juce::Justification::centred);
 
         // Header separator

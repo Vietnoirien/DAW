@@ -20,6 +20,7 @@ public:
             sl.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 50, 20);
             sl.setRange(min, max);
             sl.setValue(val);
+            sl.setDoubleClickReturnValue(true, val);
             sl.onValueChange = [this, &sl, name]() {
                 if (selectedPad >= 0 && selectedPad < 16) {
                     if (name == "Gain") processor->settings[selectedPad].gain.store(sl.getValue());
@@ -58,18 +59,26 @@ public:
             padButtons[i]->setColour(juce::TextButton::buttonColourId, (i == selectedPad) ? juce::Colours::orange : juce::Colours::darkgrey);
         }
 
-        // Params Area
-        auto topArea = bounds.removeFromTop(bounds.getHeight() / 2);
-        auto knobArea = topArea.removeFromRight(150);
-        int kw = knobArea.getWidth() / 2;
-        int kh = knobArea.getHeight() / 2;
-        gainKnob.setBounds(knobArea.getX(), knobArea.getY(), kw, kh);
-        panKnob.setBounds(knobArea.getX() + kw, knobArea.getY(), kw, kh);
-        pitchKnob.setBounds(knobArea.getX(), knobArea.getY() + kh, kw, kh);
-        decayKnob.setBounds(knobArea.getX() + kw, knobArea.getY() + kh, kw, kh);
+        // Params Area - Take full height on the right side
+        auto knobArea = bounds.removeFromRight(150);
 
-        // Waveform Area
+        // Waveform Area - Take top half of the remaining center space
+        auto topArea = bounds.removeFromTop(bounds.getHeight() / 2);
         waveformBounds = topArea.reduced(5);
+
+        // Revert knob size to original (half the height of the top area)
+        int kw = knobArea.getWidth() / 2;
+        int kh = topArea.getHeight() / 2; 
+        constexpr int labelH = 16;
+        
+        int startX = knobArea.getX();
+        int startY = knobArea.getY() + 10;
+
+        // Position knobs with extra vertical space for labels
+        gainKnob.setBounds  (startX,      startY + labelH, kw, kh);
+        panKnob.setBounds   (startX + kw, startY + labelH, kw, kh);
+        pitchKnob.setBounds (startX,      startY + kh + labelH * 2 + 5, kw, kh);
+        decayKnob.setBounds (startX + kw, startY + kh + labelH * 2 + 5, kw, kh);
     }
 
     void paint(juce::Graphics& g) override {
@@ -85,6 +94,20 @@ public:
         } else {
             g.drawText("No Sample", waveformBounds, juce::Justification::centred);
         }
+
+        // Draw knob labels (in the 16px strip above each knob)
+        g.setFont(juce::Font(juce::FontOptions(9.5f, juce::Font::bold)));
+        g.setColour(juce::Colour(0xffaaaaaa));
+        auto drawKnobLabel = [&](const juce::Slider& knob, const juce::String& label) {
+            auto b = knob.getBounds();
+            // Draw 16px above the knob's top edge
+            g.drawText(label, b.getX(), b.getY() - 16, b.getWidth(), 14,
+                       juce::Justification::centred, false);
+        };
+        drawKnobLabel(gainKnob,  "GAIN");
+        drawKnobLabel(panKnob,   "PAN");
+        drawKnobLabel(pitchKnob, "PITCH");
+        drawKnobLabel(decayKnob, "DECAY");
     }
 
     void timerCallback() override {

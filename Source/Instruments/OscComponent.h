@@ -104,6 +104,7 @@ private:
         s.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
         s.setRange(min, max, inc);
         s.setValue(val, juce::dontSendNotification);
+        s.setDoubleClickReturnValue(true, val);
     }
 
     juce::String oscName;
@@ -134,6 +135,7 @@ public:
             s.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
             s.setRange(min, max);
             s.setValue(v, juce::dontSendNotification);
+            s.setDoubleClickReturnValue(true, v);
         };
         
         setup(cutoffKnob, params.cutoff.load(), 20.0, 20000.0);
@@ -186,6 +188,7 @@ public:
             s.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
             s.setRange(min, max);
             s.setValue(v, juce::dontSendNotification);
+            s.setDoubleClickReturnValue(true, v);
         };
         setup(attKnob, params.attack.load(), 0.001, 5.0);
         setup(decKnob, params.decay.load(), 0.001, 5.0);
