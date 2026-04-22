@@ -117,6 +117,11 @@ public:
         addTile ("Delay", "    Delay", juce::Colour (0xff7a7a1a));
         addTile ("Chorus", "    Chorus", juce::Colour (0xff4a7a1a));
         addTile ("Filter", "    Filter", juce::Colour (0xff4a1a7a));
+        addTile ("Compressor", "  Compressor", juce::Colour (0xffaa4422));
+        addTile ("Limiter", "    Limiter", juce::Colour (0xffdd3322));
+        addTile ("Phaser", "    Phaser", juce::Colour (0xff22aa77));
+        addTile ("Saturation", "  Saturation", juce::Colour (0xffcc7722));
+        addTile ("ParametricEQ", " Parametric EQ", juce::Colour (0xff443399));
     }
 
     void resized() override

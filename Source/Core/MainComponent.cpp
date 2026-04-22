@@ -851,8 +851,6 @@ void MainComponent::timerCallback()
             peakTrackRms = std::max(peakTrackRms, audioTracks[t].rmsLevel.load(std::memory_order_relaxed));
         applyDecay(audioLevelDisplay, peakTrackRms);
     }
-    applyDecay(returnLevelDisplay, returnTrackA.rmsLevel.load(std::memory_order_relaxed));
-    applyDecay(masterLevelDisplay, masterTrack.rmsLevel.load(std::memory_order_relaxed));
 
     // ── GC: Pattern pool ──────────────────────────────────────────────────────
     auto gcTrack = [&](Track& t) {
@@ -913,6 +911,31 @@ void MainComponent::timerCallback()
         if (t == selectedTrackIndex) {
             patternEditor.setPlayheadPhase(phase);
         }
+    }
+
+    // ── Push RMS + gain into mixer strip columns (message thread, no lock) ───
+    for (int t = 0; t < nTracks; ++t)
+    {
+        if (juce::isPositiveAndBelow (t, sessionView.gridContent.columns.size()))
+        {
+            auto* col = sessionView.gridContent.columns[t];
+            float newRms  = audioTracks[t].rmsLevel.load (std::memory_order_relaxed);
+            float newGain = audioTracks[t].gain.load     (std::memory_order_relaxed);
+            col->rmsLevel  = (newRms > col->rmsLevel) ? newRms
+                                                       : col->rmsLevel * 0.75f + newRms * 0.25f;
+            col->gainValue = newGain;
+            col->repaintMixerStrip();
+        }
+    }
+
+    // ── Push RMS into Return A and Master faders ──────────────────────────────
+    {
+        float retRaw    = returnTrackA.rmsLevel.load (std::memory_order_relaxed);
+        float masterRaw = masterTrack.rmsLevel.load  (std::memory_order_relaxed);
+        applyDecay (returnLevelDisplay, retRaw);
+        applyDecay (masterLevelDisplay, masterRaw);
+        sessionView.setReturnRmsLevel (returnLevelDisplay);
+        sessionView.setMasterRmsLevel (masterLevelDisplay);
     }
 
     // ── Diagnostics: underrun counter ─────────────────────────────────────────
@@ -1146,6 +1169,13 @@ void MainComponent::syncUIToProject()
                     audioTracks[tIdx].gain.store(gain);
                     
                     sessionView.addTrack(TrackType::Audio, name);
+
+                    // Restore fader position & gain overlay to match saved value
+                    if (juce::isPositiveAndBelow (tIdx, sessionView.gridContent.columns.size()))
+                    {
+                        sessionView.gridContent.columns[tIdx]->volFader.setValue (gain, juce::dontSendNotification);
+                        sessionView.gridContent.columns[tIdx]->gainValue = gain;
+                    }
                     
                     juce::String instrumentType = trackNode.getProperty("instrument_type", "");
                     trackInstruments[tIdx] = instrumentType;
@@ -1579,7 +1609,35 @@ void MainComponent::showDeviceEditorForTrack(int trackIdx) {
     // Add Effect Editors
     for (int i = 0; i < Track::MAX_EFFECTS; ++i) {
         if (auto* effect = track->effectChain[i].load(std::memory_order_acquire)) {
-            deviceView.addEditor(effect->createEditor());
+            class EffectWrapper : public juce::Component {
+            public:
+                std::function<void()> onRemove;
+                std::unique_ptr<juce::Component> content;
+                juce::TextButton removeBtn{"X"};
+
+                EffectWrapper(std::unique_ptr<juce::Component> ed) : content(std::move(ed)) {
+                    addAndMakeVisible(content.get());
+                    addAndMakeVisible(removeBtn);
+                    removeBtn.setColour(juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
+                    removeBtn.setColour(juce::TextButton::textColourOffId, juce::Colours::grey);
+                    removeBtn.onClick = [this] { if (onRemove) onRemove(); };
+                    setSize(content->getWidth(), content->getHeight());
+                }
+
+                void resized() override {
+                    content->setBounds(getLocalBounds());
+                    removeBtn.setBounds(getWidth() - 20, 2, 16, 16);
+                }
+            };
+            
+            auto wrapper = std::make_unique<EffectWrapper>(effect->createEditor());
+            wrapper->onRemove = [this, track, i, trackIdx]() {
+                if (auto* old = track->effectChain[i].exchange(nullptr, std::memory_order_acq_rel)) {
+                    track->effectGarbageQueue.push(old);
+                }
+                showDeviceEditorForTrack(trackIdx);
+            };
+            deviceView.addEditor(std::move(wrapper));
         }
     }
 }

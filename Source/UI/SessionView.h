@@ -6,7 +6,7 @@
 // ─── Layout Constants ─────────────────────────────────────────────────────────
 static constexpr int SV_HEADER_H  = 36;
 static constexpr int SV_SLOT_H    = 36;
-static constexpr int SV_MIXER_H   = 160;
+static constexpr int SV_MIXER_H   = 220;
 static constexpr int SV_SCENE_W   = 52;
 static constexpr int SV_RETURN_W  = 80;
 static constexpr int SV_MASTER_W  = 80;
@@ -223,6 +223,9 @@ public:
     juce::TextButton soloBtn  { "S" };
     bool isMuted  = false;
     bool isSoloed = false;
+    // Visual data updated from timerCallback on the message thread (no locking needed)
+    float rmsLevel  = 0.0f;  // 0..1 VU meter display
+    float gainValue = 1.0f;  // mirrors track gain for fader tint
 
     std::function<void(int scene)> onCreateClipAt;
     std::function<void(int scene)> onSelectClipAt;
@@ -322,8 +325,14 @@ public:
         btnRow.removeFromLeft (2);
         soloBtn.setBounds (btnRow);
 
-        mix.removeFromTop (4); // gap
-        sendAKnob.setBounds (mix.removeFromTop (36).withSizeKeepingCentre (30, 30));
+        mix.removeFromTop (4); // gap between buttons and send label
+
+        // "Send A" label row (so it never overlaps M/S buttons)
+        mix.removeFromTop (14); // label area — painted manually in paint()
+
+        // Larger send knob
+        sendAKnob.setBounds (mix.removeFromTop (52).withSizeKeepingCentre (44, 44));
+        mix.removeFromTop (2); // small gap before fader
         volFader.setBounds (mix);
         for (int s = 0; s < slots.size(); ++s)
             slots[s]->setBounds (b.removeFromTop (SV_SLOT_H).reduced (2));
@@ -334,9 +343,72 @@ public:
         g.fillAll (isSelected ? juce::Colour (0xff1a1a2a) : juce::Colour (0xff111120));
         g.setColour (isSelected ? juce::Colour (0xff555577) : juce::Colour (0xff252540));
         g.drawRect (getLocalBounds(), isSelected ? 2 : 1);
-        g.setColour (juce::Colours::grey);
-        g.setFont (juce::Font (juce::FontOptions (10.0f)));
-        g.drawText ("Send A", sendAKnob.getX(), sendAKnob.getY() - 14, sendAKnob.getWidth(), 14, juce::Justification::centred);
+
+        // ── "Send A" label — sits between M/S buttons and the knob ──────────
+        g.setColour (juce::Colour (0xff8888aa));
+        g.setFont (juce::Font (juce::FontOptions (9.5f, juce::Font::bold)));
+        int labelY = getHeight() - SV_MIXER_H + 4 + 22 + 4;
+        g.drawText ("SEND A", 0, labelY, getWidth(), 14, juce::Justification::centred);
+    }
+
+    // paintOverChildren() is called AFTER child components are rendered,
+    // so the gain tint and RMS meter appear on top of the volFader slider.
+    void paintOverChildren (juce::Graphics& g) override
+    {
+        auto fb = volFader.getBounds();
+
+        // The slider component includes a 16px TextBoxBelow — the actual
+        // fader track lives in the region above it.
+        static constexpr int kTextBoxH = 16;
+        const int   trackTop    = fb.getY();
+        const int   trackBottom = fb.getBottom() - kTextBoxH;
+        const float trackH      = (float)(trackBottom - trackTop);
+        if (trackH < 4.0f) return;
+
+        // ── Gain tint: warm amber bar from thumb down to fader track bottom ───
+        if (gainValue > 0.01f)
+        {
+            float gainNorm = juce::jlimit (0.0f, 1.0f, gainValue);
+            float thumbY   = trackTop + trackH * (1.0f - gainNorm);
+            juce::Rectangle<float> gainBar (
+                (float) fb.getCentreX() - 2.0f,
+                thumbY,
+                4.0f,
+                (float) trackBottom - thumbY);
+            juce::ColourGradient grad (
+                juce::Colour (0xffcc8833).withAlpha (0.45f), gainBar.getX(), gainBar.getY(),
+                juce::Colour (0xff995500).withAlpha (0.10f), gainBar.getX(), gainBar.getBottom(),
+                false);
+            g.setGradientFill (grad);
+            g.fillRoundedRectangle (gainBar, 2.0f);
+        }
+
+        // ── RMS level meter: bar centered on the fader rail ──────────────────
+        if (rmsLevel > 0.002f)
+        {
+            float lvl    = juce::jlimit (0.0f, 1.0f, rmsLevel);
+            float meterH = trackH * lvl;
+            float mw     = 5.0f;
+            // Centre on the fader rail (same axis as the gain tint)
+            float mx     = (float) fb.getCentreX() - mw * 0.5f;
+            float my     = (float) trackBottom - meterH;
+            juce::Colour meterCol = lvl > 0.85f ? juce::Colour (0xffff4444)
+                                  : lvl > 0.65f ? juce::Colour (0xffddcc00)
+                                                : juce::Colour (0xff22dd77);
+            juce::ColourGradient mGrad (
+                meterCol.withAlpha (0.90f), mx, my,
+                meterCol.withAlpha (0.30f), mx, (float) trackBottom,
+                false);
+            g.setGradientFill (mGrad);
+            g.fillRoundedRectangle (mx, my, mw, meterH, 2.0f);
+        }
+    }
+
+    // Repaint only the mixer strip at the bottom — avoids redrawing all clip
+    // slots on every timer tick (called from MainComponent::timerCallback).
+    void repaintMixerStrip()
+    {
+        repaint (0, getHeight() - SV_MIXER_H, getWidth(), SV_MIXER_H);
     }
 
     void mouseDown (const juce::MouseEvent& e) override
@@ -424,8 +496,9 @@ class FixedTrackColumn : public juce::Component
 public:
     juce::String trackName;
     juce::Slider volFader;
-    bool isSelected = false;
-    std::function<void(float)> onVolumeChanged; // called with linear 0..1 gain
+    bool  isSelected = false;
+    float rmsLevel   = 0.0f; // updated from timerCallback — message thread only
+    std::function<void(float)> onVolumeChanged;
 
     explicit FixedTrackColumn (const juce::String& name) : trackName (name)
     {
@@ -448,6 +521,42 @@ public:
         g.setColour (isSelected ? juce::Colours::white : juce::Colours::lightgrey);
         g.setFont (juce::Font (juce::FontOptions (11.0f, juce::Font::bold)));
         g.drawText (trackName, 0, 0, getWidth(), SV_HEADER_H, juce::Justification::centred);
+    }
+
+    // RMS level meter drawn on top of the fader child component
+    void paintOverChildren (juce::Graphics& g) override
+    {
+        if (rmsLevel <= 0.002f) return;
+
+        auto fb = volFader.getBounds();
+        static constexpr int kTextBoxH = 16;
+        const int   trackTop    = fb.getY();
+        const int   trackBottom = fb.getBottom() - kTextBoxH;
+        const float trackH      = (float)(trackBottom - trackTop);
+        if (trackH < 4.0f) return;
+
+        float lvl    = juce::jlimit (0.0f, 1.0f, rmsLevel);
+        float meterH = trackH * lvl;
+        float mw     = 5.0f;
+        float mx     = (float) fb.getCentreX() - mw * 0.5f;
+        float my     = (float) trackBottom - meterH;
+
+        juce::Colour meterCol = lvl > 0.85f ? juce::Colour (0xffff4444)
+                              : lvl > 0.65f ? juce::Colour (0xffddcc00)
+                                            : juce::Colour (0xff22dd77);
+        juce::ColourGradient mGrad (
+            meterCol.withAlpha (0.90f), mx, my,
+            meterCol.withAlpha (0.30f), mx, (float) trackBottom,
+            false);
+        g.setGradientFill (mGrad);
+        g.fillRoundedRectangle (mx, my, mw, meterH, 2.0f);
+    }
+
+    void repaintMixerStrip()
+    {
+        // Repaint only the fader area — header and scenes don't change on ticks
+        int faderTop = SV_HEADER_H + NUM_SCENES * SV_SLOT_H;
+        repaint (0, faderTop, getWidth(), getHeight() - faderTop);
     }
 
     std::function<void()> onSelectTrack;
@@ -747,6 +856,18 @@ public:
         for (auto* b : sceneButtons) { b->isActive = false; b->repaint(); }
         if (active && juce::isPositiveAndBelow (scene, sceneButtons.size()))
             { sceneButtons[scene]->isActive = true; sceneButtons[scene]->repaint(); }
+    }
+
+    void setReturnRmsLevel (float lvl)
+    {
+        returnColumn->rmsLevel = lvl;
+        returnColumn->repaintMixerStrip();
+    }
+
+    void setMasterRmsLevel (float lvl)
+    {
+        masterColumn->rmsLevel = lvl;
+        masterColumn->repaintMixerStrip();
     }
 
     // ── Layout ────────────────────────────────────────────────────────────────
