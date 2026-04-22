@@ -703,6 +703,32 @@ MainComponent::MainComponent()
             audioTracks[t].soloed.store(soloed, std::memory_order_relaxed);
     };
 
+    // ── Rename / Color callbacks ──────────────────────────────────────────────
+    sessionView.onRenameClip = [this](int t, int s, const juce::String& name) {
+        if (juce::isPositiveAndBelow(t, MAX_TRACKS) && juce::isPositiveAndBelow(s, NUM_SCENES)) {
+            clipGrid[t][s].name = name;
+            sessionView.setClipData(t, s, clipGrid[t][s]);
+        }
+    };
+
+    sessionView.onSetClipColour = [this](int t, int s, juce::Colour c) {
+        if (juce::isPositiveAndBelow(t, MAX_TRACKS) && juce::isPositiveAndBelow(s, NUM_SCENES)) {
+            clipGrid[t][s].colour = c;
+            sessionView.setClipData(t, s, clipGrid[t][s]);
+        }
+    };
+
+    sessionView.onRenameTrack = [this](int t, const juce::String& name) {
+        // The TrackHeader already updated its own trackName and repainted;
+        // nothing else to do at runtime (persistence happens on Save).
+        juce::ignoreUnused(t, name);
+    };
+
+    sessionView.onSetTrackColour = [this](int t, juce::Colour c) {
+        // The TrackHeader already updated its own trackColour and repainted.
+        juce::ignoreUnused(t, c);
+    };
+
     // ── Audio Device ──────────────────────────────────────────────────
     // Load device settings is deferred to finishInitialisation() after Workspace is selected.
 
@@ -1167,7 +1193,13 @@ void MainComponent::syncUIToProject()
                     juce::String name = trackNode.getProperty("name", "Track " + juce::String(tIdx + 1));
                     float gain = trackNode.getProperty("gain", 1.0f);
                     audioTracks[tIdx].gain.store(gain);
-                    
+
+                    // Restore track colour
+                    auto argbProp = trackNode.getProperty("colour");
+                    juce::Colour tcol = argbProp.isVoid()
+                        ? juce::Colour (0xff2d89ef)
+                        : juce::Colour ((juce::uint32)(juce::int64)argbProp);
+
                     sessionView.addTrack(TrackType::Audio, name);
 
                     // Restore fader position & gain overlay to match saved value
@@ -1175,6 +1207,8 @@ void MainComponent::syncUIToProject()
                     {
                         sessionView.gridContent.columns[tIdx]->volFader.setValue (gain, juce::dontSendNotification);
                         sessionView.gridContent.columns[tIdx]->gainValue = gain;
+                        sessionView.gridContent.columns[tIdx]->header.trackColour = tcol;
+                        sessionView.gridContent.columns[tIdx]->header.repaint();
                     }
                     
                     juce::String instrumentType = trackNode.getProperty("instrument_type", "");
@@ -1254,10 +1288,15 @@ void MainComponent::syncUIToProject()
                                 int sIdx = clipNode.getProperty("scene", -1);
                                 if (sIdx >= 0 && sIdx < NUM_SCENES) {
                                     ClipData d;
-                                    d.hasClip = clipNode.getProperty("hasClip", false);
+                                    d.hasClip  = clipNode.getProperty("hasClip", false);
                                     d.isPlaying = false;
-                                    d.name = clipNode.getProperty("name", "Pattern " + juce::String(sIdx + 1));
-                                    d.euclideanSteps = clipNode.getProperty("euclideanSteps", 16);
+                                    d.name     = clipNode.getProperty("name", "Pattern " + juce::String(sIdx + 1));
+                                    // Restore clip colour
+                                    auto clipArgbProp = clipNode.getProperty("colour");
+                                    d.colour = clipArgbProp.isVoid()
+                                        ? juce::Colour (0xff2d89ef)
+                                        : juce::Colour ((juce::uint32)(juce::int64)clipArgbProp);
+                                    d.euclideanSteps  = clipNode.getProperty("euclideanSteps",  16);
                                     d.euclideanPulses = clipNode.getProperty("euclideanPulses", 4);
                                     // Restore custom hitMap from hex string if present.
                                     juce::String hex = clipNode.getProperty("hitMap", "");
@@ -1370,10 +1409,13 @@ void MainComponent::syncProjectToUI()
         trackNode.setProperty("index", t, nullptr);
         
         juce::String name = "Track " + juce::String(t + 1);
+        juce::Colour  tcol (0xff2d89ef);
         if (t < sessionView.gridContent.columns.size()) {
             name = sessionView.gridContent.columns[t]->header.trackName;
+            tcol = sessionView.gridContent.columns[t]->header.trackColour;
         }
-        trackNode.setProperty("name", name, nullptr);
+        trackNode.setProperty("name",   name,                  nullptr);
+        trackNode.setProperty("colour", (juce::int64)tcol.getARGB(), nullptr);
         trackNode.setProperty("gain", audioTracks[t].gain.load(std::memory_order_relaxed), nullptr);
 
         trackNode.setProperty("instrument_type", trackInstruments[t], nullptr);
@@ -1398,10 +1440,11 @@ void MainComponent::syncProjectToUI()
             auto& clip = clipGrid[t][s];
             if (clip.hasClip) {
                 juce::ValueTree clipNode("Clip");
-                clipNode.setProperty("scene", s, nullptr);
-                clipNode.setProperty("hasClip", true, nullptr);
-                clipNode.setProperty("name", clip.name, nullptr);
-                clipNode.setProperty("euclideanSteps", clip.euclideanSteps, nullptr);
+                clipNode.setProperty("scene",          s,          nullptr);
+                clipNode.setProperty("hasClip",         true,       nullptr);
+                clipNode.setProperty("name",            clip.name,  nullptr);
+                clipNode.setProperty("colour", (juce::int64)clip.colour.getARGB(), nullptr);
+                clipNode.setProperty("euclideanSteps",  clip.euclideanSteps,  nullptr);
                 clipNode.setProperty("euclideanPulses", clip.euclideanPulses, nullptr);
                 // Serialize hitMap as a hex string so custom patterns survive save/load.
                 if (!clip.hitMap.empty()) {

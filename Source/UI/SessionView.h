@@ -28,6 +28,8 @@ public:
     std::function<void()> onCreateClip;
     std::function<void()> onSelectClip;
     std::function<void()> onDeleteClip;
+    std::function<void(const juce::String&)> onRenameClip;
+    std::function<void(juce::Colour)>        onSetClipColour;
 
     void paint (juce::Graphics& g) override
     {
@@ -95,6 +97,40 @@ public:
 
     std::function<void()> onLaunchClip;
 
+    // ── Colour palette shared across all clip / track menus ──────────────────
+    static void addColourSubmenu (juce::PopupMenu& parent,
+                                  std::function<void(juce::Colour)> cb)
+    {
+        struct Swatch { const char* name; juce::uint32 argb; };
+        static constexpr Swatch palette[] = {
+            { "Blue",   0xff2d89ef }, { "Purple", 0xff7b68ee },
+            { "Teal",   0xff1abc9c }, { "Green",  0xff2ecc71 },
+            { "Amber",  0xfff39c12 }, { "Red",    0xffe74c3c },
+            { "Pink",   0xffe91e90 }, { "Slate",  0xff607d8b },
+        };
+        juce::PopupMenu sub;
+        for (int i = 0; i < 8; ++i)
+        {
+            juce::Colour c (palette[i].argb);
+            sub.addColouredItem (200 + i, palette[i].name, c);
+        }
+        parent.addSubMenu ("Set Color", sub);
+    }
+
+    static juce::Colour colourFromMenuResult (int result)
+    {
+        struct Swatch { const char* name; juce::uint32 argb; };
+        static constexpr Swatch palette[] = {
+            { "Blue",   0xff2d89ef }, { "Purple", 0xff7b68ee },
+            { "Teal",   0xff1abc9c }, { "Green",  0xff2ecc71 },
+            { "Amber",  0xfff39c12 }, { "Red",    0xffe74c3c },
+            { "Pink",   0xffe91e90 }, { "Slate",  0xff607d8b },
+        };
+        int idx = result - 200;
+        if (idx >= 0 && idx < 8) return juce::Colour (palette[idx].argb);
+        return juce::Colours::transparentBlack;
+    }
+
     void mouseDown (const juce::MouseEvent& e) override
     {
         if (e.mods.isPopupMenu())
@@ -102,18 +138,40 @@ public:
             if (data.hasClip)
             {
                 juce::PopupMenu m;
-                m.addItem (1, "Delete Pattern");
+                m.addItem (1, "Rename Pattern");
+                m.addItem (2, "Delete Pattern");
+                addColourSubmenu (m, onSetClipColour);
                 m.showMenuAsync (juce::PopupMenu::Options(), [this](int result) {
-                    if (result == 1 && onDeleteClip) onDeleteClip();
+                    if (result == 1)
+                    {
+                        auto* box = new juce::AlertWindow ("Rename Pattern", "Enter new name:", juce::AlertWindow::NoIcon);
+                        box->addTextEditor ("name", data.name);
+                        box->addButton ("OK",     1, juce::KeyPress (juce::KeyPress::returnKey));
+                        box->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+                        box->enterModalState (true, juce::ModalCallbackFunction::create ([this, box](int r) {
+                            if (r == 1)
+                            {
+                                juce::String n = box->getTextEditorContents ("name").trim();
+                                if (n.isNotEmpty() && onRenameClip) onRenameClip (n);
+                            }
+                            delete box;
+                        }), true);
+                    }
+                    else if (result == 2 && onDeleteClip) onDeleteClip();
+                    else if (result >= 200)
+                    {
+                        juce::Colour c = colourFromMenuResult (result);
+                        if (!c.isTransparent() && onSetClipColour) onSetClipColour (c);
+                    }
                 });
             }
             return;
         }
 
-        if (!data.hasClip) { 
-            if (onCreateClip) onCreateClip(); 
+        if (!data.hasClip) {
+            if (onCreateClip) onCreateClip();
         }
-        else { 
+        else {
             if (e.x < 24) {
                 if (onLaunchClip) onLaunchClip();
             } else {
@@ -130,14 +188,23 @@ class TrackHeader : public juce::Component
 {
 public:
     juce::String trackName;
+    juce::Colour trackColour   { juce::Colour (0xff2d89ef) };
     TrackType    trackType     = TrackType::Audio;
     bool         hasInstrument = false;
     juce::String instrumentName;
     bool         isSelected    = false;
 
+    std::function<void(const juce::String&)> onRenameTrack;
+    std::function<void(juce::Colour)>        onSetTrackColour;
+
     void paint (juce::Graphics& g) override
     {
         g.fillAll (isSelected ? juce::Colour (0xff2a2a40) : juce::Colour (0xff1e1e30));
+
+        // ── Left-edge colour stripe ───────────────────────────────────────────
+        g.setColour (trackColour);
+        g.fillRect (0, 0, 4, getHeight());
+
         g.setColour (juce::Colour (0xff353550));
         g.drawLine (0, (float)getHeight(), (float)getWidth(), (float)getHeight(), 1.0f);
 
@@ -182,14 +249,67 @@ public:
         if (e.mods.isPopupMenu())
         {
             juce::PopupMenu m;
-            m.addItem (1, "Delete Track");
+            m.addItem (1, "Rename Track");
+            m.addItem (2, "Delete Track");
+            ClipSlot::addColourSubmenu (m, onSetTrackColour);
             m.showMenuAsync (juce::PopupMenu::Options(), [this](int result) {
-                if (result == 1 && onDeleteTrack) onDeleteTrack();
+                if (result == 1)
+                {
+                    auto* box = new juce::AlertWindow ("Rename Track", "Enter new name:", juce::AlertWindow::NoIcon);
+                    box->addTextEditor ("name", trackName);
+                    box->addButton ("OK",     1, juce::KeyPress (juce::KeyPress::returnKey));
+                    box->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+                    box->enterModalState (true, juce::ModalCallbackFunction::create ([this, box](int r) {
+                        if (r == 1)
+                        {
+                            juce::String n = box->getTextEditorContents ("name").trim();
+                            if (n.isNotEmpty())
+                            {
+                                trackName = n;
+                                repaint();
+                                if (onRenameTrack) onRenameTrack (n);
+                            }
+                        }
+                        delete box;
+                    }), true);
+                }
+                else if (result == 2 && onDeleteTrack) onDeleteTrack();
+                else if (result >= 200)
+                {
+                    juce::Colour c = ClipSlot::colourFromMenuResult (result);
+                    if (!c.isTransparent())
+                    {
+                        trackColour = c;
+                        repaint();
+                        if (onSetTrackColour) onSetTrackColour (c);
+                    }
+                }
             });
             return;
         }
 
         if (onSelectTrack) onSelectTrack();
+    }
+
+    void mouseDoubleClick (const juce::MouseEvent&) override
+    {
+        auto* box = new juce::AlertWindow ("Rename Track", "Enter new name:", juce::AlertWindow::NoIcon);
+        box->addTextEditor ("name", trackName);
+        box->addButton ("OK",     1, juce::KeyPress (juce::KeyPress::returnKey));
+        box->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+        box->enterModalState (true, juce::ModalCallbackFunction::create ([this, box](int r) {
+            if (r == 1)
+            {
+                juce::String n = box->getTextEditorContents ("name").trim();
+                if (n.isNotEmpty())
+                {
+                    trackName = n;
+                    repaint();
+                    if (onRenameTrack) onRenameTrack (n);
+                }
+            }
+            delete box;
+        }), true);
     }
 };
 
@@ -237,6 +357,10 @@ public:
     std::function<void(float)>     onSendChanged;
     std::function<void(bool)>      onMuteChanged;
     std::function<void(bool)>      onSoloChanged;
+    std::function<void(int scene, const juce::String&)> onRenameClipAt;
+    std::function<void(int scene, juce::Colour)>        onSetClipColourAt;
+    std::function<void(const juce::String&)>            onRenameTrack;
+    std::function<void(juce::Colour)>                   onSetTrackColour;
 
     TrackColumn (int index, const juce::String& name, TrackType type)
         : trackIndex (index)
@@ -250,10 +374,12 @@ public:
             auto* slot        = new ClipSlot();
             slot->trackIndex  = index;
             slot->sceneIndex  = s;
-            slot->onCreateClip = [this, s] { if (onCreateClipAt) onCreateClipAt (s); };
-            slot->onSelectClip = [this, s] { if (onSelectClipAt) onSelectClipAt (s); };
-            slot->onLaunchClip = [this, s] { if (onLaunchClipAt) onLaunchClipAt (s); };
-            slot->onDeleteClip = [this, s] { if (onDeleteClipAt) onDeleteClipAt (s); };
+            slot->onCreateClip    = [this, s] { if (onCreateClipAt)    onCreateClipAt (s); };
+            slot->onSelectClip    = [this, s] { if (onSelectClipAt)    onSelectClipAt (s); };
+            slot->onLaunchClip    = [this, s] { if (onLaunchClipAt)    onLaunchClipAt (s); };
+            slot->onDeleteClip    = [this, s] { if (onDeleteClipAt)    onDeleteClipAt (s); };
+            slot->onRenameClip    = [this, s] (const juce::String& n) { if (onRenameClipAt)    onRenameClipAt    (s, n); };
+            slot->onSetClipColour = [this, s] (juce::Colour c)         { if (onSetClipColourAt) onSetClipColourAt (s, c); };
             addAndMakeVisible (slot);
             slots.add (slot);
         }
@@ -595,6 +721,10 @@ public:
     std::function<void(int trackIndex, float level)>                   onTrackSendChanged;
     std::function<void(int trackIndex, bool muted)>                    onTrackMuteChanged;
     std::function<void(int trackIndex, bool soloed)>                   onTrackSoloChanged;
+    std::function<void(int track, int scene, const juce::String&)>     onRenameClip;
+    std::function<void(int track, int scene, juce::Colour)>            onSetClipColour;
+    std::function<void(int trackIndex, const juce::String&)>           onRenameTrack;
+    std::function<void(int trackIndex, juce::Colour)>                  onSetTrackColour;
 
     // ── Track Management ─────────────────────────────────────────────────────
     int addTrack (TrackType type, const juce::String& name)
@@ -609,10 +739,16 @@ public:
         col->onDeleteTrack  = [this, idx] () { if (onDeleteTrack) onDeleteTrack (idx); };
         col->onVolumeChanged = [this, idx] (float g) { if (onTrackVolumeChanged) onTrackVolumeChanged (idx, g); };
         col->onSendChanged   = [this, idx] (float l) { if (onTrackSendChanged)   onTrackSendChanged   (idx, l); };
-        col->onMuteChanged   = [this, idx] (bool m)  { if (onTrackMuteChanged)   onTrackMuteChanged   (idx, m); };
-        col->onSoloChanged   = [this, idx] (bool s)  { if (onTrackSoloChanged)   onTrackSoloChanged   (idx, s); };
-        col->header.onSelectTrack = col->onSelectTrack;
-        col->header.onDeleteTrack = col->onDeleteTrack;
+        col->onMuteChanged      = [this, idx] (bool m)  { if (onTrackMuteChanged)   onTrackMuteChanged   (idx, m); };
+        col->onSoloChanged      = [this, idx] (bool s)  { if (onTrackSoloChanged)   onTrackSoloChanged   (idx, s); };
+        col->onRenameTrack      = [this, idx] (const juce::String& n) { if (onRenameTrack)    onRenameTrack    (idx, n); };
+        col->onSetTrackColour   = [this, idx] (juce::Colour c)         { if (onSetTrackColour) onSetTrackColour (idx, c); };
+        col->onRenameClipAt     = [this, idx] (int s, const juce::String& n) { if (onRenameClip)    onRenameClip    (idx, s, n); };
+        col->onSetClipColourAt  = [this, idx] (int s, juce::Colour c)         { if (onSetClipColour) onSetClipColour (idx, s, c); };
+        col->header.onSelectTrack  = col->onSelectTrack;
+        col->header.onDeleteTrack  = col->onDeleteTrack;
+        col->header.onRenameTrack  = col->onRenameTrack;
+        col->header.onSetTrackColour = col->onSetTrackColour;
         addAndMakeVisible (col);
         columns.add (col);
         // Explicitly re-layout: setSize() in updateContentSize() may not change the
@@ -666,8 +802,14 @@ public:
                 columns[i]->onDeleteClipAt = [this, i] (int s) { if (onDeleteClip) onDeleteClip (i, s); };
                 columns[i]->onSelectTrack  = [this, i] () { if (onSelectTrack) onSelectTrack (i); };
                 columns[i]->onDeleteTrack  = [this, i] () { if (onDeleteTrack) onDeleteTrack (i); };
-                columns[i]->header.onSelectTrack = columns[i]->onSelectTrack;
-                columns[i]->header.onDeleteTrack = columns[i]->onDeleteTrack;
+                columns[i]->onRenameTrack    = [this, i] (const juce::String& n) { if (onRenameTrack)    onRenameTrack    (i, n); };
+                columns[i]->onSetTrackColour = [this, i] (juce::Colour c)         { if (onSetTrackColour) onSetTrackColour (i, c); };
+                columns[i]->onRenameClipAt    = [this, i] (int s, const juce::String& n) { if (onRenameClip)    onRenameClip    (i, s, n); };
+                columns[i]->onSetClipColourAt = [this, i] (int s, juce::Colour c)         { if (onSetClipColour) onSetClipColour (i, s, c); };
+                columns[i]->header.onSelectTrack  = columns[i]->onSelectTrack;
+                columns[i]->header.onDeleteTrack  = columns[i]->onDeleteTrack;
+                columns[i]->header.onRenameTrack  = columns[i]->onRenameTrack;
+                columns[i]->header.onSetTrackColour = columns[i]->onSetTrackColour;
                 for (auto* sl : columns[i]->slots)
                 {
                     sl->trackIndex = i;
@@ -762,6 +904,10 @@ public:
     std::function<void(float gain)>                 onReturnVolumeChanged;
     std::function<void(int trackIndex, bool muted)>  onTrackMuteChanged;
     std::function<void(int trackIndex, bool soloed)> onTrackSoloChanged;
+    std::function<void(int track, int scene, const juce::String&)> onRenameClip;
+    std::function<void(int track, int scene, juce::Colour)>        onSetClipColour;
+    std::function<void(int trackIndex, const juce::String&)>       onRenameTrack;
+    std::function<void(int trackIndex, juce::Colour)>              onSetTrackColour;
 
     SessionView()
     {
@@ -795,6 +941,22 @@ public:
         gridContent.onTrackSoloChanged = [this] (int t, bool s)
         {
             if (onTrackSoloChanged) onTrackSoloChanged (t, s);
+        };
+        gridContent.onRenameClip = [this] (int t, int s, const juce::String& n)
+        {
+            if (onRenameClip) onRenameClip (t, s, n);
+        };
+        gridContent.onSetClipColour = [this] (int t, int s, juce::Colour c)
+        {
+            if (onSetClipColour) onSetClipColour (t, s, c);
+        };
+        gridContent.onRenameTrack = [this] (int t, const juce::String& n)
+        {
+            if (onRenameTrack) onRenameTrack (t, n);
+        };
+        gridContent.onSetTrackColour = [this] (int t, juce::Colour c)
+        {
+            if (onSetTrackColour) onSetTrackColour (t, c);
         };
 
         // Viewport – horizontal scroll only
