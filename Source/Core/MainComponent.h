@@ -19,6 +19,8 @@
 #include "../Instruments/DrumRackComponent.h"
 #include "Instrument.h"
 #include "InstrumentFactory.h"
+#include "../Effects/EffectProcessor.h"
+#include "../Effects/EffectFactory.h"
 #include "ClipData.h"
 #include "AppAudioBuffer.h"
 #include "ProjectManager.h"
@@ -26,6 +28,7 @@
 struct Track
 {
     std::atomic<float> gain     { 1.0f };
+    std::atomic<float> sendALevel { 0.0f };
     std::atomic<float> rmsLevel { 0.0f };
     std::atomic<bool>  muted    { false };
     std::atomic<bool>  soloed   { false };
@@ -34,6 +37,10 @@ struct Track
     LockFreeQueue<Pattern*, 128>     garbageQueue;
     LockFreeQueue<InstrumentProcessor*, 8> instrumentGarbageQueue;
     std::atomic<InstrumentProcessor*> activeInstrument {nullptr};
+
+    static constexpr int MAX_EFFECTS = 4;
+    std::atomic<EffectProcessor*> effectChain[MAX_EFFECTS] {nullptr};
+    LockFreeQueue<EffectProcessor*, 16> effectGarbageQueue;
 
     Pattern* currentPattern {nullptr};
     Pattern* pendingPattern {nullptr};
@@ -121,6 +128,7 @@ struct Track
 
     void clear() {
         gain.store(1.0f, std::memory_order_relaxed);
+        sendALevel.store(0.0f, std::memory_order_relaxed);
         rmsLevel.store(0.0f, std::memory_order_relaxed);
         muted.store(false, std::memory_order_relaxed);
         soloed.store(false, std::memory_order_relaxed);
@@ -135,11 +143,19 @@ struct Track
             delete old; // Since clear() is usually called safely on the message thread during teardown/move
         }
         while (auto opt = instrumentGarbageQueue.pop()) { delete *opt; }
+
+        for (int i = 0; i < MAX_EFFECTS; ++i) {
+            if (auto* old = effectChain[i].exchange(nullptr, std::memory_order_acq_rel)) {
+                delete old;
+            }
+        }
+        while (auto opt = effectGarbageQueue.pop()) { delete *opt; }
     }
 
     void moveFrom(Track& other) {
         clear();
         gain.store(other.gain.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        sendALevel.store(other.sendALevel.load(std::memory_order_relaxed), std::memory_order_relaxed);
         rmsLevel.store(other.rmsLevel.load(std::memory_order_relaxed), std::memory_order_relaxed);
         muted.store(other.muted.load(std::memory_order_relaxed), std::memory_order_relaxed);
         soloed.store(other.soloed.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -155,6 +171,11 @@ struct Track
         
         activeInstrument.store(other.activeInstrument.exchange(nullptr, std::memory_order_acq_rel), std::memory_order_release);
         while (auto opt = other.instrumentGarbageQueue.pop()) instrumentGarbageQueue.push(*opt);
+
+        for (int i = 0; i < MAX_EFFECTS; ++i) {
+            effectChain[i].store(other.effectChain[i].exchange(nullptr, std::memory_order_acq_rel), std::memory_order_release);
+        }
+        while (auto opt = other.effectGarbageQueue.pop()) effectGarbageQueue.push(*opt);
     }
 };
 

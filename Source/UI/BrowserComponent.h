@@ -40,6 +40,45 @@ private:
     bool         isHovered = false;
 };
 
+// ─── Effect Tile ──────────────────────────────────────────────────────────────
+class EffectTile : public juce::Component
+{
+public:
+    juce::String effectType;
+
+    EffectTile (const juce::String& type, const juce::String& label, juce::Colour c)
+        : effectType (type), displayLabel (label), tileColour (c) {}
+
+    void paint (juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat().reduced (4.0f);
+        g.setColour (isHovered ? tileColour.brighter (0.25f) : tileColour.darker (0.15f));
+        g.fillRoundedRectangle (b, 6.0f);
+
+        g.setColour (juce::Colour (0x40ffffff));
+        g.drawRoundedRectangle (b, 6.0f, 1.0f);
+
+        g.setColour (juce::Colours::white);
+        g.setFont (juce::Font (juce::FontOptions (13.0f, juce::Font::bold)));
+        g.drawText (displayLabel, b.toNearestInt(), juce::Justification::centred);
+    }
+
+    void mouseEnter (const juce::MouseEvent&) override { isHovered = true;  repaint(); }
+    void mouseExit  (const juce::MouseEvent&) override { isHovered = false; repaint(); }
+
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (e.getDistanceFromDragStart() > 6)
+            if (auto* c = juce::DragAndDropContainer::findParentDragContainerFor (this))
+                c->startDragging ("EffectDrag:" + effectType, this);
+    }
+
+private:
+    juce::String displayLabel;
+    juce::Colour tileColour;
+    bool         isHovered = false;
+};
+
 // ─── Instrument Browser Panel ─────────────────────────────────────────────────
 class InstrumentBrowserPanel : public juce::Component
 {
@@ -66,6 +105,35 @@ private:
     }
 
     juce::OwnedArray<InstrumentTile> tiles;
+};
+
+// ─── Effects Browser Panel ────────────────────────────────────────────────────
+class EffectsBrowserPanel : public juce::Component
+{
+public:
+    EffectsBrowserPanel()
+    {
+        addTile ("Reverb", "    Reverb", juce::Colour (0xff7a1a4a));
+        addTile ("Delay", "    Delay", juce::Colour (0xff7a7a1a));
+        addTile ("Chorus", "    Chorus", juce::Colour (0xff4a7a1a));
+        addTile ("Filter", "    Filter", juce::Colour (0xff4a1a7a));
+    }
+
+    void resized() override
+    {
+        int y = 8;
+        for (auto* t : tiles) { t->setBounds (4, y, getWidth() - 8, 44); y += 52; }
+    }
+
+private:
+    void addTile (const juce::String& type, const juce::String& label, juce::Colour c)
+    {
+        auto* t = new EffectTile (type, label, c);
+        addAndMakeVisible (t);
+        tiles.add (t);
+    }
+
+    juce::OwnedArray<EffectTile> tiles;
 };
 
 // ─── File Browser Panel ───────────────────────────────────────────────────────
@@ -135,6 +203,7 @@ public:
         tabs->setColour (juce::TabbedComponent::outlineColourId,         juce::Colour (0xff252540));
         tabs->addTab ("Files",       juce::Colour (0xff0d0d1a), &filesPanel,         false);
         tabs->addTab ("Instruments", juce::Colour (0xff0d0d1a), &instrumentPanel,  false);
+        tabs->addTab ("Effects",     juce::Colour (0xff0d0d1a), &effectsPanel,     false);
         addAndMakeVisible (tabs.get());
         setOpaque (true);
 
@@ -159,5 +228,6 @@ private:
     juce::FileTreeComponent      fileTree;
     FileBrowserPanel             filesPanel;
     InstrumentBrowserPanel       instrumentPanel;
+    EffectsBrowserPanel          effectsPanel;
     std::unique_ptr<juce::TabbedComponent> tabs;
 };

@@ -301,6 +301,7 @@ public:
         addAndMakeVisible(viewport);
         viewport.setViewedComponent(&content, false);
         viewport.setScrollBarsShown(false, true, false, false);
+        setSize(500, 200);
     }
     
     ~OscComponent() override {

@@ -23,13 +23,15 @@ target_sources(LinuxDAW PRIVATE
     Source/Core/MainComponent.h
     Source/Instruments/OscProcessor.cpp
     Source/Instruments/SimplerProcessor.cpp
-    Source/Instruments/DrumRackProcessor.cpp)
+    Source/Instruments/DrumRackProcessor.cpp
+    Source/Effects/BuiltInEffects.cpp)
 
 target_include_directories(LinuxDAW PRIVATE
     Source/Core
     Source/UI
     Source/Sequencing
-    Source/Instruments)
+    Source/Instruments
+    Source/Effects)
 
 target_compile_features(LinuxDAW PRIVATE cxx_std_20)
 

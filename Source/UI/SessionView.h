@@ -157,11 +157,19 @@ public:
         if (hasInstrument)
         {
             auto tag = juce::Rectangle<float> ((float)(getWidth() - 46), (float)(getHeight() / 2) - 7.0f, 42.0f, 14.0f);
-            g.setColour (instrumentName == "Oscillator" ? juce::Colour (0xff1a4a7a) : juce::Colour (0xff226644));
+            juce::String shortName = "SMPLR";
+            juce::Colour tagC = juce::Colour(0xff226644);
+            if (instrumentName == "Oscillator") {
+                shortName = "OSCL";
+                tagC = juce::Colour(0xff1a4a7a);
+            } else if (instrumentName == "DrumRack") {
+                shortName = "DRUM";
+                tagC = juce::Colour(0xff7a4a1a);
+            }
+            g.setColour (tagC);
             g.fillRoundedRectangle (tag, 3.0f);
             g.setColour (juce::Colours::white);
             g.setFont (juce::Font (juce::FontOptions (8.5f, juce::Font::bold)));
-            juce::String shortName = instrumentName == "Oscillator" ? "OSCL" : "SMPLR";
             g.drawText (shortName, tag.toNearestInt(), juce::Justification::centred);
         }
     }
@@ -223,6 +231,7 @@ public:
     std::function<void()>          onSelectTrack;
     std::function<void()>          onDeleteTrack;
     std::function<void(float)>     onVolumeChanged;
+    std::function<void(float)>     onSendChanged;
     std::function<void(bool)>      onMuteChanged;
     std::function<void(bool)>      onSoloChanged;
 
@@ -259,6 +268,9 @@ public:
         sendAKnob.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
         sendAKnob.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
         sendAKnob.setDoubleClickReturnValue (true, 0.0);
+        sendAKnob.onValueChange = [this] {
+            if (onSendChanged) onSendChanged ((float) sendAKnob.getValue());
+        };
         addAndMakeVisible (sendAKnob);
 
         // ── Mute button ───────────────────────────────────────────────────────
@@ -412,6 +424,7 @@ class FixedTrackColumn : public juce::Component
 public:
     juce::String trackName;
     juce::Slider volFader;
+    bool isSelected = false;
     std::function<void(float)> onVolumeChanged; // called with linear 0..1 gain
 
     explicit FixedTrackColumn (const juce::String& name) : trackName (name)
@@ -429,12 +442,19 @@ public:
 
     void paint (juce::Graphics& g) override
     {
-        g.fillAll (juce::Colour (0xff161626));
-        g.setColour (juce::Colour (0xff252540));
-        g.drawRect (getLocalBounds(), 1);
-        g.setColour (juce::Colours::lightgrey);
+        g.fillAll (isSelected ? juce::Colour (0xff22223a) : juce::Colour (0xff161626));
+        g.setColour (isSelected ? juce::Colour (0xff555577) : juce::Colour (0xff252540));
+        g.drawRect (getLocalBounds(), isSelected ? 2 : 1);
+        g.setColour (isSelected ? juce::Colours::white : juce::Colours::lightgrey);
         g.setFont (juce::Font (juce::FontOptions (11.0f, juce::Font::bold)));
         g.drawText (trackName, 0, 0, getWidth(), SV_HEADER_H, juce::Justification::centred);
+    }
+
+    std::function<void()> onSelectTrack;
+
+    void mouseDown (const juce::MouseEvent&) override
+    {
+        if (onSelectTrack) onSelectTrack();
     }
 
     void resized() override
@@ -461,7 +481,9 @@ public:
     std::function<void(int trackIndex)>                                onSelectTrack;
     std::function<void(int trackIndex)>                                onDeleteTrack;
     std::function<void(int trackIndex, const juce::String& type)>      onInstrumentDropped;
+    std::function<void(int trackIndex, const juce::String& type)>      onEffectDropped;
     std::function<void(int trackIndex, float gain)>                    onTrackVolumeChanged;
+    std::function<void(int trackIndex, float level)>                   onTrackSendChanged;
     std::function<void(int trackIndex, bool muted)>                    onTrackMuteChanged;
     std::function<void(int trackIndex, bool soloed)>                   onTrackSoloChanged;
 
@@ -477,6 +499,7 @@ public:
         col->onSelectTrack  = [this, idx] () { if (onSelectTrack) onSelectTrack (idx); };
         col->onDeleteTrack  = [this, idx] () { if (onDeleteTrack) onDeleteTrack (idx); };
         col->onVolumeChanged = [this, idx] (float g) { if (onTrackVolumeChanged) onTrackVolumeChanged (idx, g); };
+        col->onSendChanged   = [this, idx] (float l) { if (onTrackSendChanged)   onTrackSendChanged   (idx, l); };
         col->onMuteChanged   = [this, idx] (bool m)  { if (onTrackMuteChanged)   onTrackMuteChanged   (idx, m); };
         col->onSoloChanged   = [this, idx] (bool s)  { if (onTrackSoloChanged)   onTrackSoloChanged   (idx, s); };
         col->header.onSelectTrack = col->onSelectTrack;
@@ -623,7 +646,9 @@ public:
     std::function<void(int track)>             onDeleteTrack;
     std::function<void(int sceneIndex)>        onLaunchScene;
     std::function<void(int trackIndex, const juce::String& instrumentType)> onInstrumentDropped;
+    std::function<void(int trackIndex, const juce::String& effectType)>     onEffectDropped;
     std::function<void(int trackIndex, float gain)> onTrackVolumeChanged;
+    std::function<void(int trackIndex, float level)> onTrackSendChanged;
     std::function<void(float gain)>                 onMasterVolumeChanged;
     std::function<void(float gain)>                 onReturnVolumeChanged;
     std::function<void(int trackIndex, bool muted)>  onTrackMuteChanged;
@@ -642,9 +667,17 @@ public:
         {
             if (onInstrumentDropped) onInstrumentDropped (t, tp);
         };
+        gridContent.onEffectDropped = [this] (int t, const juce::String& tp)
+        {
+            if (onEffectDropped) onEffectDropped (t, tp);
+        };
         gridContent.onTrackVolumeChanged = [this] (int t, float g)
         {
             if (onTrackVolumeChanged) onTrackVolumeChanged (t, g);
+        };
+        gridContent.onTrackSendChanged = [this] (int t, float l)
+        {
+            if (onTrackSendChanged) onTrackSendChanged (t, l);
         };
         gridContent.onTrackMuteChanged = [this] (int t, bool m)
         {
@@ -675,6 +708,7 @@ public:
         returnColumn = std::make_unique<FixedTrackColumn> ("Return A");
         masterColumn = std::make_unique<FixedTrackColumn> ("Master");
         returnColumn->onVolumeChanged = [this] (float g) { if (onReturnVolumeChanged) onReturnVolumeChanged (g); };
+        returnColumn->onSelectTrack = [this] () { if (onSelectTrack) onSelectTrack(999); }; // Use 999 for return track index convention
         masterColumn->onVolumeChanged = [this] (float g) { if (onMasterVolumeChanged) onMasterVolumeChanged (g); };
         addAndMakeVisible (returnColumn.get());
         addAndMakeVisible (masterColumn.get());
@@ -690,7 +724,17 @@ public:
 
     void setClipData    (int t, int s, const ClipData& d) { gridContent.setClipData    (t, s, d); }
     void setClipSelected(int t, int s)                    { gridContent.setClipSelected (t, s); }
-    void setTrackSelected(int t)                          { gridContent.setTrackSelected(t); }
+    void setTrackSelected(int t)                          
+    { 
+        gridContent.setTrackSelected(t); 
+        if (t == 999) {
+            returnColumn->isSelected = true;
+            returnColumn->repaint();
+        } else {
+            returnColumn->isSelected = false;
+            returnColumn->repaint();
+        }
+    }
     void setTrackPlayhead(int t, float phase)             { gridContent.setTrackPlayhead(t, phase); }
 
     void removeTrack(int index) {
@@ -741,7 +785,8 @@ public:
     // ── DragAndDropTarget (on SessionView so Viewport doesn't block delivery) ─
     bool isInterestedInDragSource (const SourceDetails& d) override
     {
-        return d.description.toString().startsWith ("InstrumentDrag:");
+        return d.description.toString().startsWith ("InstrumentDrag:") || 
+               d.description.toString().startsWith ("EffectDrag:");
     }
 
     void itemDragEnter (const SourceDetails& d) override { updateContentDrag (d.localPosition, true); }
@@ -760,7 +805,17 @@ public:
         for (int i = 0; i < gridContent.columns.size(); ++i)
             if (gridContent.columns[i]->getBounds().contains (contPos)) { hit = i; break; }
 
-        if (onInstrumentDropped) onInstrumentDropped (hit, type);
+        if (d.description.toString().startsWith ("InstrumentDrag:")) {
+            if (onInstrumentDropped) onInstrumentDropped (hit, type);
+        } else if (d.description.toString().startsWith ("EffectDrag:")) {
+            if (hit == -1) {
+                // Check if it's over Return track
+                if (returnColumn->getBounds().contains(d.localPosition)) {
+                    hit = 999;
+                }
+            }
+            if (onEffectDropped) onEffectDropped (hit, type);
+        }
     }
 
 private:

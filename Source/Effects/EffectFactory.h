@@ -1,0 +1,13 @@
+#pragma once
+#include "BuiltInEffects.h"
+
+class EffectFactory {
+public:
+    static std::unique_ptr<EffectProcessor> create(const juce::String& type) {
+        if (type == "Reverb") return std::make_unique<ReverbEffect>();
+        if (type == "Delay")  return std::make_unique<DelayEffect>();
+        if (type == "Chorus") return std::make_unique<ChorusEffect>();
+        if (type == "Filter") return std::make_unique<FilterEffect>();
+        return nullptr;
+    }
+};

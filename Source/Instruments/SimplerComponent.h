@@ -10,6 +10,7 @@ public:
           thumbnail(1024, formatManager, thumbnailCache)
     {
         setOpaque(true);
+        setSize(400, 200);
         formatManager.registerBasicFormats();
         
         thumbnail.addChangeListener(this);

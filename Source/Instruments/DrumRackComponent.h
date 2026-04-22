@@ -6,6 +6,7 @@
 class DrumRackComponent : public juce::Component, public juce::FileDragAndDropTarget, public juce::DragAndDropTarget, public juce::Timer {
 public:
     DrumRackComponent(DrumRackProcessor* p) : processor(p) {
+        setOpaque(true);
         // Pad Buttons
         for (int i = 0; i < 16; ++i) {
             auto btn = std::make_unique<juce::TextButton>(juce::String("Pad ") + juce::String(i + 1));
@@ -42,6 +43,7 @@ public:
         thumbnail = std::make_unique<juce::AudioThumbnail>(512, formatManager, thumbnailCache);
 
         selectPad(0);
+        setSize(600, 200);
         startTimerHz(30);
     }
 

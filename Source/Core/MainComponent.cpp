@@ -73,6 +73,8 @@ void RenderThread::run()
                     { anySoloed = true; break; }
 
             juce::AudioBuffer<float> trackScratch (nCh, bs);
+            juce::AudioBuffer<float> returnScratch (nCh, bs);
+            returnScratch.clear();
 
             for (int t = 0; t < nTracks; ++t)
             {
@@ -89,15 +91,26 @@ void RenderThread::run()
                     inst->processBlock(trackScratch, owner.audioTracks[t].midiBuffer);
                 }
 
-                // Accumulate track (with effective gain) into master mix
-                if (tGain > 0.0f)
+                for (int e = 0; e < Track::MAX_EFFECTS; ++e) {
+                    if (auto* effect = owner.audioTracks[t].effectChain[e].load(std::memory_order_acquire)) {
+                        effect->processBlock(trackScratch);
+                    }
+                }
+
+                const float tSendALevel = audible ? owner.audioTracks[t].sendALevel.load(std::memory_order_relaxed) : 0.0f;
+
+                // Accumulate track (with effective gain) into master mix and send to return A (post-fader)
+                if (tGain > 0.0f || tSendALevel > 0.0f)
                 {
                     for (int ch = 0; ch < nCh; ++ch)
                     {
                         auto* dst = owner.renderScratch.getWritePointer(ch);
+                        auto* retDst = returnScratch.getWritePointer(ch);
                         const auto* src = trackScratch.getReadPointer(ch);
-                        for (int i = 0; i < bs; ++i)
+                        for (int i = 0; i < bs; ++i) {
                             dst[i] += src[i] * tGain;
+                            retDst[i] += src[i] * tGain * tSendALevel;
+                        }
                     }
                 }
 
@@ -108,6 +121,26 @@ void RenderThread::run()
                 owner.audioTracks[t].rmsLevel.store(
                     std::sqrt(sumRmsTrack / bs), std::memory_order_relaxed);
             }
+
+            // ── Process Return Track Effects & Accumulate to Master ───────
+            for (int e = 0; e < Track::MAX_EFFECTS; ++e) {
+                if (auto* effect = owner.returnTrackA.effectChain[e].load(std::memory_order_acquire)) {
+                    effect->processBlock(returnScratch);
+                }
+            }
+
+            const float retGain = owner.returnTrackA.gain.load(std::memory_order_relaxed);
+            float sumRmsReturn = 0.0f;
+            for (int ch = 0; ch < nCh; ++ch) {
+                auto* dst = owner.renderScratch.getWritePointer(ch);
+                const auto* src = returnScratch.getReadPointer(ch);
+                for (int i = 0; i < bs; ++i) {
+                    float s = src[i] * retGain;
+                    dst[i] += s;
+                    if (ch == 0) sumRmsReturn += s * s;
+                }
+            }
+            owner.returnTrackA.rmsLevel.store(std::sqrt(sumRmsReturn / bs), std::memory_order_relaxed);
 
             // ── 5. Plugin processBlock (NO LOCK) ─────────────────────────
             if (owner.activePlugin != nullptr)
@@ -588,12 +621,52 @@ MainComponent::MainComponent()
         resized();
     };
 
+    sessionView.onEffectDropped = [this](int trackIdx, const juce::String& type) {
+        int nTracks = numActiveTracks.load(std::memory_order_relaxed);
+        Track* targetTrack = nullptr;
+
+        if (trackIdx == 999) {
+            targetTrack = &returnTrackA;
+        } else if (trackIdx >= 0 && trackIdx < nTracks) {
+            targetTrack = &audioTracks[trackIdx];
+        } else {
+            return; // Dropped on an invalid place
+        }
+
+        auto newEffect = EffectFactory::create(type);
+        if (newEffect) {
+            newEffect->prepareToPlay(currentSampleRate);
+
+            // Find an empty slot
+            for (int i = 0; i < Track::MAX_EFFECTS; ++i) {
+                if (targetTrack->effectChain[i].load(std::memory_order_relaxed) == nullptr) {
+                    targetTrack->effectChain[i].store(newEffect.release(), std::memory_order_release);
+                    break;
+                }
+            }
+        }
+
+        // Always select the track and show its device panel immediately
+        selectedTrackIndex = trackIdx;
+        if (trackIdx != 999) selectedSceneIndex = -1;
+        sessionView.setTrackSelected(trackIdx);
+        if (trackIdx != 999) sessionView.setClipSelected(trackIdx, -1);
+        
+        showDeviceEditorForTrack(trackIdx);
+        resized();
+    };
+
     // ── Mixer Volume Callbacks ────────────────────────────────────────
     // These are the ONLY paths that write to the audio-thread gain atomics.
     // Without them the faders are purely cosmetic.
     sessionView.onTrackVolumeChanged = [this](int t, float gain) {
         if (t >= 0 && t < MAX_TRACKS)
             audioTracks[t].gain.store(gain, std::memory_order_relaxed);
+    };
+
+    sessionView.onTrackSendChanged = [this](int t, float level) {
+        if (t >= 0 && t < MAX_TRACKS)
+            audioTracks[t].sendALevel.store(level, std::memory_order_relaxed);
     };
 
     sessionView.onMasterVolumeChanged = [this](float gain) {
@@ -777,12 +850,26 @@ void MainComponent::timerCallback()
     gcTrack(returnTrackA);
     for (int t = 0; t < nTracks; ++t) gcTrack(audioTracks[t]);
 
-    // ── GC: Instrument internal buffers ───────────────────────────────────────
-    for (int t = 0; t < nTracks; ++t) {
-        if (auto* inst = audioTracks[t].activeInstrument.load(std::memory_order_relaxed)) {
+    // ── GC: Instrument internal buffers & Effect garbage ─────────────────────
+    auto gcProcessors = [](Track& t) {
+        if (auto* inst = t.activeInstrument.load(std::memory_order_relaxed)) {
             inst->processGarbage();
         }
+        for (int i = 0; i < Track::MAX_EFFECTS; ++i) {
+            if (auto* effect = t.effectChain[i].load(std::memory_order_relaxed)) {
+                effect->processGarbage();
+            }
+        }
+        while (auto opt = t.effectGarbageQueue.pop()) {
+            delete *opt;
+        }
+    };
+    
+    for (int t = 0; t < nTracks; ++t) {
+        gcProcessors(audioTracks[t]);
     }
+    gcProcessors(returnTrackA);
+    gcProcessors(masterTrack);
 
     // ── GC: Old plugin instances ──────────────────────────────────────────────
     while (auto opt = pluginGarbageQueue.pop())
@@ -1352,29 +1439,41 @@ void MainComponent::loadAudioFileIntoDrumPad(int trackIdx, int padIndex, const j
 }
 
 void MainComponent::showDeviceEditorForTrack(int trackIdx) {
-    if (trackIdx >= 0 && trackIdx < MAX_TRACKS) {
-        if (auto* inst = audioTracks[trackIdx].activeInstrument.load(std::memory_order_acquire)) {
-            auto editor = inst->createEditor();
-            
-            if (auto* drumComp = dynamic_cast<DrumRackComponent*>(editor.get())) {
-                drumComp->onSampleDropped = [this, trackIdx](int padIndex, juce::File file) {
-                    loadAudioFileIntoDrumPad(trackIdx, padIndex, file);
-                };
-                drumComp->onPadSelected = [this](int padIndex) {
-                    selectedDrumPadIndex = padIndex;
-                    updateDrumRackPatternEditor();
-                };
-            }
-            deviceView.showEditor(std::move(editor));
-            
-            if (auto* drumComp = dynamic_cast<DrumRackComponent*>(deviceView.getCurrentEditor())) {
-                if (drumComp->onPadSelected) drumComp->onPadSelected(0); // Select Pad 1 by default
-            }
-        } else {
-            deviceView.clear();
-        }
+    deviceView.clear();
+
+    Track* track = nullptr;
+    if (trackIdx == 999) {
+        track = &returnTrackA;
+    } else if (trackIdx >= 0 && trackIdx < MAX_TRACKS) {
+        track = &audioTracks[trackIdx];
     } else {
-        deviceView.clear();
+        return;
+    }
+
+    if (auto* inst = track->activeInstrument.load(std::memory_order_acquire)) {
+        auto editor = inst->createEditor();
+        
+        if (auto* drumComp = dynamic_cast<DrumRackComponent*>(editor.get())) {
+            drumComp->onSampleDropped = [this, trackIdx](int padIndex, juce::File file) {
+                loadAudioFileIntoDrumPad(trackIdx, padIndex, file);
+            };
+            drumComp->onPadSelected = [this](int padIndex) {
+                selectedDrumPadIndex = padIndex;
+                updateDrumRackPatternEditor();
+            };
+        }
+        deviceView.addEditor(std::move(editor));
+        
+        if (auto* drumComp = dynamic_cast<DrumRackComponent*>(deviceView.getFirstEditor())) {
+            if (drumComp->onPadSelected) drumComp->onPadSelected(0); // Select Pad 1 by default
+        }
+    }
+
+    // Add Effect Editors
+    for (int i = 0; i < Track::MAX_EFFECTS; ++i) {
+        if (auto* effect = track->effectChain[i].load(std::memory_order_acquire)) {
+            deviceView.addEditor(effect->createEditor());
+        }
     }
 }
 
