@@ -18,9 +18,18 @@ juce_add_gui_app(LinuxDAW
 juce_generate_juce_header(LinuxDAW)
 
 target_sources(LinuxDAW PRIVATE
-    Source/Main.cpp
-    Source/MainComponent.cpp
-    Source/MainComponent.h)
+    Source/Core/Main.cpp
+    Source/Core/MainComponent.cpp
+    Source/Core/MainComponent.h
+    Source/Instruments/OscProcessor.cpp
+    Source/Instruments/SimplerProcessor.cpp
+    Source/Instruments/DrumRackProcessor.cpp)
+
+target_include_directories(LinuxDAW PRIVATE
+    Source/Core
+    Source/UI
+    Source/Sequencing
+    Source/Instruments)
 
 target_compile_features(LinuxDAW PRIVATE cxx_std_20)
 
@@ -41,4 +50,5 @@ target_link_libraries(LinuxDAW PRIVATE
     juce::juce_audio_devices
     juce::juce_audio_formats
     juce::juce_audio_processors
-    juce::juce_audio_utils)
+    juce::juce_audio_utils
+    juce::juce_dsp)

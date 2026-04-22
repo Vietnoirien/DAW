@@ -47,7 +47,8 @@ public:
     InstrumentBrowserPanel()
     {
         addTile ("Simpler", "    Simpler", juce::Colour (0xff1a7a4a));
-        // Future: addTile ("Synth",  "    Synth",   juce::Colour (0xff7a4a1a));
+        addTile ("Oscillator", "    Oscillator", juce::Colour (0xff1a4a7a));
+        addTile ("DrumRack", "    Drum Rack", juce::Colour (0xff7a4a1a));
     }
 
     void resized() override

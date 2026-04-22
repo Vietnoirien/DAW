@@ -132,6 +132,7 @@ public:
     juce::String trackName;
     TrackType    trackType     = TrackType::Audio;
     bool         hasInstrument = false;
+    juce::String instrumentName;
     bool         isSelected    = false;
 
     void paint (juce::Graphics& g) override
@@ -156,11 +157,12 @@ public:
         if (hasInstrument)
         {
             auto tag = juce::Rectangle<float> ((float)(getWidth() - 46), (float)(getHeight() / 2) - 7.0f, 42.0f, 14.0f);
-            g.setColour (juce::Colour (0xff226644));
+            g.setColour (instrumentName == "Oscillator" ? juce::Colour (0xff1a4a7a) : juce::Colour (0xff226644));
             g.fillRoundedRectangle (tag, 3.0f);
             g.setColour (juce::Colours::white);
             g.setFont (juce::Font (8.5f, juce::Font::bold));
-            g.drawText ("SMPLR", tag.toNearestInt(), juce::Justification::centred);
+            juce::String shortName = instrumentName == "Oscillator" ? "OSCL" : "SMPLR";
+            g.drawText (shortName, tag.toNearestInt(), juce::Justification::centred);
         }
     }
 
@@ -184,6 +186,20 @@ public:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Helper — apply consistent look to a M/S toggle button
+// ─────────────────────────────────────────────────────────────────────────────
+static void styleToggleBtn (juce::TextButton& btn, juce::Colour activeColour)
+{
+    bool on = btn.getToggleState();
+    btn.setColour (juce::TextButton::buttonColourId,
+                   on ? activeColour : juce::Colour (0xff1e1e30));
+    btn.setColour (juce::TextButton::buttonOnColourId,  activeColour);
+    btn.setColour (juce::TextButton::textColourOffId,
+                   on ? juce::Colours::black : juce::Colours::grey);
+    btn.setColour (juce::TextButton::textColourOnId,    juce::Colours::black);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Track Column
 // ─────────────────────────────────────────────────────────────────────────────
 class TrackColumn : public juce::Component
@@ -193,8 +209,12 @@ public:
     bool       isSelected = false;
     TrackHeader header;
     juce::OwnedArray<ClipSlot> slots;
-    juce::Slider volFader;
-    juce::Slider sendAKnob;
+    juce::Slider     volFader;
+    juce::Slider     sendAKnob;
+    juce::TextButton muteBtn  { "M" };
+    juce::TextButton soloBtn  { "S" };
+    bool isMuted  = false;
+    bool isSoloed = false;
 
     std::function<void(int scene)> onCreateClipAt;
     std::function<void(int scene)> onSelectClipAt;
@@ -202,6 +222,9 @@ public:
     std::function<void(int scene)> onDeleteClipAt;
     std::function<void()>          onSelectTrack;
     std::function<void()>          onDeleteTrack;
+    std::function<void(float)>     onVolumeChanged;
+    std::function<void(bool)>      onMuteChanged;
+    std::function<void(bool)>      onSoloChanged;
 
     TrackColumn (int index, const juce::String& name, TrackType type)
         : trackIndex (index)
@@ -226,12 +249,50 @@ public:
         volFader.setSliderStyle (juce::Slider::LinearVertical);
         volFader.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 50, 16);
         volFader.setRange (0.0, 1.0);
-        volFader.setValue (0.8);
+        volFader.setValue (1.0);
+        volFader.onValueChange = [this] {
+            if (onVolumeChanged) onVolumeChanged ((float) volFader.getValue());
+        };
         addAndMakeVisible (volFader);
 
         sendAKnob.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
         sendAKnob.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
         addAndMakeVisible (sendAKnob);
+
+        // ── Mute button ───────────────────────────────────────────────────────
+        muteBtn.setClickingTogglesState (true);
+        styleToggleBtn (muteBtn, juce::Colour (0xffdd8800)); // amber when on
+        muteBtn.onClick = [this] {
+            isMuted = muteBtn.getToggleState();
+            styleToggleBtn (muteBtn, juce::Colour (0xffdd8800));
+            if (onMuteChanged) onMuteChanged (isMuted);
+        };
+        addAndMakeVisible (muteBtn);
+
+        // ── Solo button ───────────────────────────────────────────────────────
+        soloBtn.setClickingTogglesState (true);
+        styleToggleBtn (soloBtn, juce::Colour (0xff22cc55)); // green when on
+        soloBtn.onClick = [this] {
+            isSoloed = soloBtn.getToggleState();
+            styleToggleBtn (soloBtn, juce::Colour (0xff22cc55));
+            if (onSoloChanged) onSoloChanged (isSoloed);
+        };
+        addAndMakeVisible (soloBtn);
+    }
+
+    // ── Public helpers ────────────────────────────────────────────────────────
+    void setMuted (bool m)
+    {
+        isMuted = m;
+        muteBtn.setToggleState (m, juce::dontSendNotification);
+        styleToggleBtn (muteBtn, juce::Colour (0xffdd8800));
+    }
+
+    void setSoloed (bool s)
+    {
+        isSoloed = s;
+        soloBtn.setToggleState (s, juce::dontSendNotification);
+        styleToggleBtn (soloBtn, juce::Colour (0xff22cc55));
     }
 
     void resized() override
@@ -239,6 +300,15 @@ public:
         auto b = getLocalBounds();
         header.setBounds (b.removeFromTop (SV_HEADER_H));
         auto mix = b.removeFromBottom (SV_MIXER_H).reduced (4);
+
+        // M/S button row
+        auto btnRow = mix.removeFromTop (22);
+        int  btnW   = (btnRow.getWidth() - 2) / 2;
+        muteBtn.setBounds (btnRow.removeFromLeft (btnW));
+        btnRow.removeFromLeft (2);
+        soloBtn.setBounds (btnRow);
+
+        mix.removeFromTop (4); // gap
         sendAKnob.setBounds (mix.removeFromTop (36).withSizeKeepingCentre (30, 30));
         volFader.setBounds (mix);
         for (int s = 0; s < slots.size(); ++s)
@@ -340,13 +410,17 @@ class FixedTrackColumn : public juce::Component
 public:
     juce::String trackName;
     juce::Slider volFader;
+    std::function<void(float)> onVolumeChanged; // called with linear 0..1 gain
 
     explicit FixedTrackColumn (const juce::String& name) : trackName (name)
     {
         volFader.setSliderStyle (juce::Slider::LinearVertical);
         volFader.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 50, 16);
         volFader.setRange (0.0, 1.0);
-        volFader.setValue (0.8);
+        volFader.setValue (1.0);
+        volFader.onValueChange = [this] {
+            if (onVolumeChanged) onVolumeChanged ((float) volFader.getValue());
+        };
         addAndMakeVisible (volFader);
     }
 
@@ -384,6 +458,9 @@ public:
     std::function<void(int trackIndex)>                                onSelectTrack;
     std::function<void(int trackIndex)>                                onDeleteTrack;
     std::function<void(int trackIndex, const juce::String& type)>      onInstrumentDropped;
+    std::function<void(int trackIndex, float gain)>                    onTrackVolumeChanged;
+    std::function<void(int trackIndex, bool muted)>                    onTrackMuteChanged;
+    std::function<void(int trackIndex, bool soloed)>                   onTrackSoloChanged;
 
     // ── Track Management ─────────────────────────────────────────────────────
     int addTrack (TrackType type, const juce::String& name)
@@ -396,6 +473,9 @@ public:
         col->onDeleteClipAt = [this, idx] (int s) { if (onDeleteClip) onDeleteClip (idx, s); };
         col->onSelectTrack  = [this, idx] () { if (onSelectTrack) onSelectTrack (idx); };
         col->onDeleteTrack  = [this, idx] () { if (onDeleteTrack) onDeleteTrack (idx); };
+        col->onVolumeChanged = [this, idx] (float g) { if (onTrackVolumeChanged) onTrackVolumeChanged (idx, g); };
+        col->onMuteChanged   = [this, idx] (bool m)  { if (onTrackMuteChanged)   onTrackMuteChanged   (idx, m); };
+        col->onSoloChanged   = [this, idx] (bool s)  { if (onTrackSoloChanged)   onTrackSoloChanged   (idx, s); };
         col->header.onSelectTrack = col->onSelectTrack;
         col->header.onDeleteTrack = col->onDeleteTrack;
         addAndMakeVisible (col);
@@ -540,6 +620,11 @@ public:
     std::function<void(int track)>             onDeleteTrack;
     std::function<void(int sceneIndex)>        onLaunchScene;
     std::function<void(int trackIndex, const juce::String& instrumentType)> onInstrumentDropped;
+    std::function<void(int trackIndex, float gain)> onTrackVolumeChanged;
+    std::function<void(float gain)>                 onMasterVolumeChanged;
+    std::function<void(float gain)>                 onReturnVolumeChanged;
+    std::function<void(int trackIndex, bool muted)>  onTrackMuteChanged;
+    std::function<void(int trackIndex, bool soloed)> onTrackSoloChanged;
 
     SessionView()
     {
@@ -553,6 +638,18 @@ public:
         gridContent.onInstrumentDropped = [this] (int t, const juce::String& tp)
         {
             if (onInstrumentDropped) onInstrumentDropped (t, tp);
+        };
+        gridContent.onTrackVolumeChanged = [this] (int t, float g)
+        {
+            if (onTrackVolumeChanged) onTrackVolumeChanged (t, g);
+        };
+        gridContent.onTrackMuteChanged = [this] (int t, bool m)
+        {
+            if (onTrackMuteChanged) onTrackMuteChanged (t, m);
+        };
+        gridContent.onTrackSoloChanged = [this] (int t, bool s)
+        {
+            if (onTrackSoloChanged) onTrackSoloChanged (t, s);
         };
 
         // Viewport – horizontal scroll only
@@ -574,6 +671,8 @@ public:
 
         returnColumn = std::make_unique<FixedTrackColumn> ("Return A");
         masterColumn = std::make_unique<FixedTrackColumn> ("Master");
+        returnColumn->onVolumeChanged = [this] (float g) { if (onReturnVolumeChanged) onReturnVolumeChanged (g); };
+        masterColumn->onVolumeChanged = [this] (float g) { if (onMasterVolumeChanged) onMasterVolumeChanged (g); };
         addAndMakeVisible (returnColumn.get());
         addAndMakeVisible (masterColumn.get());
     }

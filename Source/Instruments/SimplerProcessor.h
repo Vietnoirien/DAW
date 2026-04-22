@@ -9,9 +9,20 @@ struct SimplerCommand {
     juce::AudioBuffer<float>* newBuffer;
 };
 
-class SimplerProcessor {
+#include "Instrument.h"
+
+class SimplerProcessor : public InstrumentProcessor {
 public:
-    void processBlock(juce::AudioBuffer<float>& outBuffer, const juce::MidiBuffer& midiMessages) {
+    void prepareToPlay(double sampleRate) override {
+        juce::ignoreUnused(sampleRate);
+    }
+    
+    bool loadFile(const juce::File& file) override {
+        loadedFile = file;
+        return true;
+    }
+    
+    void processBlock(juce::AudioBuffer<float>& outBuffer, const juce::MidiBuffer& midiMessages) override {
         // Handle incoming buffers
         while (auto optCmd = commandQueue.pop()) {
             if (optCmd->type == SimplerCommand::LoadBuffer) {
@@ -63,14 +74,13 @@ public:
         commandQueue.push({SimplerCommand::LoadBuffer, newBuf});
     }
 
-    juce::AudioBuffer<float>* popGarbage() {
-        if (auto opt = garbageQueue.pop()) {
-            return *opt;
+    void processGarbage() override {
+        while (auto opt = garbageQueue.pop()) {
+            delete *opt;
         }
-        return nullptr;
     }
 
-    void clear() {
+    void clear() override {
         while (auto opt = commandQueue.pop()) {}
         while (auto opt = garbageQueue.pop()) { delete *opt; }
         if (auto* old = activeBuffer.exchange(nullptr, std::memory_order_acq_rel)) {
@@ -80,6 +90,18 @@ public:
         isPlaying = false;
     }
 
+    juce::ValueTree saveState() const override {
+        return juce::ValueTree("SimplerState");
+    }
+
+    void loadState(const juce::ValueTree& tree) override {
+        juce::ignoreUnused(tree);
+    }
+
+    std::unique_ptr<juce::Component> createEditor() override;
+    
+    juce::String getName() const override { return "Simpler"; }
+
     void moveFrom(SimplerProcessor& other) {
         clear();
         while (auto opt = other.commandQueue.pop()) commandQueue.push(*opt);
@@ -87,9 +109,13 @@ public:
         activeBuffer.store(other.activeBuffer.exchange(nullptr, std::memory_order_acq_rel), std::memory_order_release);
         playhead = other.playhead;
         isPlaying = other.isPlaying;
+        loadedFile = other.loadedFile;
         other.playhead = 0;
         other.isPlaying = false;
+        other.loadedFile = juce::File();
     }
+
+    juce::File loadedFile;
 
 private:
     void renderAudio(juce::AudioBuffer<float>& outBuffer, juce::AudioBuffer<float>* sampleBuffer, int startSample, int numSamples) {

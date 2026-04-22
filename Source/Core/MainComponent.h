@@ -14,7 +14,11 @@
 #include "SessionView.h"
 #include "PatternEditor.h"
 #include "DeviceView.h"
-#include "SimplerProcessor.h"
+#include "ProjectManager.h"
+#include "../Instruments/InstrumentFactory.h"
+#include "../Instruments/DrumRackComponent.h"
+#include "Instrument.h"
+#include "InstrumentFactory.h"
 #include "ClipData.h"
 #include "AppAudioBuffer.h"
 #include "ProjectManager.h"
@@ -23,9 +27,13 @@ struct Track
 {
     std::atomic<float> gain     { 1.0f };
     std::atomic<float> rmsLevel { 0.0f };
+    std::atomic<bool>  muted    { false };
+    std::atomic<bool>  soloed   { false };
 
     LockFreeQueue<TrackCommand, 128> commandQueue;
     LockFreeQueue<Pattern*, 128>     garbageQueue;
+    LockFreeQueue<InstrumentProcessor*, 8> instrumentGarbageQueue;
+    std::atomic<InstrumentProcessor*> activeInstrument {nullptr};
 
     Pattern* currentPattern {nullptr};
     Pattern* pendingPattern {nullptr};
@@ -37,6 +45,10 @@ struct Track
     void processPatternCommands(int64_t blockStartSample, int numSamples,
                                 const GlobalTransport& transport)
     {
+        // Clear first so that any AllNotesOff events injected below
+        // by FlushNotes or StopPattern survive into the DSP step.
+        midiBuffer.clear();
+
         while (auto optCmd = commandQueue.pop())
         {
             TrackCommand cmd = *optCmd;
@@ -46,6 +58,8 @@ struct Track
                 switchSample   = cmd.scheduledSample;
             } else if (cmd.type == TrackCommand::Type::StopPattern) {
                 if (cmd.scheduledSample <= 0) {
+                    // Immediate stop — release all held voices before silencing
+                    midiBuffer.addEvent(juce::MidiMessage::allNotesOff(1), 0);
                     if (currentPattern) garbageQueue.push(currentPattern);
                     if (pendingPattern && pendingPattern != currentPattern) garbageQueue.push(pendingPattern);
                     currentPattern = nullptr;
@@ -57,10 +71,13 @@ struct Track
                     pendingPattern = nullptr;
                     switchSample   = cmd.scheduledSample;
                 }
+            } else if (cmd.type == TrackCommand::Type::FlushNotes) {
+                // Inject AllNotesOff at the start of this block so any
+                // currently-playing voices are released before the next
+                // pattern (which may have removed notes) takes over.
+                midiBuffer.addEvent(juce::MidiMessage::allNotesOff(1), 0);
             }
         }
-
-        midiBuffer.clear();
 
         if (switchSample != -1.0 && switchSample >= blockStartSample && switchSample < blockStartSample + numSamples) {
             // Switch happens IN THIS BLOCK
@@ -105,6 +122,8 @@ struct Track
     void clear() {
         gain.store(1.0f, std::memory_order_relaxed);
         rmsLevel.store(0.0f, std::memory_order_relaxed);
+        muted.store(false, std::memory_order_relaxed);
+        soloed.store(false, std::memory_order_relaxed);
         currentPattern = nullptr;
         pendingPattern = nullptr;
         switchSample = -1.0;
@@ -112,12 +131,18 @@ struct Track
         midiBuffer.clear();
         while (commandQueue.pop()) {}
         while (garbageQueue.pop()) {}
+        if (auto* old = activeInstrument.exchange(nullptr, std::memory_order_acq_rel)) {
+            delete old; // Since clear() is usually called safely on the message thread during teardown/move
+        }
+        while (auto opt = instrumentGarbageQueue.pop()) { delete *opt; }
     }
 
     void moveFrom(Track& other) {
         clear();
         gain.store(other.gain.load(std::memory_order_relaxed), std::memory_order_relaxed);
         rmsLevel.store(other.rmsLevel.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        muted.store(other.muted.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        soloed.store(other.soloed.load(std::memory_order_relaxed), std::memory_order_relaxed);
         currentPattern = other.currentPattern;
         pendingPattern = other.pendingPattern;
         switchSample = other.switchSample;
@@ -127,6 +152,9 @@ struct Track
         while (auto opt = other.garbageQueue.pop()) garbageQueue.push(*opt);
         other.currentPattern = nullptr;
         other.pendingPattern = nullptr;
+        
+        activeInstrument.store(other.activeInstrument.exchange(nullptr, std::memory_order_acq_rel), std::memory_order_release);
+        while (auto opt = other.instrumentGarbageQueue.pop()) instrumentGarbageQueue.push(*opt);
     }
 };
 
@@ -163,6 +191,14 @@ public:
     MainComponent();
     ~MainComponent() override;
 
+    void updatePlayheadPhase();
+    
+    // UI Helpers
+    void showDeviceEditorForTrack(int trackIdx);
+    void regenerateDrumRackMidi(ClipData& clip);
+    void loadAudioFileIntoDrumPad(int trackIdx, int padIndex, const juce::File& file);
+    void updateDrumRackPatternEditor();
+    
     void prepareToPlay (int samplesPerBlockExpected, double sampleRate) override;
     void getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill) override;
     void releaseResources() override;
@@ -212,6 +248,7 @@ private:
     ClipData clipGrid[MAX_TRACKS][NUM_SCENES];
     int selectedTrackIndex = -1;
     int selectedSceneIndex = -1;
+    int selectedDrumPadIndex = 0;
 
     // ── UI Elements ──────────────────────────────────────────────────────────
     std::unique_ptr<TopBarComponent> topBar;
@@ -225,8 +262,8 @@ private:
     float audioLevelDisplay  = 0.0f;
     float returnLevelDisplay = 0.0f;
 
-    // ── Sampler Engine ───────────────────────────────────────────────────────
-    SimplerProcessor samplerDSPs[MAX_TRACKS];
+    // ── Instrument Engine ──────────────────────────────────────────────────
+    juce::String     trackInstruments[MAX_TRACKS]; // Stores name of current instrument
     juce::File       loadedFiles[MAX_TRACKS];
     juce::AudioFormatManager formatManager;
     std::unique_ptr<juce::FileChooser> myChooser;

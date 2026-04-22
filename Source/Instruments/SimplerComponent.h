@@ -1,9 +1,11 @@
 #pragma once
 #include <JuceHeader.h>
 
+#include "SimplerProcessor.h"
+
 class SimplerComponent : public juce::Component, private juce::ChangeListener {
 public:
-    SimplerComponent() 
+    SimplerComponent(SimplerProcessor* proc) 
         : thumbnailCache(5), 
           thumbnail(1024, formatManager, thumbnailCache)
     {
@@ -11,6 +13,9 @@ public:
         formatManager.registerBasicFormats();
         
         thumbnail.addChangeListener(this);
+        if (proc != nullptr && proc->loadedFile.existsAsFile()) {
+            showFile(proc->loadedFile);
+        }
     }
 
     ~SimplerComponent() override {

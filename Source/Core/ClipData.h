@@ -10,6 +10,14 @@ static constexpr int MAX_TRACKS  = 8;
 // ─── Track Type ───────────────────────────────────────────────────────────────
 enum class TrackType { Audio, Midi };
 
+// ─── MidiNote (Piano Roll note model) ────────────────────────────────────────
+struct MidiNote {
+    int    note;         // 0–127 MIDI note number
+    double startBeat;    // beat offset from pattern start
+    double lengthBeats;  // note duration in beats
+    float  velocity;     // 0.0–1.0
+};
+
 // ─── Clip Data (UI-thread owned) ─────────────────────────────────────────────
 // Plain data struct; no JUCE audio types. Patterns live in PatternPools.
 struct ClipData
@@ -23,4 +31,17 @@ struct ClipData
     int           euclideanSteps  = 16;
     int           euclideanPulses = 4;
     std::vector<uint8_t> hitMap;   // custom per-step override (empty = use generate())
+
+    // Drum Rack per-pad euclidean patterns
+    struct PadPattern {
+        int steps = 16;
+        int pulses = 0;
+        std::vector<uint8_t> hitMap;
+    };
+    PadPattern drumPatterns[16];
+
+    // Piano-roll notes (used when patternMode == "pianoroll" or generated from drumPatterns)
+    std::vector<MidiNote> midiNotes;
+    double        patternLengthBars = 1.0; // 1, 2, or 4
+    juce::String  patternMode    = "euclidean"; // "euclidean" | "pianoroll" | "drumrack"
 };

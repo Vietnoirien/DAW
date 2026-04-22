@@ -39,12 +39,6 @@ void RenderThread::run()
             // Retrieve DSP parameters from atomics (safe across threads)
             const int nTracks  = owner.numActiveTracks.load(std::memory_order_relaxed);
             const float mGain  = owner.masterTrack.gain.load(std::memory_order_relaxed);
-            const float aGain  = (nTracks > 0)
-                                     ? owner.audioTracks[0].gain.load(std::memory_order_relaxed)
-                                     : 1.0f;
-
-            // Use the pre-allocated scratch buffer
-            owner.renderScratch.clear();
 
             // ── 1. Lock-free plugin hot-swap ─────────────────────────────
             while (auto optPlugin = owner.pluginLoadQueue.pop())
@@ -59,36 +53,63 @@ void RenderThread::run()
             // the inner while() loop we may render several consecutive blocks
             // per wakeup. renderBlockPosition is incremented by bs at the end
             // of each inner iteration (step 8), so block 2 correctly sees
-            // renderPos = T+bs, block 3 sees T+2·bs, etc.  Using
-            // transportClock.getPlayheadPosition() instead would return the
-            // same stale value for all inner iterations, causing every block
-            // after the first to schedule events at the wrong position.
-            //
-            // renderBlockPosition and transportClock stay in lockstep in
-            // steady state (both increment by bs per audio callback) because
-            // the prepareToPlay pre-fill writes silence directly into the FIFO
-            // without touching renderBlockPosition, so there is no divergence.
+            // renderPos = T+bs, block 3 sees T+2*bs, etc.
             const int64_t blockStart = owner.appBuffer.renderBlockPosition.load(
                 std::memory_order_acquire);
 
-            // ── 3. Process pattern sequencing (MIDI events → midiBuffer) ──
+            // ── 3. Process pattern sequencing (MIDI events -> midiBuffer) ──
             for (int t = 0; t < nTracks; ++t)
                 owner.audioTracks[t].processPatternCommands(blockStart, bs, owner.transportClock);
 
-            // ── 4. Per-track sampler playback ─────────────────────────────
-            for (int t = 0; t < nTracks; ++t)
-                owner.samplerDSPs[t].processBlock(owner.renderScratch,
-                                                  owner.audioTracks[t].midiBuffer);
+            // ── 4. Per-track render + gain + sum into master mix ───────────
+            // renderScratch is the MASTER MIX accumulator.
+            // trackScratch is a temporary per-track render buffer.
+            owner.renderScratch.clear();
 
-            // ── 5. Apply track gain ───────────────────────────────────────
-            for (int ch = 0; ch < nCh; ++ch)
+            // Pre-pass: is any track soloed? (determines whether solo silences others)
+            bool anySoloed = false;
+            for (int t = 0; t < nTracks; ++t)
+                if (owner.audioTracks[t].soloed.load(std::memory_order_relaxed))
+                    { anySoloed = true; break; }
+
+            juce::AudioBuffer<float> trackScratch (nCh, bs);
+
+            for (int t = 0; t < nTracks; ++t)
             {
-                auto* p = owner.renderScratch.getWritePointer(ch);
-                for (int i = 0; i < bs; ++i)
-                    p[i] *= aGain;
+                const bool muted  = owner.audioTracks[t].muted.load(std::memory_order_relaxed);
+                const bool soloed = owner.audioTracks[t].soloed.load(std::memory_order_relaxed);
+                // A track is audible if: not muted AND (nothing is soloed OR this track is soloed)
+                const bool audible = !muted && (!anySoloed || soloed);
+                const float tGain = audible
+                    ? owner.audioTracks[t].gain.load(std::memory_order_relaxed)
+                    : 0.0f;
+
+                trackScratch.clear();
+                if (auto* inst = owner.audioTracks[t].activeInstrument.load(std::memory_order_acquire)) {
+                    inst->processBlock(trackScratch, owner.audioTracks[t].midiBuffer);
+                }
+
+                // Accumulate track (with effective gain) into master mix
+                if (tGain > 0.0f)
+                {
+                    for (int ch = 0; ch < nCh; ++ch)
+                    {
+                        auto* dst = owner.renderScratch.getWritePointer(ch);
+                        const auto* src = trackScratch.getReadPointer(ch);
+                        for (int i = 0; i < bs; ++i)
+                            dst[i] += src[i] * tGain;
+                    }
+                }
+
+                // Per-track RMS reflects effective (post-mute/solo) level
+                float sumRmsTrack = 0.0f;
+                const auto* src0 = trackScratch.getReadPointer(0);
+                for (int i = 0; i < bs; ++i) { float s = src0[i] * tGain; sumRmsTrack += s * s; }
+                owner.audioTracks[t].rmsLevel.store(
+                    std::sqrt(sumRmsTrack / bs), std::memory_order_relaxed);
             }
 
-            // ── 6. Plugin processBlock (NO LOCK) ─────────────────────────
+            // ── 5. Plugin processBlock (NO LOCK) ─────────────────────────
             if (owner.activePlugin != nullptr)
             {
                 // Collect hardware MIDI for this synthetic block
@@ -101,31 +122,25 @@ void RenderThread::run()
                 owner.activePlugin->processBlock(owner.renderScratch, incomingMidi);
             }
 
-            // ── 7. Apply master fader & accumulate RMS ────────────────────
+            // ── 6. Apply master fader & accumulate master RMS ─────────────
             float sumRmsMaster = 0.0f;
-            float sumRmsAudio  = 0.0f;
             for (int ch = 0; ch < nCh; ++ch)
             {
                 auto* p = owner.renderScratch.getWritePointer(ch);
                 for (int i = 0; i < bs; ++i)
                 {
                     p[i] *= mGain;
-                    const float s = p[i];
-                    sumRmsMaster += s * s;
-                    if (ch == 0) sumRmsAudio += s * s;
+                    sumRmsMaster += p[i] * p[i];
                 }
             }
 
             owner.masterTrack.rmsLevel.store(
                 std::sqrt(sumRmsMaster / (bs * nCh)), std::memory_order_relaxed);
-            if (nTracks > 0)
-                owner.audioTracks[0].rmsLevel.store(
-                    std::sqrt(sumRmsAudio / bs), std::memory_order_relaxed);
 
-            // ── 8. Advance render position counter ────────────────────────
+            // ── 7. Advance render position counter ────────────────────────
             owner.appBuffer.renderBlockPosition.fetch_add(bs, std::memory_order_release);
 
-            // ── 9. Push rendered block into the ring ──────────────────────
+            // ── 8. Push rendered block into the ring ──────────────────────
             owner.appBuffer.writeBlock(owner.renderScratch);
         }
     }
@@ -236,31 +251,98 @@ MainComponent::MainComponent()
 
     // ── Pattern Editor ────────────────────────────────────────────────────────
     patternEditor.onEuclideanChanged = [this](int k, int n) {
-        if (!transportClock.getIsPlaying() || selectedTrackIndex < 0) return;
-        auto* p = euclideanPool.rentPattern();
-        p->generate(k, n);
-        audioTracks[selectedTrackIndex].commandQueue.push(
-            { TrackCommand::Type::PlayPattern, p, transportClock.getNextBarPosition() });
+        if (selectedTrackIndex < 0) return;
+        
+        double scheduleTime = transportClock.getIsPlaying() ? transportClock.getNextBarPosition() : 0.0;
+        
         if (selectedSceneIndex >= 0) {
             auto& clip = clipGrid[selectedTrackIndex][selectedSceneIndex];
-            clip.euclideanSteps  = n;
-            clip.euclideanPulses = k;
-            // Mirror the generated map into clipGrid so that scene launch and
-            // project save always have a single consistent source of truth.
-            // Without this, relaunching a scene after slider changes would use
-            // a stale hitMap from a previous manual circle edit.
-            clip.hitMap.assign(p->getHitMap().begin(), p->getHitMap().end());
+            if (trackInstruments[selectedTrackIndex] == "DrumRack") {
+                auto& pad = clip.drumPatterns[selectedDrumPadIndex];
+                pad.steps = n;
+                pad.pulses = k;
+                pad.hitMap.clear();
+                regenerateDrumRackMidi(clip);
+                sessionView.setClipData(selectedTrackIndex, selectedSceneIndex, clip);
+                
+                auto* p = midiPool.rentPattern();
+                p->setNotes(clip.midiNotes, clip.patternLengthBars);
+                audioTracks[selectedTrackIndex].commandQueue.push(
+                    { TrackCommand::Type::PlayPattern, p, scheduleTime });
+            } else {
+                clip.euclideanSteps = n;
+                clip.euclideanPulses = k;
+                auto* p = euclideanPool.rentPattern();
+                p->generate(k, n);
+                clip.hitMap.assign(p->getHitMap().begin(), p->getHitMap().end());
+                audioTracks[selectedTrackIndex].commandQueue.push(
+                    { TrackCommand::Type::PlayPattern, p, scheduleTime });
+            }
         }
     };
 
     patternEditor.onEuclideanHitMapChanged = [this](const std::vector<uint8_t>& map) {
-        if (!transportClock.getIsPlaying() || selectedTrackIndex < 0) return;
-        auto* p = euclideanPool.rentPattern();
-        p->setHitMap(map);
-        audioTracks[selectedTrackIndex].commandQueue.push(
-            { TrackCommand::Type::PlayPattern, p, transportClock.getNextBarPosition() });
-        if (selectedSceneIndex >= 0)
-            clipGrid[selectedTrackIndex][selectedSceneIndex].hitMap = map;
+        if (selectedTrackIndex < 0) return;
+        
+        double scheduleTime = transportClock.getIsPlaying() ? transportClock.getNextBarPosition() : 0.0;
+        
+        if (selectedSceneIndex >= 0) {
+            auto& clip = clipGrid[selectedTrackIndex][selectedSceneIndex];
+            if (trackInstruments[selectedTrackIndex] == "DrumRack") {
+                auto& pad = clip.drumPatterns[selectedDrumPadIndex];
+                pad.hitMap = map;
+                regenerateDrumRackMidi(clip);
+                sessionView.setClipData(selectedTrackIndex, selectedSceneIndex, clip);
+                
+                auto* p = midiPool.rentPattern();
+                p->setNotes(clip.midiNotes, clip.patternLengthBars);
+                audioTracks[selectedTrackIndex].commandQueue.push(
+                    { TrackCommand::Type::PlayPattern, p, scheduleTime });
+            } else {
+                clip.hitMap = map;
+                auto* p = euclideanPool.rentPattern();
+                p->setHitMap(map);
+                audioTracks[selectedTrackIndex].commandQueue.push(
+                    { TrackCommand::Type::PlayPattern, p, scheduleTime });
+            }
+        }
+    };
+
+    patternEditor.onMidiNotesChanged = [this](const std::vector<MidiNote>& notes) {
+        if (selectedTrackIndex < 0) return;
+
+        // Auto-compute pattern length from note content:
+        // find the furthest beat (note end) and round up to the nearest bar.
+        double maxBeat = 0.0;
+        for (const auto& n : notes)
+            maxBeat = std::max(maxBeat, n.startBeat + n.lengthBeats);
+        const double autoLengthBars = std::max(1.0, std::ceil(maxBeat / 4.0));
+
+        // Always update the clip data regardless of playback state
+        if (selectedSceneIndex >= 0) {
+            clipGrid[selectedTrackIndex][selectedSceneIndex].midiNotes        = notes;
+            clipGrid[selectedTrackIndex][selectedSceneIndex].patternLengthBars = autoLengthBars;
+            
+            double scheduleTime = transportClock.getIsPlaying() ? transportClock.getNextBarPosition() : 0.0;
+
+            // 1. FlushNotes: immediately release any voices that were triggered by
+            //    the old pattern. This prevents stuck notes when a note is deleted
+            //    while the synth is playing.
+            audioTracks[selectedTrackIndex].commandQueue.push(
+                { TrackCommand::Type::FlushNotes, nullptr, -1.0 });
+
+            // 2. Schedule the new pattern at the next bar boundary for clean timing.
+            auto* p = midiPool.rentPattern();
+            p->setNotes(notes, autoLengthBars);
+            audioTracks[selectedTrackIndex].commandQueue.push(
+                { TrackCommand::Type::PlayPattern, p, scheduleTime });
+        }
+    };
+
+    patternEditor.onModeChanged = [this](const juce::String& mode) {
+        if (selectedTrackIndex >= 0 && selectedSceneIndex >= 0) {
+            clipGrid[selectedTrackIndex][selectedSceneIndex].patternMode = mode;
+        }
     };
 
     // ── Session View Callbacks ────────────────────────────────────────────────
@@ -274,12 +356,21 @@ MainComponent::MainComponent()
         clip.euclideanSteps  = 16;
         clip.euclideanPulses = 4;
         clip.hitMap.clear();
+        clip.midiNotes.clear();
+        clip.patternMode     = (trackInstruments[t] == "Oscillator") ? "pianoroll" : 
+                               ((trackInstruments[t] == "DrumRack") ? "drumrack" : "euclidean");
         sessionView.setClipData(t, s, clip);
         selectedTrackIndex = t;
         selectedSceneIndex = s;
         sessionView.setClipSelected(t, s);
         sessionView.setTrackSelected(t);
-        patternEditor.loadClipData(clip);
+        
+        if (trackInstruments[t] == "DrumRack") {
+            updateDrumRackPatternEditor();
+        } else {
+            patternEditor.loadClipData(clip);
+        }
+        
         resized();
     };
 
@@ -288,16 +379,21 @@ MainComponent::MainComponent()
         selectedSceneIndex = s;
         sessionView.setClipSelected(t, s);
         sessionView.setTrackSelected(t);
-        patternEditor.loadClipData(clipGrid[t][s]);
+        
+        if (trackInstruments[t] == "DrumRack") {
+            updateDrumRackPatternEditor();
+        } else {
+            patternEditor.loadClipData(clipGrid[t][s]);
+        }
+        
         resized();
-        if (t >= 0 && t < MAX_TRACKS)
-            deviceView.showFile(loadedFiles[t]);
-        else
-            deviceView.clear();
+        showDeviceEditorForTrack(t);
     };
 
     sessionView.onLaunchClip = [this](int t, int s) {
         sessionView.onSelectClip(t, s);
+
+        double scheduleTime = transportClock.getIsPlaying() ? transportClock.getNextBarPosition() : 0.0;
 
         if (!transportClock.getIsPlaying()) {
             transportClock.stop(); // to ensure playhead zero
@@ -305,11 +401,25 @@ MainComponent::MainComponent()
         }
 
         auto& clip = clipGrid[t][s];
-        auto* p    = euclideanPool.rentPattern();
-        if (!clip.hitMap.empty()) p->setHitMap(clip.hitMap);
-        else                      p->generate(clip.euclideanPulses, clip.euclideanSteps);
+        Pattern* p = nullptr;
+        
+        if (clip.patternMode == "pianoroll" || clip.patternMode == "drumrack") {
+            auto* mp = midiPool.rentPattern();
+            mp->setNotes(clip.midiNotes, clip.patternLengthBars);
+            p = mp;
+        } else {
+            auto* ep = euclideanPool.rentPattern();
+            if (!clip.hitMap.empty()) {
+                ep->setHitMap(clip.hitMap);
+            } else {
+                ep->generate(clip.euclideanPulses, clip.euclideanSteps);
+                clip.hitMap.assign(ep->getHitMap().begin(), ep->getHitMap().end());
+            }
+            p = ep;
+        }
+        
         audioTracks[t].commandQueue.push(
-            { TrackCommand::Type::PlayPattern, p, transportClock.getNextBarPosition() });
+            { TrackCommand::Type::PlayPattern, p, scheduleTime });
         clip.isPlaying = true;
         sessionView.setClipData(t, s, clip);
     };
@@ -320,10 +430,7 @@ MainComponent::MainComponent()
         sessionView.setClipSelected(t, -1);
         sessionView.setTrackSelected(t);
         resized();
-        if (t >= 0 && t < MAX_TRACKS)
-            deviceView.showFile(loadedFiles[t]);
-        else
-            deviceView.clear();
+        showDeviceEditorForTrack(t);
     };
 
     sessionView.onDeleteClip = [this](int t, int s) {
@@ -352,8 +459,7 @@ MainComponent::MainComponent()
 
         for (int t = trackIndex; t < nTracks - 1; ++t) {
             audioTracks[t].moveFrom(audioTracks[t + 1]);
-            samplerDSPs[t].moveFrom(samplerDSPs[t + 1]);
-            loadedFiles[t] = loadedFiles[t + 1];
+            trackInstruments[t] = trackInstruments[t + 1];
             for (int s = 0; s < NUM_SCENES; ++s) {
                 clipGrid[t][s] = clipGrid[t + 1][s];
             }
@@ -361,8 +467,7 @@ MainComponent::MainComponent()
 
         int last = nTracks - 1;
         audioTracks[last].clear();
-        samplerDSPs[last].clear();
-        loadedFiles[last] = juce::File();
+        trackInstruments[last] = "";
         for (int s = 0; s < NUM_SCENES; ++s) {
             clipGrid[last][s] = ClipData();
         }
@@ -384,18 +489,34 @@ MainComponent::MainComponent()
     };
 
     sessionView.onLaunchScene = [this](int sceneIdx) {
+        double schedSample = transportClock.getIsPlaying() ? transportClock.getNextBarPosition() : 0.0;
+
         if (!transportClock.getIsPlaying()) {
             transportClock.stop(); // zero playhead
             transportClock.play();
         }
-        double schedSample = transportClock.getNextBarPosition();
+
         int nTracks = numActiveTracks.load(std::memory_order_relaxed);
         for (int t = 0; t < nTracks; ++t) {
             if (clipGrid[t][sceneIdx].hasClip) {
                 auto& clip = clipGrid[t][sceneIdx];
-                auto* p    = euclideanPool.rentPattern();
-                if (!clip.hitMap.empty()) p->setHitMap(clip.hitMap);
-                else                      p->generate(clip.euclideanPulses, clip.euclideanSteps);
+                Pattern* p = nullptr;
+
+                if (clip.patternMode == "pianoroll" || clip.patternMode == "drumrack") {
+                    auto* mp = midiPool.rentPattern();
+                    mp->setNotes(clip.midiNotes, clip.patternLengthBars);
+                    p = mp;
+                } else {
+                    auto* ep = euclideanPool.rentPattern();
+                    if (!clip.hitMap.empty()) {
+                        ep->setHitMap(clip.hitMap);
+                    } else {
+                        ep->generate(clip.euclideanPulses, clip.euclideanSteps);
+                        clip.hitMap.assign(ep->getHitMap().begin(), ep->getHitMap().end());
+                    }
+                    p = ep;
+                }
+
                 audioTracks[t].commandQueue.push({ TrackCommand::Type::PlayPattern, p, schedSample });
                 clip.isPlaying = true;
                 sessionView.setClipData(t, sceneIdx, clip);
@@ -406,18 +527,73 @@ MainComponent::MainComponent()
         sessionView.setSceneActive(sceneIdx, true);
     };
 
-    sessionView.onInstrumentDropped = [this](int trackIdx, const juce::String& /*type*/) {
+    sessionView.onInstrumentDropped = [this](int trackIdx, const juce::String& type) {
         int nTracks = numActiveTracks.load(std::memory_order_relaxed);
+        int targetIdx = -1;
+
         if (trackIdx >= 0 && trackIdx < nTracks) {
-            sessionView.gridContent.columns[trackIdx]->header.hasInstrument = true;
-            sessionView.gridContent.columns[trackIdx]->header.repaint();
+            // Drop onto existing track — update its instrument
+            targetIdx = trackIdx;
+            sessionView.gridContent.columns[targetIdx]->header.hasInstrument = true;
+            sessionView.gridContent.columns[targetIdx]->header.instrumentName = type;
+            trackInstruments[targetIdx] = type;
+            sessionView.gridContent.columns[targetIdx]->header.repaint();
         } else {
+            // Drop onto drop zone — create new track
             if (nTracks >= MAX_TRACKS) return;
-            int newIdx = numActiveTracks.fetch_add(1, std::memory_order_relaxed);
-            sessionView.addTrack(TrackType::Audio, "Track " + juce::String(newIdx + 1));
-            sessionView.gridContent.columns[newIdx]->header.hasInstrument = true;
-            sessionView.gridContent.columns[newIdx]->header.repaint();
+            targetIdx = numActiveTracks.fetch_add(1, std::memory_order_relaxed);
+            sessionView.addTrack(TrackType::Audio, "Track " + juce::String(targetIdx + 1));
+            sessionView.gridContent.columns[targetIdx]->header.hasInstrument = true;
+            sessionView.gridContent.columns[targetIdx]->header.instrumentName = type;
+            trackInstruments[targetIdx] = type;
+            sessionView.gridContent.columns[targetIdx]->header.repaint();
         }
+
+        // Always select the track and show its device panel immediately,
+        // regardless of what was previously selected.
+        selectedTrackIndex = targetIdx;
+        selectedSceneIndex = -1;
+        sessionView.setTrackSelected(targetIdx);
+        sessionView.setClipSelected(targetIdx, -1);
+
+        // Instantiate modular instrument
+        auto newInst = InstrumentFactory::create(type);
+        if (newInst) {
+            newInst->prepareToPlay(currentSampleRate);
+            if (auto* old = audioTracks[targetIdx].activeInstrument.exchange(newInst.release(), std::memory_order_acq_rel)) {
+                audioTracks[targetIdx].instrumentGarbageQueue.push(old);
+            }
+        }
+
+        showDeviceEditorForTrack(targetIdx);
+
+        resized();
+    };
+
+    // ── Mixer Volume Callbacks ────────────────────────────────────────
+    // These are the ONLY paths that write to the audio-thread gain atomics.
+    // Without them the faders are purely cosmetic.
+    sessionView.onTrackVolumeChanged = [this](int t, float gain) {
+        if (t >= 0 && t < MAX_TRACKS)
+            audioTracks[t].gain.store(gain, std::memory_order_relaxed);
+    };
+
+    sessionView.onMasterVolumeChanged = [this](float gain) {
+        masterTrack.gain.store(gain, std::memory_order_relaxed);
+    };
+
+    sessionView.onReturnVolumeChanged = [this](float gain) {
+        returnTrackA.gain.store(gain, std::memory_order_relaxed);
+    };
+
+    sessionView.onTrackMuteChanged = [this](int t, bool muted) {
+        if (t >= 0 && t < MAX_TRACKS)
+            audioTracks[t].muted.store(muted, std::memory_order_relaxed);
+    };
+
+    sessionView.onTrackSoloChanged = [this](int t, bool soloed) {
+        if (t >= 0 && t < MAX_TRACKS)
+            audioTracks[t].soloed.store(soloed, std::memory_order_relaxed);
     };
 
     // ── Audio Device ──────────────────────────────────────────────────
@@ -479,6 +655,12 @@ void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate
     // Start the render thread (it will wait on renderWakeEvent initially).
     if (!renderThread.isThreadRunning())
         renderThread.startThread();
+        
+    for (int t = 0; t < MAX_TRACKS; ++t) {
+        if (auto* inst = audioTracks[t].activeInstrument.load(std::memory_order_acquire)) {
+            inst->prepareToPlay(sampleRate);
+        }
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -556,8 +738,12 @@ void MainComponent::timerCallback()
 
     const int nTracks = numActiveTracks.load(std::memory_order_relaxed);
 
-    if (nTracks > 0)
-        applyDecay(audioLevelDisplay,  audioTracks[0].rmsLevel.load(std::memory_order_relaxed));
+    if (nTracks > 0) {
+        float peakTrackRms = 0.0f;
+        for (int t = 0; t < nTracks; ++t)
+            peakTrackRms = std::max(peakTrackRms, audioTracks[t].rmsLevel.load(std::memory_order_relaxed));
+        applyDecay(audioLevelDisplay, peakTrackRms);
+    }
     applyDecay(returnLevelDisplay, returnTrackA.rmsLevel.load(std::memory_order_relaxed));
     applyDecay(masterLevelDisplay, masterTrack.rmsLevel.load(std::memory_order_relaxed));
 
@@ -573,10 +759,12 @@ void MainComponent::timerCallback()
     gcTrack(returnTrackA);
     for (int t = 0; t < nTracks; ++t) gcTrack(audioTracks[t]);
 
-    // ── GC: Sampler buffers ───────────────────────────────────────────────────
-    for (int t = 0; t < nTracks; ++t)
-        while (auto* old = samplerDSPs[t].popGarbage())
-            delete old;
+    // ── GC: Instrument internal buffers ───────────────────────────────────────
+    for (int t = 0; t < nTracks; ++t) {
+        if (auto* inst = audioTracks[t].activeInstrument.load(std::memory_order_relaxed)) {
+            inst->processGarbage();
+        }
+    }
 
     // ── GC: Old plugin instances ──────────────────────────────────────────────
     while (auto opt = pluginGarbageQueue.pop())
@@ -788,7 +976,6 @@ void MainComponent::syncUIToProject()
     // Clear current tracks and UI
     numActiveTracks.store(0, std::memory_order_relaxed);
     for (int t = 0; t < MAX_TRACKS; t++) {
-        loadedFiles[t] = juce::File();
         // Zero all clip grids
         for (int s = 0; s < NUM_SCENES; s++) {
             clipGrid[t][s] = ClipData();
@@ -834,14 +1021,47 @@ void MainComponent::syncUIToProject()
                     
                     sessionView.addTrack(TrackType::Audio, name);
                     
-                    // Sampler file
-                    auto samplerNode = trackNode.getChildWithName("Sampler");
-                    if (samplerNode.isValid()) {
-                        juce::String filePath = samplerNode.getProperty("file_path", "");
-                        juce::File f(filePath);
-                        if (f.existsAsFile()) {
-                            loadAudioFileIntoTrack(tIdx, f);
-                            sessionView.gridContent.columns[tIdx]->header.hasInstrument = true;
+                    juce::String instrumentType = trackNode.getProperty("instrument_type", "");
+                    trackInstruments[tIdx] = instrumentType;
+
+                    if (instrumentType.isNotEmpty()) {
+                        sessionView.gridContent.columns[tIdx]->header.hasInstrument = true;
+                        sessionView.gridContent.columns[tIdx]->header.instrumentName = instrumentType;
+                        
+                        auto newInst = InstrumentFactory::create(instrumentType);
+                        if (newInst) {
+                            newInst->prepareToPlay(currentSampleRate);
+                            
+                            if (instrumentType == "Oscillator") {
+                                auto oscNode = trackNode.getChildWithName("OscillatorState");
+                                if (oscNode.isValid()) newInst->loadState(oscNode);
+                            } else if (instrumentType == "Simpler") {
+                                auto samplerNode = trackNode.getChildWithName("Sampler");
+                                if (samplerNode.isValid()) {
+                                    juce::String filePath = samplerNode.getProperty("file_path", "");
+                                    juce::File f(filePath);
+                                    if (f.existsAsFile()) {
+                                        newInst->loadFile(f);
+                                        loadAudioFileIntoTrack(tIdx, f);
+                                    }
+                                }
+                            } else if (instrumentType == "DrumRack") {
+                                auto stateNode = trackNode.getChildWithName("DrumRackState");
+                                if (stateNode.isValid()) {
+                                    newInst->loadState(stateNode);
+                                    if (auto* dr = dynamic_cast<DrumRackProcessor*>(newInst.get())) {
+                                        for (int i = 0; i < 16; ++i) {
+                                            if (dr->settings[i].loadedFile.existsAsFile()) {
+                                                loadAudioFileIntoDrumPad(tIdx, i, dr->settings[i].loadedFile);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            if (auto* old = audioTracks[tIdx].activeInstrument.exchange(newInst.release(), std::memory_order_acq_rel)) {
+                                audioTracks[tIdx].instrumentGarbageQueue.push(old);
+                            }
                         }
                     }
 
@@ -866,6 +1086,46 @@ void MainComponent::syncUIToProject()
                                         for (int ci = 0; ci < hex.length(); ci += 2)
                                             d.hitMap.push_back((uint8_t) hex.substring(ci, ci + 2).getHexValue32());
                                     }
+                                    clipGrid[tIdx][sIdx] = d;
+                                    sessionView.setClipData(tIdx, sIdx, d);
+
+                                    // Restore MidiNotes and Pattern Mode
+                                    d.patternMode = clipNode.getProperty("patternMode", "euclidean");
+                                    d.patternLengthBars = clipNode.getProperty("patternLengthBars", 1.0);
+                                    
+                                    auto midiNotesNode = clipNode.getChildWithName("MidiNotes");
+                                    if (midiNotesNode.isValid()) {
+                                        d.midiNotes.clear();
+                                        for (int mn = 0; mn < midiNotesNode.getNumChildren(); ++mn) {
+                                            auto noteNode = midiNotesNode.getChild(mn);
+                                            MidiNote n;
+                                            n.note = noteNode.getProperty("note");
+                                            n.startBeat = noteNode.getProperty("startBeat");
+                                            n.lengthBeats = noteNode.getProperty("lengthBeats");
+                                            n.velocity = noteNode.getProperty("velocity");
+                                            d.midiNotes.push_back(n);
+                                        }
+                                    }
+                                    
+                                    auto drNode = clipNode.getChildWithName("DrumPatterns");
+                                    if (drNode.isValid()) {
+                                        for (int p = 0; p < drNode.getNumChildren(); ++p) {
+                                            auto pNode = drNode.getChild(p);
+                                            int idx = pNode.getProperty("padIndex", -1);
+                                            if (idx >= 0 && idx < 16) {
+                                                auto& pad = d.drumPatterns[idx];
+                                                pad.steps = pNode.getProperty("steps", 16);
+                                                pad.pulses = pNode.getProperty("pulses", 0);
+                                                juce::String hex = pNode.getProperty("hitMap", "");
+                                                if (hex.isNotEmpty() && hex.length() % 2 == 0) {
+                                                    pad.hitMap.clear();
+                                                    for (int ci = 0; ci < hex.length(); ci += 2)
+                                                        pad.hitMap.push_back((uint8_t)hex.substring(ci, ci + 2).getHexValue32());
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
                                     clipGrid[tIdx][sIdx] = d;
                                     sessionView.setClipData(tIdx, sIdx, d);
                                 }
@@ -903,10 +1163,21 @@ void MainComponent::syncProjectToUI()
         trackNode.setProperty("name", name, nullptr);
         trackNode.setProperty("gain", audioTracks[t].gain.load(std::memory_order_relaxed), nullptr);
 
-        if (loadedFiles[t].existsAsFile()) {
-            juce::ValueTree samplerNode("Sampler");
-            samplerNode.setProperty("file_path", loadedFiles[t].getFullPathName(), nullptr);
-            trackNode.addChild(samplerNode, -1, nullptr);
+        trackNode.setProperty("instrument_type", trackInstruments[t], nullptr);
+
+        if (auto* inst = audioTracks[t].activeInstrument.load(std::memory_order_acquire)) {
+            if (trackInstruments[t] == "Oscillator" || trackInstruments[t] == "DrumRack") {
+                auto state = inst->saveState();
+                trackNode.addChild(state, -1, nullptr);
+            } else if (trackInstruments[t] == "Simpler") {
+                if (auto* simpler = dynamic_cast<SimplerProcessor*>(inst)) {
+                    if (simpler->loadedFile.existsAsFile()) {
+                        juce::ValueTree samplerNode("Sampler");
+                        samplerNode.setProperty("file_path", simpler->loadedFile.getFullPathName(), nullptr);
+                        trackNode.addChild(samplerNode, -1, nullptr);
+                    }
+                }
+            }
         }
 
         juce::ValueTree clipsNode("Clips");
@@ -927,6 +1198,42 @@ void MainComponent::syncProjectToUI()
                     clipNode.setProperty("hitMap", hex, nullptr);
                 }
                 clipsNode.addChild(clipNode, -1, nullptr);
+
+                clipNode.setProperty("patternMode", clip.patternMode, nullptr);
+                clipNode.setProperty("patternLengthBars", clip.patternLengthBars, nullptr);
+
+                if (!clip.midiNotes.empty()) {
+                    juce::ValueTree midiNotesNode("MidiNotes");
+                    for (const auto& n : clip.midiNotes) {
+                        juce::ValueTree noteNode("Note");
+                        noteNode.setProperty("note", n.note, nullptr);
+                        noteNode.setProperty("startBeat", n.startBeat, nullptr);
+                        noteNode.setProperty("lengthBeats", n.lengthBeats, nullptr);
+                        noteNode.setProperty("velocity", n.velocity, nullptr);
+                        midiNotesNode.addChild(noteNode, -1, nullptr);
+                    }
+                    clipNode.addChild(midiNotesNode, -1, nullptr);
+                }
+
+                if (clip.patternMode == "drumrack") {
+                    juce::ValueTree drNode("DrumPatterns");
+                    for (int p = 0; p < 16; ++p) {
+                        auto& pad = clip.drumPatterns[p];
+                        if (pad.pulses > 0 || !pad.hitMap.empty()) {
+                            juce::ValueTree pNode("PadPattern");
+                            pNode.setProperty("padIndex", p, nullptr);
+                            pNode.setProperty("steps", pad.steps, nullptr);
+                            pNode.setProperty("pulses", pad.pulses, nullptr);
+                            if (!pad.hitMap.empty()) {
+                                juce::String hex;
+                                for (uint8_t b : pad.hitMap) hex += juce::String::toHexString(b).paddedLeft('0', 2);
+                                pNode.setProperty("hitMap", hex, nullptr);
+                            }
+                            drNode.addChild(pNode, -1, nullptr);
+                        }
+                    }
+                    clipNode.addChild(drNode, -1, nullptr);
+                }
             }
         }
         if (clipsNode.getNumChildren() > 0)
@@ -940,7 +1247,9 @@ void MainComponent::loadAudioFileIntoTrack(int trackIdx, const juce::File& file)
 {
     if (trackIdx < 0 || trackIdx >= MAX_TRACKS) return;
 
-    loadedFiles[trackIdx] = file;
+    if (auto* inst = audioTracks[trackIdx].activeInstrument.load(std::memory_order_acquire)) {
+        inst->loadFile(file);
+    }
 
     juce::Thread::launch([this, file, trackIdx] {
         if (auto* reader = formatManager.createReaderFor(file)) {
@@ -950,11 +1259,113 @@ void MainComponent::loadAudioFileIntoTrack(int trackIdx, const juce::File& file)
             delete reader;
 
             juce::MessageManager::callAsync([this, newBuffer, trackIdx, file] {
-                samplerDSPs[trackIdx].loadNewBuffer(newBuffer);
+                if (auto* inst = audioTracks[trackIdx].activeInstrument.load(std::memory_order_acquire)) {
+                    if (auto* simpler = dynamic_cast<SimplerProcessor*>(inst)) {
+                        simpler->loadNewBuffer(newBuffer);
+                    } else {
+                        delete newBuffer;
+                    }
+                } else {
+                    delete newBuffer;
+                }
+                
                 if (trackIdx == selectedTrackIndex) {
-                    deviceView.showFile(file);
+                    showDeviceEditorForTrack(trackIdx);
                 }
             });
         }
     });
+}
+
+void MainComponent::regenerateDrumRackMidi(ClipData& clip) {
+    clip.midiNotes.clear();
+    for (int pad = 0; pad < 16; ++pad) {
+        auto& p = clip.drumPatterns[pad];
+        if (p.hitMap.empty() && p.pulses == 0) continue;
+        
+        std::vector<uint8_t> map = p.hitMap;
+        if (map.empty() && p.pulses > 0) {
+            map.assign(p.steps, 0);
+            for (int i = 0; i < p.steps; ++i) {
+                map[i] = ((i * p.pulses) % p.steps < p.pulses) ? 1 : 0;
+            }
+        }
+        
+        for (int i = 0; i < p.steps; ++i) {
+            if (map[i] != 0) {
+                MidiNote n;
+                n.note = 36 + pad;
+                n.startBeat = (double)i * 0.25; // Assuming 16th notes
+                n.lengthBeats = 0.25;
+                n.velocity = 1.0f;
+                clip.midiNotes.push_back(n);
+            }
+        }
+    }
+}
+
+void MainComponent::loadAudioFileIntoDrumPad(int trackIdx, int padIndex, const juce::File& file) {
+    if (trackIdx < 0 || trackIdx >= MAX_TRACKS) return;
+
+    if (auto* inst = audioTracks[trackIdx].activeInstrument.load(std::memory_order_acquire)) {
+        if (auto* dr = dynamic_cast<DrumRackProcessor*>(inst)) {
+            juce::Thread::launch([this, file, trackIdx, padIndex] {
+                if (auto* reader = formatManager.createReaderFor(file)) {
+                    auto* newBuffer = new juce::AudioBuffer<float>(
+                        reader->numChannels, (int)reader->lengthInSamples);
+                    reader->read(newBuffer, 0, (int)reader->lengthInSamples, 0, true, true);
+                    delete reader;
+
+                    juce::MessageManager::callAsync([this, newBuffer, trackIdx, padIndex, file] {
+                        if (auto* inst = audioTracks[trackIdx].activeInstrument.load(std::memory_order_acquire)) {
+                            if (auto* dr = dynamic_cast<DrumRackProcessor*>(inst)) {
+                                dr->loadBufferToPad(padIndex, newBuffer, file);
+                            } else {
+                                delete newBuffer;
+                            }
+                        } else {
+                            delete newBuffer;
+                        }
+                    });
+                }
+            });
+        }
+    }
+}
+
+void MainComponent::showDeviceEditorForTrack(int trackIdx) {
+    if (trackIdx >= 0 && trackIdx < MAX_TRACKS) {
+        if (auto* inst = audioTracks[trackIdx].activeInstrument.load(std::memory_order_acquire)) {
+            auto editor = inst->createEditor();
+            
+            if (auto* drumComp = dynamic_cast<DrumRackComponent*>(editor.get())) {
+                drumComp->onSampleDropped = [this, trackIdx](int padIndex, juce::File file) {
+                    loadAudioFileIntoDrumPad(trackIdx, padIndex, file);
+                };
+                drumComp->onPadSelected = [this](int padIndex) {
+                    selectedDrumPadIndex = padIndex;
+                    updateDrumRackPatternEditor();
+                };
+            }
+            deviceView.showEditor(std::move(editor));
+            
+            if (auto* drumComp = dynamic_cast<DrumRackComponent*>(deviceView.getCurrentEditor())) {
+                if (drumComp->onPadSelected) drumComp->onPadSelected(0); // Select Pad 1 by default
+            }
+        } else {
+            deviceView.clear();
+        }
+    } else {
+        deviceView.clear();
+    }
+}
+
+void MainComponent::updateDrumRackPatternEditor() {
+    if (selectedTrackIndex >= 0 && selectedSceneIndex >= 0) {
+        if (trackInstruments[selectedTrackIndex] == "DrumRack") {
+            auto& clip = clipGrid[selectedTrackIndex][selectedSceneIndex];
+            auto& pad = clip.drumPatterns[selectedDrumPadIndex];
+            patternEditor.loadDrumPadData(pad.steps, pad.pulses, pad.hitMap);
+        }
+    }
 }

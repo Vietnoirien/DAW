@@ -128,24 +128,7 @@ public:
     float playheadPhase = -1.0f;
 };
 
-class PianoRollViewer : public juce::Component {
-public:
-    PianoRollViewer() {}
-
-    void paint(juce::Graphics& g) override {
-        g.fillAll(juce::Colours::black);
-        g.setColour(juce::Colours::darkgrey.darker());
-        for (int i = 0; i < 32; ++i) {
-            g.drawLine((float)i * 30.0f, 0, (float)i * 30.0f, (float)getHeight());
-        }
-        for (int i = 0; i < 16; ++i) {
-            g.drawLine(0, (float)i * 20.0f, (float)getWidth(), (float)i * 20.0f);
-        }
-        g.setColour(juce::Colours::lightgrey);
-        g.drawText("Mode A: Virtual Piano Roll (Drag to draw notes)", getLocalBounds(), juce::Justification::centred);
-    }
-};
-
+#include "PianoRollEditor.h"
 class PatternEditor : public juce::Component, public juce::Slider::Listener {
 public:
     PatternEditor() {
@@ -154,6 +137,10 @@ public:
 
         euclideanViewer.onHitMapToggled = [this](const std::vector<uint8_t>& map) {
             if (onEuclideanHitMapChanged) onEuclideanHitMapChanged(map);
+        };
+
+        pianoRollViewer.onNotesChanged = [this](const std::vector<MidiNote>& notes) {
+            if (onMidiNotesChanged) onMidiNotesChanged(notes);
         };
 
         auto setupSlider = [this](juce::Slider& sl, int min, int max, int val, const juce::String& name) {
@@ -172,7 +159,12 @@ public:
         modeSelector.addItem("Piano Roll", 1);
         modeSelector.addItem("Euclidean", 2);
         modeSelector.setSelectedId(2);
-        modeSelector.onChange = [this]() { updateMode(); };
+        modeSelector.onChange = [this]() {
+            updateMode();
+            if (onModeChanged) {
+                onModeChanged(modeSelector.getSelectedId() == 1 ? "pianoroll" : "euclidean");
+            }
+        };
         addAndMakeVisible(modeSelector);
 
         updateMode();
@@ -229,12 +221,31 @@ public:
             euclideanViewer.repaint();
         }
 
-        modeSelector.setSelectedId (2, juce::dontSendNotification);
+        pianoRollViewer.setNotes(clip.midiNotes);
+
+        int modeId = (clip.patternMode == "pianoroll") ? 1 : 2;
+        modeSelector.setSelectedId (modeId, juce::dontSendNotification);
+        updateMode();
+    }
+
+    void loadDrumPadData(int steps, int pulses, const std::vector<uint8_t>& hitMap) {
+        stepsSlider.setValue(steps, juce::dontSendNotification);
+        pulsesSlider.setValue(pulses, juce::dontSendNotification);
+        euclideanViewer.setParams(pulses, steps);
+        if (!hitMap.empty() && (int)hitMap.size() == steps) {
+            euclideanViewer.activeSteps = hitMap;
+        } else if (hitMap.empty()) {
+            euclideanViewer.setParams(pulses, steps); // resets hitMap internally
+        }
+        euclideanViewer.repaint();
+        modeSelector.setSelectedId(2, juce::dontSendNotification);
         updateMode();
     }
 
     std::function<void(int pulses, int steps)> onEuclideanChanged;
     std::function<void(const std::vector<uint8_t>&)> onEuclideanHitMapChanged;
+    std::function<void(const std::vector<MidiNote>&)> onMidiNotesChanged;
+    std::function<void(const juce::String&)> onModeChanged;
 
 private:
     EuclideanCircleViewer euclideanViewer;
