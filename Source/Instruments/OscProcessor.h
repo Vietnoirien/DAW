@@ -263,13 +263,14 @@ public:
     
     void processBlock(juce::AudioBuffer<float>& outBuffer, const juce::MidiBuffer& midiMessages) override {
         int numSamples = outBuffer.getNumSamples();
-        
+        int currentPos = 0;
         for (const auto meta : midiMessages) {
             auto msg = meta.getMessage();
             int samplePos = meta.samplePosition;
 
-            if (samplePos > 0) {
-                renderVoices(outBuffer, 0, samplePos);
+            if (samplePos > currentPos) {
+                renderVoices(outBuffer, currentPos, samplePos - currentPos);
+                currentPos = samplePos;
             }
 
             if (msg.isNoteOn()) {
@@ -281,7 +282,9 @@ public:
             }
         }
         
-        renderVoices(outBuffer, 0, numSamples);
+        if (currentPos < numSamples) {
+            renderVoices(outBuffer, currentPos, numSamples - currentPos);
+        }
     }
     
     void clear() override {

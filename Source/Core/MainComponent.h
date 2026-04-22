@@ -97,6 +97,9 @@ struct Track
             if (currentPattern && currentPattern != pendingPattern) 
                 garbageQueue.push(currentPattern);
             
+            midiBuffer.addEvent(juce::MidiMessage::allNotesOff(1), samplesBefore);
+            midiBuffer.addEvent(juce::MidiMessage::allNotesOff(10), samplesBefore);
+
             currentPattern = pendingPattern;
             pendingPattern = nullptr;
             patternStartSample = switchSample;
@@ -109,6 +112,10 @@ struct Track
             // (render thread missed the exact block due to OS scheduling jitter).
             if (switchSample != -1.0 && blockStartSample >= switchSample) {
                 if (currentPattern && currentPattern != pendingPattern) garbageQueue.push(currentPattern);
+                
+                midiBuffer.addEvent(juce::MidiMessage::allNotesOff(1), 0);
+                midiBuffer.addEvent(juce::MidiMessage::allNotesOff(10), 0);
+
                 currentPattern = pendingPattern;
                 pendingPattern = nullptr;
                 patternStartSample = switchSample;

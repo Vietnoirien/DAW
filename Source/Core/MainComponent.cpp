@@ -469,6 +469,14 @@ MainComponent::MainComponent()
             p = ep;
         }
         
+        // Stop visually playing clip in the track
+        for (int i = 0; i < NUM_SCENES; ++i) {
+            if (i != s && clipGrid[t][i].isPlaying) {
+                clipGrid[t][i].isPlaying = false;
+                sessionView.setClipData(t, i, clipGrid[t][i]);
+            }
+        }
+
         audioTracks[t].commandQueue.push(
             { TrackCommand::Type::PlayPattern, p, scheduleTime });
         clip.isPlaying = true;
@@ -549,6 +557,14 @@ MainComponent::MainComponent()
 
         int nTracks = numActiveTracks.load(std::memory_order_relaxed);
         for (int t = 0; t < nTracks; ++t) {
+            // Stop visually playing clip in the track
+            for (int s = 0; s < NUM_SCENES; ++s) {
+                if (s != sceneIdx && clipGrid[t][s].isPlaying) {
+                    clipGrid[t][s].isPlaying = false;
+                    sessionView.setClipData(t, s, clipGrid[t][s]);
+                }
+            }
+
             if (clipGrid[t][sceneIdx].hasClip) {
                 auto& clip = clipGrid[t][sceneIdx];
                 Pattern* p = nullptr;
@@ -1088,6 +1104,11 @@ void MainComponent::syncUIToProject()
         }
         audioTracks[t].gain.store(1.0f);
         audioTracks[t].commandQueue.push({ TrackCommand::Type::StopPattern, nullptr, 0 });
+        for (int e = 0; e < Track::MAX_EFFECTS; ++e) {
+            if (auto* old = audioTracks[t].effectChain[e].exchange(nullptr, std::memory_order_acq_rel)) {
+                audioTracks[t].effectGarbageQueue.push(old);
+            }
+        }
     }
     
     selectedTrackIndex = -1;
@@ -1137,24 +1158,30 @@ void MainComponent::syncUIToProject()
                         if (newInst) {
                             newInst->prepareToPlay(currentSampleRate);
                             
+                            if (auto* old = audioTracks[tIdx].activeInstrument.exchange(newInst.release(), std::memory_order_acq_rel)) {
+                                audioTracks[tIdx].instrumentGarbageQueue.push(old);
+                            }
+
+                            auto* currentInst = audioTracks[tIdx].activeInstrument.load(std::memory_order_acquire);
+
                             if (instrumentType == "Oscillator") {
                                 auto oscNode = trackNode.getChildWithName("OscillatorState");
-                                if (oscNode.isValid()) newInst->loadState(oscNode);
+                                if (oscNode.isValid()) currentInst->loadState(oscNode);
                             } else if (instrumentType == "Simpler") {
                                 auto samplerNode = trackNode.getChildWithName("Sampler");
                                 if (samplerNode.isValid()) {
                                     juce::String filePath = samplerNode.getProperty("file_path", "");
                                     juce::File f(filePath);
                                     if (f.existsAsFile()) {
-                                        newInst->loadFile(f);
+                                        currentInst->loadFile(f);
                                         loadAudioFileIntoTrack(tIdx, f);
                                     }
                                 }
                             } else if (instrumentType == "DrumRack") {
                                 auto stateNode = trackNode.getChildWithName("DrumRackState");
                                 if (stateNode.isValid()) {
-                                    newInst->loadState(stateNode);
-                                    if (auto* dr = dynamic_cast<DrumRackProcessor*>(newInst.get())) {
+                                    currentInst->loadState(stateNode);
+                                    if (auto* dr = dynamic_cast<DrumRackProcessor*>(currentInst)) {
                                         for (int i = 0; i < 16; ++i) {
                                             if (dr->settings[i].loadedFile.existsAsFile()) {
                                                 loadAudioFileIntoDrumPad(tIdx, i, dr->settings[i].loadedFile);
@@ -1163,9 +1190,27 @@ void MainComponent::syncUIToProject()
                                     }
                                 }
                             }
-                            
-                            if (auto* old = audioTracks[tIdx].activeInstrument.exchange(newInst.release(), std::memory_order_acq_rel)) {
-                                audioTracks[tIdx].instrumentGarbageQueue.push(old);
+                        }
+                    }
+                    
+                    // Effects
+                    auto effectsNode = trackNode.getChildWithName("Effects");
+                    if (effectsNode.isValid()) {
+                        int eIdx = 0;
+                        for (int e = 0; e < effectsNode.getNumChildren() && eIdx < Track::MAX_EFFECTS; ++e) {
+                            auto effectNode = effectsNode.getChild(e);
+                            if (effectNode.hasType("Effect")) {
+                                juce::String type = effectNode.getProperty("type", "");
+                                if (auto effect = EffectFactory::create(type)) {
+                                    effect->prepareToPlay(currentSampleRate);
+                                    if (effectNode.getNumChildren() > 0) {
+                                        effect->loadState(effectNode.getChild(0));
+                                    }
+                                    if (auto* old = audioTracks[tIdx].effectChain[eIdx].exchange(effect.release(), std::memory_order_acq_rel)) {
+                                        audioTracks[tIdx].effectGarbageQueue.push(old);
+                                    }
+                                    eIdx++;
+                                }
                             }
                         }
                     }
@@ -1236,6 +1281,39 @@ void MainComponent::syncUIToProject()
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // Return Track A
+    for (int e = 0; e < Track::MAX_EFFECTS; ++e) {
+        if (auto* old = returnTrackA.effectChain[e].exchange(nullptr, std::memory_order_acq_rel)) {
+            returnTrackA.effectGarbageQueue.push(old);
+        }
+    }
+    auto returnTrackNode = pTree.getChildWithName("ReturnTrackA");
+    if (returnTrackNode.isValid()) {
+        float gain = returnTrackNode.getProperty("gain", 1.0f);
+        returnTrackA.gain.store(gain, std::memory_order_relaxed);
+        
+        auto returnEffectsNode = returnTrackNode.getChildWithName("Effects");
+        if (returnEffectsNode.isValid()) {
+            int eIdx = 0;
+            for (int e = 0; e < returnEffectsNode.getNumChildren() && eIdx < Track::MAX_EFFECTS; ++e) {
+                auto effectNode = returnEffectsNode.getChild(e);
+                if (effectNode.hasType("Effect")) {
+                    juce::String type = effectNode.getProperty("type", "");
+                    if (auto effect = EffectFactory::create(type)) {
+                        effect->prepareToPlay(currentSampleRate);
+                        if (effectNode.getNumChildren() > 0) {
+                            effect->loadState(effectNode.getChild(0));
+                        }
+                        if (auto* old = returnTrackA.effectChain[eIdx].exchange(effect.release(), std::memory_order_acq_rel)) {
+                            returnTrackA.effectGarbageQueue.push(old);
+                        }
+                        eIdx++;
                     }
                 }
             }
@@ -1344,8 +1422,37 @@ void MainComponent::syncProjectToUI()
         if (clipsNode.getNumChildren() > 0)
             trackNode.addChild(clipsNode, -1, nullptr);
             
+        // Effects
+        juce::ValueTree effectsNode("Effects");
+        for (int i = 0; i < Track::MAX_EFFECTS; ++i) {
+            if (auto* effect = audioTracks[t].effectChain[i].load(std::memory_order_acquire)) {
+                juce::ValueTree effectNode("Effect");
+                effectNode.setProperty("type", effect->getName(), nullptr);
+                effectNode.addChild(effect->saveState(), -1, nullptr);
+                effectsNode.addChild(effectNode, -1, nullptr);
+            }
+        }
+        if (effectsNode.getNumChildren() > 0)
+            trackNode.addChild(effectsNode, -1, nullptr);
+
         tracksTree.addChild(trackNode, -1, nullptr);
     }
+
+    // Return Track A
+    juce::ValueTree returnTrackNode("ReturnTrackA");
+    returnTrackNode.setProperty("gain", returnTrackA.gain.load(std::memory_order_relaxed), nullptr);
+    juce::ValueTree returnEffectsNode("Effects");
+    for (int i = 0; i < Track::MAX_EFFECTS; ++i) {
+        if (auto* effect = returnTrackA.effectChain[i].load(std::memory_order_acquire)) {
+            juce::ValueTree effectNode("Effect");
+            effectNode.setProperty("type", effect->getName(), nullptr);
+            effectNode.addChild(effect->saveState(), -1, nullptr);
+            returnEffectsNode.addChild(effectNode, -1, nullptr);
+        }
+    }
+    if (returnEffectsNode.getNumChildren() > 0)
+        returnTrackNode.addChild(returnEffectsNode, -1, nullptr);
+    pTree.addChild(returnTrackNode, -1, nullptr);
 }
 
 void MainComponent::loadAudioFileIntoTrack(int trackIdx, const juce::File& file)
