@@ -1,5 +1,6 @@
 #pragma once
 #include <JuceHeader.h>
+#include "InstrumentFactory.h"
 
 // ─── Instrument Tile ──────────────────────────────────────────────────────────
 class InstrumentTile : public juce::Component
@@ -85,27 +86,71 @@ class InstrumentBrowserPanel : public juce::Component
 public:
     InstrumentBrowserPanel()
     {
-        addTile ("Simpler", "    Simpler", juce::Colour (0xff1a7a4a));
-        addTile ("Oscillator", "    Oscillator", juce::Colour (0xff1a4a7a));
-        addTile ("DrumRack", "    Drum Rack", juce::Colour (0xff7a4a1a));
+        // ── Colour palette keyed by instrument name ──────────────────────────
+        // Add an entry here whenever a new instrument is registered in
+        // InstrumentFactory — the browser will pick it up automatically.
+        static const std::map<juce::String, juce::Colour> kPalette {
+            { "Simpler",        juce::Colour (0xff1a7a4a) },
+            { "Oscillator",     juce::Colour (0xff1a4a7a) },
+            { "DrumRack",       juce::Colour (0xff7a4a1a) },
+            { "FMSynth",        juce::Colour (0xff8a5500) },
+            { "WavetableSynth", juce::Colour (0xff006870) },
+            { "KarplusStrong",  juce::Colour (0xff1a6a30) },
+        };
+
+        // ── Build tiles from the factory list ────────────────────────────────
+        for (const auto& name : InstrumentFactory::getAvailableInstruments())
+        {
+            juce::Colour col = juce::Colour (0xff3a3a5a); // fallback
+            if (kPalette.count (name))
+                col = kPalette.at (name);
+
+            // Pretty-print: insert spaces before capital letters (e.g. "FMSynth" → "FM Synth")
+            juce::String label;
+            for (int i = 0; i < name.length(); ++i)
+            {
+                if (i > 0 && juce::CharacterFunctions::isUpperCase (name[i])
+                          && juce::CharacterFunctions::isLowerCase (name[i - 1]))
+                    label += ' ';
+                label += name[i];
+            }
+
+            auto* tile = new InstrumentTile (name, label, col);
+            listContent.addAndMakeVisible (tile);
+            tiles.add (tile);
+        }
+
+        // ── Viewport so the list scrolls as instruments are added ─────────────
+        viewport.setViewedComponent (&listContent, false);
+        viewport.setScrollBarsShown (true, false);
+        addAndMakeVisible (viewport);
     }
 
     void resized() override
     {
-        int y = 8;
-        for (auto* t : tiles) { t->setBounds (4, y, getWidth() - 8, 44); y += 52; }
+        viewport.setBounds (getLocalBounds());
+
+        const int tileH   = 44;
+        const int spacing = 8;
+        const int totalH  = spacing + tiles.size() * (tileH + spacing);
+
+        listContent.setSize (getWidth() - viewport.getScrollBarThickness(), totalH);
+
+        int y = spacing;
+        for (auto* t : tiles)
+        {
+            t->setBounds (4, y, listContent.getWidth() - 8, tileH);
+            y += tileH + spacing;
+        }
     }
 
 private:
-    void addTile (const juce::String& type, const juce::String& label, juce::Colour c)
-    {
-        auto* t = new InstrumentTile (type, label, c);
-        addAndMakeVisible (t);
-        tiles.add (t);
-    }
-
+    juce::Component                listContent;
+    juce::Viewport                 viewport;
     juce::OwnedArray<InstrumentTile> tiles;
 };
+
+
 
 // ─── Effects Browser Panel ────────────────────────────────────────────────────
 class EffectsBrowserPanel : public juce::Component

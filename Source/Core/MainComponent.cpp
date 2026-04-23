@@ -846,8 +846,22 @@ void MainComponent::resized()
     topBar->setBounds(bounds.removeFromTop(40));
     browser.setBounds(bounds.removeFromLeft(200));
 
-    auto bottomPanel = bounds.removeFromBottom(250);
-    
+    // ── Dynamic bottom-panel height ───────────────────────────────────────────
+    // Read the preferred height from whichever editor is currently loaded.
+    // Each instrument/effect editor sets its own height via setSize() in its
+    // constructor, so getFirstEditor()->getHeight() is the source of truth.
+    // We clamp between 200 and 430 px so the session view always gets room.
+    constexpr int kMinDeviceH  = 200;
+    constexpr int kMaxDeviceH  = 430;
+    constexpr int kDefaultDevH = 260;
+    constexpr int kPadding     = 8;
+
+    int editorH = kDefaultDevH;
+    if (auto* ed = deviceView.getFirstEditor())
+        editorH = juce::jlimit(kMinDeviceH, kMaxDeviceH, ed->getHeight() + kPadding);
+
+    auto bottomPanel = bounds.removeFromBottom(editorH);
+
     if (selectedSceneIndex >= 0 && selectedTrackIndex >= 0 && clipGrid[selectedTrackIndex][selectedSceneIndex].hasClip)
     {
         deviceView.setBounds(bottomPanel.removeFromLeft(bottomPanel.getWidth() / 2));
@@ -862,6 +876,7 @@ void MainComponent::resized()
 
     sessionView.setBounds(bounds);
 }
+
 
 void MainComponent::timerCallback()
 {

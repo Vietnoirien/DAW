@@ -24,6 +24,9 @@ target_sources(LinuxDAW PRIVATE
     Source/Instruments/OscProcessor.cpp
     Source/Instruments/SimplerProcessor.cpp
     Source/Instruments/DrumRackProcessor.cpp
+    Source/Instruments/FMSynthProcessor.cpp
+    Source/Instruments/WavetableSynthProcessor.cpp
+    Source/Instruments/KarplusStrongProcessor.cpp
     Source/Effects/BuiltInEffects.cpp)
 
 target_include_directories(LinuxDAW PRIVATE

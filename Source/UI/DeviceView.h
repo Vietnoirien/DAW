@@ -21,14 +21,19 @@ public:
 
     void updateLayout() {
         int x = 4;
-        int h = std::max(10, getHeight() - 8);
+        int maxH = 0;
         for (auto* ed : editors) {
+            // Use each editor's own preferred height (set via setSize in its ctor)
+            int h = juce::jmax(10, ed->getHeight());
             ed->setBounds(x, 4, ed->getWidth(), h);
             x += ed->getWidth() + 8;
+            maxH = juce::jmax(maxH, h);
         }
-        if (getWidth() != x) {
-            setSize(x, getHeight());
-        }
+        // Resize container so the parent DeviceView can read the correct height
+        int newW = juce::jmax(getWidth(), x);
+        int newH = maxH > 0 ? maxH + 8 : getHeight();
+        if (getWidth() != newW || getHeight() != newH)
+            setSize(newW, newH);
     }
 
     void resized() override {
