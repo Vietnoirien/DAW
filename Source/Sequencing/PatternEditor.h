@@ -143,6 +143,19 @@ public:
             if (onMidiNotesChanged) onMidiNotesChanged(notes);
         };
 
+        auditionToggle.setButtonText("Audition");
+        auditionToggle.setToggleState(false, juce::dontSendNotification);
+        addAndMakeVisible(auditionToggle);
+
+        pianoRollViewer.onAuditionNoteOn = [this](int note, int vel) {
+            if (auditionToggle.getToggleState() && onAuditionNoteOn)
+                onAuditionNoteOn(note, vel);
+        };
+        pianoRollViewer.onAuditionNoteOff = [this](int note) {
+            if (auditionToggle.getToggleState() && onAuditionNoteOff)
+                onAuditionNoteOff(note);
+        };
+
         auto setupSlider = [this](juce::Slider& sl, int min, int max, int val, const juce::String& name) {
             sl.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
             sl.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 50, 20);
@@ -176,6 +189,7 @@ public:
         auto controls = bounds.removeFromLeft(120);
         
         modeSelector.setBounds(controls.removeFromTop(30).reduced(2));
+        auditionToggle.setBounds(controls.removeFromTop(30).reduced(2));
         stepsSlider.setBounds(controls.removeFromTop(80).reduced(2));
         pulsesSlider.setBounds(controls.removeFromTop(80).reduced(2));
 
@@ -201,6 +215,7 @@ public:
         pianoRollViewer.setVisible(!isEuc);
         stepsSlider.setVisible(isEuc);
         pulsesSlider.setVisible(isEuc);
+        auditionToggle.setVisible(!isEuc);
     }
 
     void setPlayheadPhase(float phase) {
@@ -247,6 +262,8 @@ public:
     std::function<void(const std::vector<uint8_t>&)> onEuclideanHitMapChanged;
     std::function<void(const std::vector<MidiNote>&)> onMidiNotesChanged;
     std::function<void(const juce::String&)> onModeChanged;
+    std::function<void(int, int)> onAuditionNoteOn;
+    std::function<void(int)> onAuditionNoteOff;
 
 private:
     EuclideanCircleViewer euclideanViewer;
@@ -254,4 +271,5 @@ private:
     juce::Slider stepsSlider;
     juce::Slider pulsesSlider;
     juce::ComboBox modeSelector;
+    juce::ToggleButton auditionToggle;
 };

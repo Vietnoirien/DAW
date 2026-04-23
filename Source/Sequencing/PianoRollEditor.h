@@ -240,6 +240,8 @@ public:
                 dragNoteIndex = ni;
                 dragStartX = e.position.x;
                 dragOriginalLength = (float)notes[ni].lengthBeats;
+                lastAuditionedNote = notes[ni].note;
+                if (onAuditionNoteOn) onAuditionNoteOn(lastAuditionedNote, (int)(notes[ni].velocity * 127.0f));
             }
             else
             {
@@ -269,6 +271,9 @@ public:
             dragStartX    = e.position.x;
             dragOriginalLength = (float)newNote.lengthBeats;
 
+            lastAuditionedNote = newNote.note;
+            if (onAuditionNoteOn) onAuditionNoteOn(lastAuditionedNote, (int)(newNote.velocity * 127.0f));
+
             if (onNotesChanged) onNotesChanged(notes);
             repaint();
         }
@@ -297,6 +302,10 @@ public:
     {
         dragMode      = DragMode::None;
         dragNoteIndex = -1;
+        if (lastAuditionedNote != -1 && onAuditionNoteOff) {
+            onAuditionNoteOff(lastAuditionedNote);
+            lastAuditionedNote = -1;
+        }
         repaint(); // remove resize highlight
     }
 
@@ -311,6 +320,8 @@ public:
     }
 
     std::function<void(const std::vector<MidiNote>&)> onNotesChanged;
+    std::function<void(int, int)> onAuditionNoteOn;
+    std::function<void(int)> onAuditionNoteOff;
 
     float beatWidth  = 100.0f;
     int   noteHeight = 16;
@@ -323,6 +334,7 @@ private:
     int      dragNoteIndex = -1;
     float    dragStartX    = 0.0f;
     float    dragOriginalLength = 0.0f;
+    int      lastAuditionedNote = -1;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -379,8 +391,43 @@ public:
                    (float)bounds.getWidth() - 1, (float)bounds.getHeight(), 1.5f);
     }
 
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        int note = 127 - (int)(e.position.y / noteHeight);
+        if (note >= 0 && note <= 127) {
+            currentNote = note;
+            if (onNoteOn) onNoteOn(note, 100);
+        }
+    }
+
+    void mouseDrag(const juce::MouseEvent& e) override
+    {
+        int note = 127 - (int)(e.position.y / noteHeight);
+        if (note != currentNote) {
+            if (currentNote != -1 && onNoteOff) onNoteOff(currentNote);
+            if (note >= 0 && note <= 127) {
+                currentNote = note;
+                if (onNoteOn) onNoteOn(note, 100);
+            } else {
+                currentNote = -1;
+            }
+        }
+    }
+
+    void mouseUp(const juce::MouseEvent&) override
+    {
+        if (currentNote != -1 && onNoteOff) {
+            onNoteOff(currentNote);
+            currentNote = -1;
+        }
+    }
+
+    std::function<void(int, int)> onNoteOn;
+    std::function<void(int)> onNoteOff;
+
 private:
     int noteHeight = 16;
+    int currentNote = -1;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -415,6 +462,20 @@ public:
 
         editor.onNotesChanged = [this](const std::vector<MidiNote>& notes) {
             if (onNotesChanged) onNotesChanged(notes);
+        };
+
+        editor.onAuditionNoteOn = [this](int note, int vel) {
+            if (onAuditionNoteOn) onAuditionNoteOn(note, vel);
+        };
+        editor.onAuditionNoteOff = [this](int note) {
+            if (onAuditionNoteOff) onAuditionNoteOff(note);
+        };
+
+        keyboard.onNoteOn = [this](int note, int vel) {
+            if (onAuditionNoteOn) onAuditionNoteOn(note, vel);
+        };
+        keyboard.onNoteOff = [this](int note) {
+            if (onAuditionNoteOff) onAuditionNoteOff(note);
         };
 
         // Listen to horizontal scrollbar to sync ruler
@@ -458,6 +519,8 @@ public:
     }
 
     std::function<void(const std::vector<MidiNote>&)> onNotesChanged;
+    std::function<void(int, int)> onAuditionNoteOn;
+    std::function<void(int)> onAuditionNoteOff;
 
 private:
     void scrollBarMoved(juce::ScrollBar* sb, double) override

@@ -85,6 +85,10 @@ struct Track
                 // currently-playing voices are released before the next
                 // pattern (which may have removed notes) takes over.
                 midiBuffer.addEvent(juce::MidiMessage::allNotesOff(1), 0);
+            } else if (cmd.type == TrackCommand::Type::AuditionNoteOn) {
+                midiBuffer.addEvent(juce::MidiMessage::noteOn(1, cmd.note, (juce::uint8)cmd.velocity), 0);
+            } else if (cmd.type == TrackCommand::Type::AuditionNoteOff) {
+                midiBuffer.addEvent(juce::MidiMessage::noteOff(1, cmd.note, (juce::uint8)0), 0);
             }
         }
 

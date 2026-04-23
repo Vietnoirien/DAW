@@ -521,6 +521,25 @@ MainComponent::MainComponent()
         }
     };
 
+    patternEditor.onAuditionNoteOn = [this](int note, int vel) {
+        if (selectedTrackIndex >= 0 && selectedTrackIndex < (int)audioTracks.size()) {
+            TrackCommand cmd;
+            cmd.type = TrackCommand::Type::AuditionNoteOn;
+            cmd.note = note;
+            cmd.velocity = vel;
+            audioTracks[selectedTrackIndex]->commandQueue.push(cmd);
+        }
+    };
+
+    patternEditor.onAuditionNoteOff = [this](int note) {
+        if (selectedTrackIndex >= 0 && selectedTrackIndex < (int)audioTracks.size()) {
+            TrackCommand cmd;
+            cmd.type = TrackCommand::Type::AuditionNoteOff;
+            cmd.note = note;
+            audioTracks[selectedTrackIndex]->commandQueue.push(cmd);
+        }
+    };
+
     // ── Session View Callbacks ────────────────────────────────────────────────
     sessionView.onCreateClip = [this](int t, int s) {
         if (t < 0 || t >= (int)audioTracks.size()) return;
