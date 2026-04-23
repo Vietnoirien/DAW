@@ -237,6 +237,9 @@ private:
                 int y = ARR_HEADER_H + block->clip.trackIndex * ARR_SLOT_H;
                 block->setBounds(x, y + 2, w, ARR_SLOT_H - 4);
             }
+            if (auto* parent = findParentComponentOfClass<ArrangementView>()) {
+                parent->updateContentSize();
+            }
         }
 
         void setTracksAndClips(const std::vector<TrackState>& tracks, const std::vector<ArrangementClip>* tracksClips) {
@@ -278,8 +281,15 @@ private:
         auto vb = gridViewport.getBounds();
         if (vb.isEmpty()) return;
 
+        double maxBars = 16.0;
+        for (auto* block : content.clipBlocks) {
+            double endBar = block->clip.startBar + block->clip.lengthBars;
+            if (endBar > maxBars) maxBars = endBar;
+        }
+        maxBars += 8.0; // 8 bars buffer
+
         int numTracks = content.trackStates.empty() ? 1 : (int)content.trackStates.size();
-        int contentW = juce::jmax(vb.getWidth(), ARR_TRACK_W + 1000); // arbitrary width for now
+        int contentW = juce::jmax(vb.getWidth(), content.barToPixel(maxBars));
         int contentH = juce::jmax(vb.getHeight(), ARR_HEADER_H + numTracks * ARR_SLOT_H + 20);
         content.setSize(contentW, contentH);
     }

@@ -5,7 +5,8 @@
 
 // ─── Global DAW Layout Constants ──────────────────────────────────────────────
 static constexpr int NUM_SCENES  = 8;
-static constexpr int MAX_TRACKS  = 8;
+// MAX_TRACKS has been removed — track count is now unbounded at runtime.
+// Use numActiveTracks (atomic in MainComponent) as the live count.
 
 // ─── Track Type ───────────────────────────────────────────────────────────────
 enum class TrackType { Audio, Midi };
@@ -57,5 +58,6 @@ struct ArrangementClip {
 
 // ─── Thread-Safe Arrangement Timeline ─────────────────────────────────────
 struct SharedArrangement {
-    std::vector<ArrangementClip> tracks[MAX_TRACKS];
+    // Dynamic: one inner vector per active track (size == numActiveTracks at snapshot time).
+    std::vector<std::vector<ArrangementClip>> tracks;
 };

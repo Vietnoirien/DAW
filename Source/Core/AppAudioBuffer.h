@@ -63,6 +63,13 @@ public:
         fifo.reset();
     }
 
+    void clear()
+    {
+        ringBuffer.clear();
+        fifo.reset();
+        renderBlockPosition.store(0, std::memory_order_relaxed);
+    }
+
     // ── Producer API (render thread) ─────────────────────────────────────────
 
     /** Returns true if the FIFO has room for at least one more full hardware block. */

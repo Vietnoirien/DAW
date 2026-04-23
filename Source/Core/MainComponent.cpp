@@ -67,13 +67,13 @@ void RenderThread::run()
 
             for (int t = 0; t < nTracks; ++t) {
                 // Always process to drain queue, but we will overwrite midiBuffer if in Arrangement mode
-                owner.audioTracks[t].processPatternCommands(blockStart, bs, owner.transportClock);
+                owner.audioTracks[t]->processPatternCommands(blockStart, bs, owner.transportClock);
                 
                 if (isArrMode && currArrangement) {
-                    owner.audioTracks[t].midiBuffer.clear(); // Override Session View notes
+                    owner.audioTracks[t]->midiBuffer.clear(); // Override Session View notes
                     
                     if (!owner.transportClock.getIsPlaying()) {
-                        owner.audioTracks[t].midiBuffer.addEvent(juce::MidiMessage::allNotesOff(1), 0);
+                        owner.audioTracks[t]->midiBuffer.addEvent(juce::MidiMessage::allNotesOff(1), 0);
                         continue;
                     }
 
@@ -84,42 +84,44 @@ void RenderThread::run()
                     double currentBeat = (static_cast<double>(transportSample) / owner.transportClock.getSamplesPerBeat());
                     double endBeat = currentBeat + (static_cast<double>(bs) / owner.transportClock.getSamplesPerBeat());
 
-                    for (const auto& clip : currArrangement->tracks[t]) {
-                        double clipStartBeat = (clip.startBar - 1.0) * 4.0;
-                        double clipEndBeat = clipStartBeat + (clip.lengthBars * 4.0);
+                    if (t < (int)currArrangement->tracks.size()) {
+                        for (const auto& clip : currArrangement->tracks[t]) {
+                            double clipStartBeat = (clip.startBar - 1.0) * 4.0;
+                            double clipEndBeat = clipStartBeat + (clip.lengthBars * 4.0);
 
-                        // If clip overlaps this block
-                        if (clipEndBeat > currentBeat && clipStartBeat < endBeat) {
-                            double patternLengthBeats = clip.data.patternLengthBars > 0.0 ? clip.data.patternLengthBars * 4.0 : 4.0;
-                            
-                            for (const auto& note : clip.data.midiNotes) {
-                                long kStart = std::max(0L, static_cast<long>(std::floor((currentBeat - clipStartBeat - note.startBeat - note.lengthBeats) / patternLengthBeats)));
-                                long kEnd = static_cast<long>(std::ceil((endBeat - clipStartBeat - note.startBeat) / patternLengthBeats));
+                            // If clip overlaps this block
+                            if (clipEndBeat > currentBeat && clipStartBeat < endBeat) {
+                                double patternLengthBeats = clip.data.patternLengthBars > 0.0 ? clip.data.patternLengthBars * 4.0 : 4.0;
                                 
-                                for (long k = kStart; k <= kEnd; ++k) {
-                                    double noteAbsStart = clipStartBeat + k * patternLengthBeats + note.startBeat;
-                                    double noteAbsEnd = noteAbsStart + note.lengthBeats;
+                                for (const auto& note : clip.data.midiNotes) {
+                                    long kStart = std::max(0L, static_cast<long>(std::floor((currentBeat - clipStartBeat - note.startBeat - note.lengthBeats) / patternLengthBeats)));
+                                    long kEnd = static_cast<long>(std::ceil((endBeat - clipStartBeat - note.startBeat) / patternLengthBeats));
                                     
-                                    // Ensure the note doesn't play if it starts after the clip ends (clip has been trimmed)
-                                    if (noteAbsStart >= clipEndBeat) continue;
-                                    
-                                    // If note is cut off by the end of the clip, trim noteAbsEnd
-                                    if (noteAbsEnd > clipEndBeat) noteAbsEnd = clipEndBeat;
-                                    
-                                    // Note On
-                                    if (noteAbsStart >= currentBeat && noteAbsStart < endBeat) {
-                                        int sampleOffset = static_cast<int>((noteAbsStart - currentBeat) * owner.transportClock.getSamplesPerBeat());
-                                        sampleOffset = juce::jlimit(0, bs - 1, sampleOffset);
-                                        owner.audioTracks[t].midiBuffer.addEvent(
-                                            juce::MidiMessage::noteOn(1, note.note, note.velocity), sampleOffset);
-                                    }
-                                    
-                                    // Note Off
-                                    if (noteAbsEnd >= currentBeat && noteAbsEnd < endBeat) {
-                                        int sampleOffset = static_cast<int>((noteAbsEnd - currentBeat) * owner.transportClock.getSamplesPerBeat());
-                                        sampleOffset = juce::jlimit(0, bs - 1, sampleOffset);
-                                        owner.audioTracks[t].midiBuffer.addEvent(
-                                            juce::MidiMessage::noteOff(1, note.note, 0.0f), sampleOffset);
+                                    for (long k = kStart; k <= kEnd; ++k) {
+                                        double noteAbsStart = clipStartBeat + k * patternLengthBeats + note.startBeat;
+                                        double noteAbsEnd = noteAbsStart + note.lengthBeats;
+                                        
+                                        // Ensure the note doesn't play if it starts after the clip ends
+                                        if (noteAbsStart >= clipEndBeat) continue;
+                                        
+                                        // If note is cut off by the end of the clip, trim noteAbsEnd
+                                        if (noteAbsEnd > clipEndBeat) noteAbsEnd = clipEndBeat;
+                                        
+                                        // Note On
+                                        if (noteAbsStart >= currentBeat && noteAbsStart < endBeat) {
+                                            int sampleOffset = static_cast<int>((noteAbsStart - currentBeat) * owner.transportClock.getSamplesPerBeat());
+                                            sampleOffset = juce::jlimit(0, bs - 1, sampleOffset);
+                                            owner.audioTracks[t]->midiBuffer.addEvent(
+                                                juce::MidiMessage::noteOn(1, note.note, note.velocity), sampleOffset);
+                                        }
+                                        
+                                        // Note Off
+                                        if (noteAbsEnd >= currentBeat && noteAbsEnd < endBeat) {
+                                            int sampleOffset = static_cast<int>((noteAbsEnd - currentBeat) * owner.transportClock.getSamplesPerBeat());
+                                            sampleOffset = juce::jlimit(0, bs - 1, sampleOffset);
+                                            owner.audioTracks[t]->midiBuffer.addEvent(
+                                                juce::MidiMessage::noteOff(1, note.note, 0.0f), sampleOffset);
+                                        }
                                     }
                                 }
                             }
@@ -136,7 +138,7 @@ void RenderThread::run()
             // Pre-pass: is any track soloed? (determines whether solo silences others)
             bool anySoloed = false;
             for (int t = 0; t < nTracks; ++t)
-                if (owner.audioTracks[t].soloed.load(std::memory_order_relaxed))
+                if (owner.audioTracks[t]->soloed.load(std::memory_order_relaxed))
                     { anySoloed = true; break; }
 
             juce::AudioBuffer<float> trackScratch (nCh, bs);
@@ -145,26 +147,26 @@ void RenderThread::run()
 
             for (int t = 0; t < nTracks; ++t)
             {
-                const bool muted  = owner.audioTracks[t].muted.load(std::memory_order_relaxed);
-                const bool soloed = owner.audioTracks[t].soloed.load(std::memory_order_relaxed);
+                const bool muted  = owner.audioTracks[t]->muted.load(std::memory_order_relaxed);
+                const bool soloed = owner.audioTracks[t]->soloed.load(std::memory_order_relaxed);
                 // A track is audible if: not muted AND (nothing is soloed OR this track is soloed)
                 const bool audible = !muted && (!anySoloed || soloed);
                 const float tGain = audible
-                    ? owner.audioTracks[t].gain.load(std::memory_order_relaxed)
+                    ? owner.audioTracks[t]->gain.load(std::memory_order_relaxed)
                     : 0.0f;
 
                 trackScratch.clear();
-                if (auto* inst = owner.audioTracks[t].activeInstrument.load(std::memory_order_acquire)) {
-                    inst->processBlock(trackScratch, owner.audioTracks[t].midiBuffer);
+                if (auto* inst = owner.audioTracks[t]->activeInstrument.load(std::memory_order_acquire)) {
+                    inst->processBlock(trackScratch, owner.audioTracks[t]->midiBuffer);
                 }
 
                 for (int e = 0; e < Track::MAX_EFFECTS; ++e) {
-                    if (auto* effect = owner.audioTracks[t].effectChain[e].load(std::memory_order_acquire)) {
+                    if (auto* effect = owner.audioTracks[t]->effectChain[e].load(std::memory_order_acquire)) {
                         effect->processBlock(trackScratch);
                     }
                 }
 
-                const float tSendALevel = audible ? owner.audioTracks[t].sendALevel.load(std::memory_order_relaxed) : 0.0f;
+                const float tSendALevel = audible ? owner.audioTracks[t]->sendALevel.load(std::memory_order_relaxed) : 0.0f;
 
                 // Accumulate track (with effective gain) into master mix and send to return A (post-fader)
                 if (tGain > 0.0f || tSendALevel > 0.0f)
@@ -185,7 +187,7 @@ void RenderThread::run()
                 float sumRmsTrack = 0.0f;
                 const auto* src0 = trackScratch.getReadPointer(0);
                 for (int i = 0; i < bs; ++i) { float s = src0[i] * tGain; sumRmsTrack += s * s; }
-                owner.audioTracks[t].rmsLevel.store(
+                owner.audioTracks[t]->rmsLevel.store(
                     std::sqrt(sumRmsTrack / bs), std::memory_order_relaxed);
             }
 
@@ -217,7 +219,7 @@ void RenderThread::run()
                 owner.midiCollector.removeNextBlockOfMessages(incomingMidi, bs);
 
                 if (nTracks > 0)
-                    incomingMidi.addEvents(owner.audioTracks[0].midiBuffer, 0, bs, 0);
+                    incomingMidi.addEvents(owner.audioTracks[0]->midiBuffer, 0, bs, 0);
 
                 owner.activePlugin->processBlock(owner.renderScratch, incomingMidi);
             }
@@ -253,6 +255,16 @@ void RenderThread::run()
 MainComponent::MainComponent()
     : renderThread(*this)
 {
+    // ── Pre-reserve dynamic track storage (128 slots) to prevent reallocation
+    // during the session. The render thread accesses audioTracks[] by index
+    // while the message thread may push_back; reserving enough capacity
+    // guarantees no iterator/pointer invalidation up to 128 tracks.
+    audioTracks.reserve(128);
+    clipGrid.reserve(128);
+    trackInstruments.reserve(128);
+    loadedFiles.reserve(128);
+    arrangementTracks.reserve(128);
+
     // ── Application Workspace & Settings ───────────────────────────────────────
     initialiseWorkspace();
 
@@ -281,7 +293,7 @@ MainComponent::MainComponent()
     // ── File Drop → Background Decode → Lock-Free Buffer Handoff ─────────────
     deviceView.onFileDropped = [this](const juce::File& file) {
         const int trackIdx = selectedTrackIndex;
-        if (trackIdx < 0 || trackIdx >= MAX_TRACKS) {
+        if (trackIdx < 0 || trackIdx >= (int)audioTracks.size()) {
             DBG("onFileDropped: no track selected — ignoring.");
             return;
         }
@@ -304,7 +316,7 @@ MainComponent::MainComponent()
         renderTransportOffset.store(appBuffer.renderBlockPosition.load(std::memory_order_acquire), std::memory_order_release);
         int nTracks = numActiveTracks.load(std::memory_order_relaxed);
         for (int t = 0; t < nTracks; ++t)
-            audioTracks[t].commandQueue.push({ TrackCommand::Type::StopPattern, nullptr, 0 });
+            audioTracks[t]->commandQueue.push({ TrackCommand::Type::StopPattern, nullptr, 0 });
         for (int t = 0; t < nTracks; ++t)
             for (int s = 0; s < NUM_SCENES; ++s)
                 if (clipGrid[t][s].isPlaying) {
@@ -324,6 +336,42 @@ MainComponent::MainComponent()
         switchToView(DAWView::Arrangement);
         topBar->arrangeViewBtn.setToggleState(true, juce::dontSendNotification);
         topBar->sessionViewBtn.setToggleState(false, juce::dontSendNotification);
+    };
+
+    // ── Export Audio ──────────────────────────────────────────────────────────
+    topBar->onExportAudio = [this] {
+        juce::PopupMenu m;
+        m.addItem(1, "Export as WAV");
+        m.addItem(2, "Export as MP3");
+        m.addItem(3, "Export as FLAC");
+        m.addItem(4, "Export as OGG");
+        
+        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&topBar->projectBtn),
+            [this](int result) {
+                if (result == 0) return;
+                
+                juce::String ext = (result == 1) ? "*.wav" : 
+                                   (result == 2) ? "*.mp3" : 
+                                   (result == 3) ? "*.flac" : "*.ogg";
+                juce::String format = (result == 1) ? "WAV" : 
+                                      (result == 2) ? "MP3" : 
+                                      (result == 3) ? "FLAC" : "OGG";
+                                      
+                myChooser = std::make_unique<juce::FileChooser>("Export Audio",
+                    juce::File::getSpecialLocation(juce::File::userMusicDirectory).getChildFile("export" + ext.substring(1)), ext);
+                    
+                myChooser->launchAsync(
+                    juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::warnAboutOverwriting,
+                    [this, format](const juce::FileChooser& fc) {
+                        auto file = fc.getResult();
+                        if (file != juce::File{}) {
+                            // Run the export on a background thread so UI doesn't freeze
+                            juce::Thread::launch([this, file, format]() {
+                                exportProject(file, format);
+                            });
+                        }
+                    });
+            });
     };
 
     // ── Plugin Loading ────────────────────────────────────────────────────────
@@ -392,21 +440,20 @@ MainComponent::MainComponent()
                 double scheduleTime = transportClock.getIsPlaying() ? transportClock.getNextBarPosition() : 0.0;
                 auto* p = midiPool.rentPattern();
                 p->setNotes(clip.midiNotes, clip.patternLengthBars);
-                audioTracks[selectedTrackIndex].commandQueue.push(
+                audioTracks[selectedTrackIndex]->commandQueue.push(
                     { TrackCommand::Type::PlayPattern, p, scheduleTime });
             }
         } else {
             clip.euclideanSteps = n;
             clip.euclideanPulses = k;
-            clip.hitMap.clear(); // will be regenerated on launch
+            clip.hitMap.clear();
 
-            // Only reschedule if this clip is already playing
             if (clip.isPlaying) {
                 double scheduleTime = transportClock.getIsPlaying() ? transportClock.getNextBarPosition() : 0.0;
                 auto* p = euclideanPool.rentPattern();
                 p->generate(k, n);
                 clip.hitMap.assign(p->getHitMap().begin(), p->getHitMap().end());
-                audioTracks[selectedTrackIndex].commandQueue.push(
+                audioTracks[selectedTrackIndex]->commandQueue.push(
                     { TrackCommand::Type::PlayPattern, p, scheduleTime });
             }
         }
@@ -424,23 +471,21 @@ MainComponent::MainComponent()
             regenerateDrumRackMidi(clip);
             sessionView.setClipData(selectedTrackIndex, selectedSceneIndex, clip);
 
-            // Only reschedule if this clip is already playing
             if (clip.isPlaying) {
                 double scheduleTime = transportClock.getIsPlaying() ? transportClock.getNextBarPosition() : 0.0;
                 auto* p = midiPool.rentPattern();
                 p->setNotes(clip.midiNotes, clip.patternLengthBars);
-                audioTracks[selectedTrackIndex].commandQueue.push(
+                audioTracks[selectedTrackIndex]->commandQueue.push(
                     { TrackCommand::Type::PlayPattern, p, scheduleTime });
             }
         } else {
             clip.hitMap = map;
 
-            // Only reschedule if this clip is already playing
             if (clip.isPlaying) {
                 double scheduleTime = transportClock.getIsPlaying() ? transportClock.getNextBarPosition() : 0.0;
                 auto* p = euclideanPool.rentPattern();
                 p->setHitMap(map);
-                audioTracks[selectedTrackIndex].commandQueue.push(
+                audioTracks[selectedTrackIndex]->commandQueue.push(
                     { TrackCommand::Type::PlayPattern, p, scheduleTime });
             }
         }
@@ -450,32 +495,22 @@ MainComponent::MainComponent()
         if (selectedTrackIndex < 0) return;
         if (selectedSceneIndex < 0) return;
 
-        // Auto-compute pattern length from note content:
-        // find the furthest beat (note end) and round up to the nearest bar.
         double maxBeat = 0.0;
         for (const auto& n : notes)
             maxBeat = std::max(maxBeat, n.startBeat + n.lengthBeats);
         const double autoLengthBars = std::max(1.0, std::ceil(maxBeat / 4.0));
 
-        // Always persist the edited notes to the clip data model
         auto& clip = clipGrid[selectedTrackIndex][selectedSceneIndex];
         clip.midiNotes         = notes;
         clip.patternLengthBars = autoLengthBars;
 
-        // Only push to the audio engine if this clip is already playing.
-        // This lets the user edit patterns freely without auto-starting playback.
         if (clip.isPlaying) {
             double scheduleTime = transportClock.getIsPlaying() ? transportClock.getNextBarPosition() : 0.0;
-
-            // FlushNotes: immediately release any voices triggered by the old pattern
-            // to prevent stuck notes when a note is deleted while the synth is playing.
-            audioTracks[selectedTrackIndex].commandQueue.push(
+            audioTracks[selectedTrackIndex]->commandQueue.push(
                 { TrackCommand::Type::FlushNotes, nullptr, -1.0 });
-
-            // Schedule the updated pattern at the next bar boundary for clean timing.
             auto* p = midiPool.rentPattern();
             p->setNotes(notes, autoLengthBars);
-            audioTracks[selectedTrackIndex].commandQueue.push(
+            audioTracks[selectedTrackIndex]->commandQueue.push(
                 { TrackCommand::Type::PlayPattern, p, scheduleTime });
         }
     };
@@ -488,7 +523,7 @@ MainComponent::MainComponent()
 
     // ── Session View Callbacks ────────────────────────────────────────────────
     sessionView.onCreateClip = [this](int t, int s) {
-        if (t < 0 || t >= numActiveTracks.load(std::memory_order_relaxed)) return;
+        if (t < 0 || t >= (int)audioTracks.size()) return;
         auto& clip           = clipGrid[t][s];
         clip.hasClip         = true;
         clip.name            = "Pattern " + juce::String(s + 1);
@@ -568,7 +603,7 @@ MainComponent::MainComponent()
             }
         }
 
-        audioTracks[t].commandQueue.push(
+        audioTracks[t]->commandQueue.push(
             { TrackCommand::Type::PlayPattern, p, scheduleTime });
         clip.isPlaying = true;
         sessionView.setClipData(t, s, clip);
@@ -584,12 +619,12 @@ MainComponent::MainComponent()
     };
 
     sessionView.onDeleteClip = [this](int t, int s) {
-        if (t < 0 || t >= MAX_TRACKS) return;
+        if (t < 0 || t >= (int)audioTracks.size()) return;
         auto& clip = clipGrid[t][s];
         if (!clip.hasClip) return;
 
         if (clip.isPlaying) {
-            audioTracks[t].commandQueue.push({ TrackCommand::Type::StopPattern, nullptr, 0 });
+            audioTracks[t]->commandQueue.push({ TrackCommand::Type::StopPattern, nullptr, 0 });
         }
         clip = ClipData();
         sessionView.setClipData(t, s, clip);
@@ -601,7 +636,7 @@ MainComponent::MainComponent()
     };
 
     sessionView.onDuplicateClip = [this](int t, int s) {
-        if (t < 0 || t >= MAX_TRACKS) return;
+        if (t < 0 || t >= (int)audioTracks.size()) return;
         auto& sourceClip = clipGrid[t][s];
         if (!sourceClip.hasClip) return;
         
@@ -628,20 +663,15 @@ MainComponent::MainComponent()
         bool wasRunning = renderThread.isThreadRunning();
         if (wasRunning) renderThread.stopThread(500);
 
-        for (int t = trackIndex; t < nTracks - 1; ++t) {
-            audioTracks[t].moveFrom(audioTracks[t + 1]);
-            trackInstruments[t] = trackInstruments[t + 1];
-            for (int s = 0; s < NUM_SCENES; ++s) {
-                clipGrid[t][s] = clipGrid[t + 1][s];
-            }
-        }
+        // Clear the track being deleted
+        audioTracks[trackIndex]->clear();
 
-        int last = nTracks - 1;
-        audioTracks[last].clear();
-        trackInstruments[last] = "";
-        for (int s = 0; s < NUM_SCENES; ++s) {
-            clipGrid[last][s] = ClipData();
-        }
+        // Erase from all parallel vectors
+        audioTracks.erase(audioTracks.begin() + trackIndex);
+        clipGrid.erase(clipGrid.begin() + trackIndex);
+        trackInstruments.erase(trackInstruments.begin() + trackIndex);
+        loadedFiles.erase(loadedFiles.begin() + trackIndex);
+        arrangementTracks.erase(arrangementTracks.begin() + trackIndex);
 
         numActiveTracks.fetch_sub(1, std::memory_order_release);
         sessionView.removeTrack(trackIndex);
@@ -650,11 +680,11 @@ MainComponent::MainComponent()
             selectedTrackIndex = -1;
             selectedSceneIndex = -1;
             patternEditor.setVisible(false);
-            deviceView.onFileDropped(juce::File()); // Clear device view if needed
+            deviceView.onFileDropped(juce::File());
         } else if (selectedTrackIndex > trackIndex) {
             selectedTrackIndex--;
         }
-        
+
         resized();
         if (wasRunning) renderThread.startThread();
     };
@@ -697,11 +727,11 @@ MainComponent::MainComponent()
                     p = ep;
                 }
 
-                audioTracks[t].commandQueue.push({ TrackCommand::Type::PlayPattern, p, schedSample });
+                audioTracks[t]->commandQueue.push({ TrackCommand::Type::PlayPattern, p, schedSample });
                 clip.isPlaying = true;
                 sessionView.setClipData(t, sceneIdx, clip);
             } else {
-                audioTracks[t].commandQueue.push({ TrackCommand::Type::StopPattern, nullptr, schedSample });
+                audioTracks[t]->commandQueue.push({ TrackCommand::Type::StopPattern, nullptr, schedSample });
             }
         }
         sessionView.setSceneActive(sceneIdx, true);
@@ -719,13 +749,18 @@ MainComponent::MainComponent()
             trackInstruments[targetIdx] = type;
             sessionView.gridContent.columns[targetIdx]->header.repaint();
         } else {
-            // Drop onto drop zone — create new track
-            if (nTracks >= MAX_TRACKS) return;
-            targetIdx = numActiveTracks.fetch_add(1, std::memory_order_relaxed);
+            // Drop onto drop zone — create new track (no upper limit)
+            // Push to all parallel vectors BEFORE incrementing numActiveTracks so
+            // the render thread never sees an out-of-range index.
+            audioTracks.push_back(std::make_unique<Track>());
+            clipGrid.push_back({});
+            trackInstruments.push_back(type);
+            loadedFiles.push_back(juce::File{});
+            arrangementTracks.push_back({});
+            targetIdx = numActiveTracks.fetch_add(1, std::memory_order_release);
             sessionView.addTrack(TrackType::Audio, "Track " + juce::String(targetIdx + 1));
             sessionView.gridContent.columns[targetIdx]->header.hasInstrument = true;
             sessionView.gridContent.columns[targetIdx]->header.instrumentName = type;
-            trackInstruments[targetIdx] = type;
             sessionView.gridContent.columns[targetIdx]->header.repaint();
         }
 
@@ -740,8 +775,8 @@ MainComponent::MainComponent()
         auto newInst = InstrumentFactory::create(type);
         if (newInst) {
             newInst->prepareToPlay(currentSampleRate);
-            if (auto* old = audioTracks[targetIdx].activeInstrument.exchange(newInst.release(), std::memory_order_acq_rel)) {
-                audioTracks[targetIdx].instrumentGarbageQueue.push(old);
+            if (auto* old = audioTracks[targetIdx]->activeInstrument.exchange(newInst.release(), std::memory_order_acq_rel)) {
+                audioTracks[targetIdx]->instrumentGarbageQueue.push(old);
             }
         }
 
@@ -757,7 +792,7 @@ MainComponent::MainComponent()
         if (trackIdx == 999) {
             targetTrack = &returnTrackA;
         } else if (trackIdx >= 0 && trackIdx < nTracks) {
-            targetTrack = &audioTracks[trackIdx];
+            targetTrack = audioTracks[trackIdx].get();
         } else {
             return; // Dropped on an invalid place
         }
@@ -789,13 +824,13 @@ MainComponent::MainComponent()
     // These are the ONLY paths that write to the audio-thread gain atomics.
     // Without them the faders are purely cosmetic.
     sessionView.onTrackVolumeChanged = [this](int t, float gain) {
-        if (t >= 0 && t < MAX_TRACKS)
-            audioTracks[t].gain.store(gain, std::memory_order_relaxed);
+        if (t >= 0 && t < (int)audioTracks.size())
+            audioTracks[t]->gain.store(gain, std::memory_order_relaxed);
     };
 
     sessionView.onTrackSendChanged = [this](int t, float level) {
-        if (t >= 0 && t < MAX_TRACKS)
-            audioTracks[t].sendALevel.store(level, std::memory_order_relaxed);
+        if (t >= 0 && t < (int)audioTracks.size())
+            audioTracks[t]->sendALevel.store(level, std::memory_order_relaxed);
     };
 
     sessionView.onMasterVolumeChanged = [this](float gain) {
@@ -807,25 +842,25 @@ MainComponent::MainComponent()
     };
 
     sessionView.onTrackMuteChanged = [this](int t, bool muted) {
-        if (t >= 0 && t < MAX_TRACKS)
-            audioTracks[t].muted.store(muted, std::memory_order_relaxed);
+        if (t >= 0 && t < (int)audioTracks.size())
+            audioTracks[t]->muted.store(muted, std::memory_order_relaxed);
     };
 
     sessionView.onTrackSoloChanged = [this](int t, bool soloed) {
-        if (t >= 0 && t < MAX_TRACKS)
-            audioTracks[t].soloed.store(soloed, std::memory_order_relaxed);
+        if (t >= 0 && t < (int)audioTracks.size())
+            audioTracks[t]->soloed.store(soloed, std::memory_order_relaxed);
     };
 
     // ── Rename / Color callbacks ──────────────────────────────────────────────
     sessionView.onRenameClip = [this](int t, int s, const juce::String& name) {
-        if (juce::isPositiveAndBelow(t, MAX_TRACKS) && juce::isPositiveAndBelow(s, NUM_SCENES)) {
+        if (t >= 0 && t < (int)clipGrid.size() && juce::isPositiveAndBelow(s, NUM_SCENES)) {
             clipGrid[t][s].name = name;
             sessionView.setClipData(t, s, clipGrid[t][s]);
         }
     };
 
     sessionView.onSetClipColour = [this](int t, int s, juce::Colour c) {
-        if (juce::isPositiveAndBelow(t, MAX_TRACKS) && juce::isPositiveAndBelow(s, NUM_SCENES)) {
+        if (t >= 0 && t < (int)clipGrid.size() && juce::isPositiveAndBelow(s, NUM_SCENES)) {
             clipGrid[t][s].colour = c;
             sessionView.setClipData(t, s, clipGrid[t][s]);
         }
@@ -851,7 +886,7 @@ MainComponent::MainComponent()
     };
 
     arrangementView.onClipPlaced = [this](int trackIdx, double startBar, const ClipData& newClip) {
-        if (trackIdx >= 0 && trackIdx < MAX_TRACKS) {
+        if (trackIdx >= 0 && trackIdx < (int)arrangementTracks.size()) {
             ArrangementClip ac;
             ac.trackIndex = trackIdx;
             ac.startBar = startBar;
@@ -871,7 +906,7 @@ MainComponent::MainComponent()
     };
     
     arrangementView.onClipDeleted = [this](ArrangementClip* clip) {
-        if (clip && clip->trackIndex >= 0 && clip->trackIndex < MAX_TRACKS) {
+        if (clip && clip->trackIndex >= 0 && clip->trackIndex < (int)arrangementTracks.size()) {
             auto& trackClips = arrangementTracks[clip->trackIndex];
             trackClips.erase(std::remove_if(trackClips.begin(), trackClips.end(),
                 [clip](const ArrangementClip& c) { return &c == clip; }), trackClips.end());
@@ -893,11 +928,8 @@ MainComponent::MainComponent()
                 }
             }
             if (!found) {
-                // Track index changed during drag! We must move the clip.
-                // It's tricky to find where it was because clip->trackIndex is ALREADY the new one.
-                // Let's find it everywhere and move it.
                 ArrangementClip copy = *clip;
-                for (int t = 0; t < MAX_TRACKS; ++t) {
+                for (int t = 0; t < (int)arrangementTracks.size(); ++t) {
                     auto& tc = arrangementTracks[t];
                     auto it = std::remove_if(tc.begin(), tc.end(), [clip](const ArrangementClip& c) { return &c == clip; });
                     if (it != tc.end()) {
@@ -905,7 +937,8 @@ MainComponent::MainComponent()
                         break;
                     }
                 }
-                arrangementTracks[copy.trackIndex].push_back(copy);
+                if (copy.trackIndex >= 0 && copy.trackIndex < (int)arrangementTracks.size())
+                    arrangementTracks[copy.trackIndex].push_back(copy);
             }
             syncArrangementFromSession();
         }
@@ -972,8 +1005,8 @@ void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate
     if (!renderThread.isThreadRunning())
         renderThread.startThread();
         
-    for (int t = 0; t < MAX_TRACKS; ++t) {
-        if (auto* inst = audioTracks[t].activeInstrument.load(std::memory_order_acquire)) {
+    for (int t = 0; t < (int)audioTracks.size(); ++t) {
+        if (auto* inst = audioTracks[t]->activeInstrument.load(std::memory_order_acquire)) {
             inst->prepareToPlay(sampleRate);
         }
     }
@@ -991,6 +1024,11 @@ void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate
 // ════════════════════════════════════════════════════════════════════════════
 void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
 {
+    if (isExporting.load(std::memory_order_acquire)) {
+        bufferToFill.clearActiveBufferRegion();
+        return;
+    }
+
     const int numSamples = bufferToFill.numSamples;
 
     // Advance the global transport clock (atomic — safe here).
@@ -1126,11 +1164,12 @@ void MainComponent::syncArrangementFromSession()
         tStates.push_back(state);
     }
     
-    arrangementView.setTracksAndClips(tStates, arrangementTracks);
+    arrangementView.setTracksAndClips(tStates, arrangementTracks.data());
 
     // ── Update Audio Engine lock-free timeline ─────────────────────────────
     auto* newArrangement = new SharedArrangement();
-    for (int t = 0; t < MAX_TRACKS; ++t) {
+    newArrangement->tracks.resize(nTracks);
+    for (int t = 0; t < nTracks; ++t) {
         newArrangement->tracks[t] = arrangementTracks[t];
     }
     
@@ -1152,7 +1191,7 @@ void MainComponent::timerCallback()
     if (nTracks > 0) {
         float peakTrackRms = 0.0f;
         for (int t = 0; t < nTracks; ++t)
-            peakTrackRms = std::max(peakTrackRms, audioTracks[t].rmsLevel.load(std::memory_order_relaxed));
+            peakTrackRms = std::max(peakTrackRms, audioTracks[t]->rmsLevel.load(std::memory_order_relaxed));
         applyDecay(audioLevelDisplay, peakTrackRms);
     }
 
@@ -1166,7 +1205,7 @@ void MainComponent::timerCallback()
     };
     gcTrack(masterTrack);
     gcTrack(returnTrackA);
-    for (int t = 0; t < nTracks; ++t) gcTrack(audioTracks[t]);
+    for (int t = 0; t < nTracks; ++t) gcTrack(*audioTracks[t]);
 
     // ── GC: Instrument internal buffers & Effect garbage ─────────────────────
     auto gcProcessors = [](Track& t) {
@@ -1184,7 +1223,7 @@ void MainComponent::timerCallback()
     };
     
     for (int t = 0; t < nTracks; ++t) {
-        gcProcessors(audioTracks[t]);
+        gcProcessors(*audioTracks[t]);
     }
     gcProcessors(returnTrackA);
     gcProcessors(masterTrack);
@@ -1200,11 +1239,11 @@ void MainComponent::timerCallback()
 
     for (int t = 0; t < nTracks; ++t) {
         float phase = -1.0f;
-        if (playing && audioTracks[t].currentPattern && spb > 0.0) {
-            double lenBeats = audioTracks[t].currentPattern->getLengthBeats();
+        if (playing && audioTracks[t]->currentPattern && spb > 0.0) {
+            double lenBeats = audioTracks[t]->currentPattern->getLengthBeats();
             double lenSamples = lenBeats * spb;
             if (lenSamples > 0.0) {
-                double elapsed = static_cast<double>(playhead - audioTracks[t].patternStartSample);
+                double elapsed = static_cast<double>(playhead - audioTracks[t]->patternStartSample);
                 if (elapsed >= 0.0) {
                     phase = static_cast<float>(std::fmod(elapsed, lenSamples) / lenSamples);
                 }
@@ -1223,8 +1262,8 @@ void MainComponent::timerCallback()
         if (juce::isPositiveAndBelow (t, sessionView.gridContent.columns.size()))
         {
             auto* col = sessionView.gridContent.columns[t];
-            float newRms  = audioTracks[t].rmsLevel.load (std::memory_order_relaxed);
-            float newGain = audioTracks[t].gain.load     (std::memory_order_relaxed);
+            float newRms  = audioTracks[t]->rmsLevel.load (std::memory_order_relaxed);
+            float newGain = audioTracks[t]->gain.load     (std::memory_order_relaxed);
             col->rmsLevel  = (newRms > col->rmsLevel) ? newRms
                                                        : col->rmsLevel * 0.75f + newRms * 0.25f;
             col->gainValue = newGain;
@@ -1433,20 +1472,28 @@ void MainComponent::syncUIToProject()
 {
     // Clear current tracks and UI
     numActiveTracks.store(0, std::memory_order_relaxed);
-    for (int t = 0; t < MAX_TRACKS; t++) {
-        // Zero all clip grids
-        for (int s = 0; s < NUM_SCENES; s++) {
-            clipGrid[t][s] = ClipData();
-            sessionView.setClipData(t, s, clipGrid[t][s]);
-        }
-        audioTracks[t].gain.store(1.0f);
-        audioTracks[t].commandQueue.push({ TrackCommand::Type::StopPattern, nullptr, 0 });
+    // Clear all existing tracks (instruments, effects, commands)
+    for (int t = 0; t < (int)audioTracks.size(); ++t) {
+        audioTracks[t]->gain.store(1.0f);
+        audioTracks[t]->commandQueue.push({ TrackCommand::Type::StopPattern, nullptr, 0 });
         for (int e = 0; e < Track::MAX_EFFECTS; ++e) {
-            if (auto* old = audioTracks[t].effectChain[e].exchange(nullptr, std::memory_order_acq_rel)) {
-                audioTracks[t].effectGarbageQueue.push(old);
+            if (auto* old = audioTracks[t]->effectChain[e].exchange(nullptr, std::memory_order_acq_rel)) {
+                audioTracks[t]->effectGarbageQueue.push(old);
             }
         }
     }
+    // Wipe all vectors (clips are UI-thread-only, safe here after stop)
+    audioTracks.clear();
+    clipGrid.clear();
+    trackInstruments.clear();
+    loadedFiles.clear();
+    arrangementTracks.clear();
+    // Re-reserve so push_back stays safe
+    audioTracks.reserve(128);
+    clipGrid.reserve(128);
+    trackInstruments.reserve(128);
+    loadedFiles.reserve(128);
+    arrangementTracks.reserve(128);
     
     selectedTrackIndex = -1;
     selectedSceneIndex = -1;
@@ -1474,13 +1521,21 @@ void MainComponent::syncUIToProject()
             if (trackNode.hasType("Track"))
             {
                 int tIdx = trackNode.getProperty("index", -1);
-                if (tIdx >= 0 && tIdx < MAX_TRACKS)
+                if (tIdx >= 0)
                 {
+                    // Grow all parallel vectors to accommodate this track index
+                    while ((int)audioTracks.size() <= tIdx) {
+                        audioTracks.push_back(std::make_unique<Track>());
+                        clipGrid.push_back({});
+                        trackInstruments.push_back("");
+                        loadedFiles.push_back(juce::File{});
+                        arrangementTracks.push_back({});
+                    }
                     numActiveTracks.store(std::max(numActiveTracks.load(), tIdx + 1), std::memory_order_relaxed);
                     
                     juce::String name = trackNode.getProperty("name", "Track " + juce::String(tIdx + 1));
                     float gain = trackNode.getProperty("gain", 1.0f);
-                    audioTracks[tIdx].gain.store(gain);
+                    audioTracks[tIdx]->gain.store(gain);
 
                     // Restore track colour
                     auto argbProp = trackNode.getProperty("colour");
@@ -1510,11 +1565,11 @@ void MainComponent::syncUIToProject()
                         if (newInst) {
                             newInst->prepareToPlay(currentSampleRate);
                             
-                            if (auto* old = audioTracks[tIdx].activeInstrument.exchange(newInst.release(), std::memory_order_acq_rel)) {
-                                audioTracks[tIdx].instrumentGarbageQueue.push(old);
+                            if (auto* old = audioTracks[tIdx]->activeInstrument.exchange(newInst.release(), std::memory_order_acq_rel)) {
+                                audioTracks[tIdx]->instrumentGarbageQueue.push(old);
                             }
 
-                            auto* currentInst = audioTracks[tIdx].activeInstrument.load(std::memory_order_acquire);
+                            auto* currentInst = audioTracks[tIdx]->activeInstrument.load(std::memory_order_acquire);
 
                             if (instrumentType == "Oscillator") {
                                 auto oscNode = trackNode.getChildWithName("OscillatorState");
@@ -1558,8 +1613,8 @@ void MainComponent::syncUIToProject()
                                     if (effectNode.getNumChildren() > 0) {
                                         effect->loadState(effectNode.getChild(0));
                                     }
-                                    if (auto* old = audioTracks[tIdx].effectChain[eIdx].exchange(effect.release(), std::memory_order_acq_rel)) {
-                                        audioTracks[tIdx].effectGarbageQueue.push(old);
+                                    if (auto* old = audioTracks[tIdx]->effectChain[eIdx].exchange(effect.release(), std::memory_order_acq_rel)) {
+                                        audioTracks[tIdx]->effectGarbageQueue.push(old);
                                     }
                                     eIdx++;
                                 }
@@ -1645,6 +1700,73 @@ void MainComponent::syncUIToProject()
                             }
                         }
                     }
+
+                    // ArrangementClips
+                    auto arrNode = trackNode.getChildWithName("ArrangementClips");
+                    if (arrNode.isValid()) {
+                        for (int c = 0; c < arrNode.getNumChildren(); ++c) {
+                            auto aNode = arrNode.getChild(c);
+                            if (aNode.hasType("ArrangementClip")) {
+                                ArrangementClip aClip;
+                                aClip.trackIndex = tIdx;
+                                aClip.startBar = aNode.getProperty("startBar", 1.0);
+                                aClip.lengthBars = aNode.getProperty("lengthBars", 1.0);
+                                
+                                auto clipNode = aNode.getChildWithName("Clip");
+                                if (clipNode.isValid()) {
+                                    ClipData d;
+                                    d.hasClip  = true;
+                                    d.isPlaying = false;
+                                    d.name     = clipNode.getProperty("name", "Pattern");
+                                    auto clipArgbProp = clipNode.getProperty("colour");
+                                    d.colour = clipArgbProp.isVoid() ? juce::Colour (0xff2d89ef) : juce::Colour ((juce::uint32)(juce::int64)clipArgbProp);
+                                    d.euclideanSteps  = clipNode.getProperty("euclideanSteps",  16);
+                                    d.euclideanPulses = clipNode.getProperty("euclideanPulses", 4);
+                                    juce::String hex = clipNode.getProperty("hitMap", "");
+                                    if (hex.isNotEmpty() && hex.length() % 2 == 0) {
+                                        d.hitMap.clear();
+                                        for (int ci = 0; ci < hex.length(); ci += 2) d.hitMap.push_back((uint8_t) hex.substring(ci, ci + 2).getHexValue32());
+                                    }
+                                    d.patternMode = clipNode.getProperty("patternMode", "euclidean");
+                                    d.patternLengthBars = clipNode.getProperty("patternLengthBars", 1.0);
+                                    auto midiNotesNode = clipNode.getChildWithName("MidiNotes");
+                                    if (midiNotesNode.isValid()) {
+                                        d.midiNotes.clear();
+                                        for (int mn = 0; mn < midiNotesNode.getNumChildren(); ++mn) {
+                                            auto noteNode = midiNotesNode.getChild(mn);
+                                            MidiNote n;
+                                            n.note = noteNode.getProperty("note");
+                                            n.startBeat = noteNode.getProperty("startBeat");
+                                            n.lengthBeats = noteNode.getProperty("lengthBeats");
+                                            n.velocity = noteNode.getProperty("velocity");
+                                            d.midiNotes.push_back(n);
+                                        }
+                                    }
+                                    auto drNode = clipNode.getChildWithName("DrumPatterns");
+                                    if (drNode.isValid()) {
+                                        for (int p = 0; p < drNode.getNumChildren(); ++p) {
+                                            auto pNode = drNode.getChild(p);
+                                            int idx = pNode.getProperty("padIndex", -1);
+                                            if (idx >= 0 && idx < 16) {
+                                                auto& pad = d.drumPatterns[idx];
+                                                pad.steps = pNode.getProperty("steps", 16);
+                                                pad.pulses = pNode.getProperty("pulses", 0);
+                                                juce::String phex = pNode.getProperty("hitMap", "");
+                                                if (phex.isNotEmpty() && phex.length() % 2 == 0) {
+                                                    pad.hitMap.clear();
+                                                    for (int ci = 0; ci < phex.length(); ci += 2) pad.hitMap.push_back((uint8_t)phex.substring(ci, ci + 2).getHexValue32());
+                                                }
+                                            }
+                                        }
+                                    }
+                                    aClip.data = d;
+                                }
+                                arrangementTracks[tIdx].push_back(aClip);
+                            }
+                        }
+                    }
+
+
                 }
             }
         }
@@ -1682,6 +1804,8 @@ void MainComponent::syncUIToProject()
             }
         }
     }
+
+    syncArrangementFromSession();
 }
 
 void MainComponent::syncProjectToUI()
@@ -1710,11 +1834,11 @@ void MainComponent::syncProjectToUI()
         }
         trackNode.setProperty("name",   name,                  nullptr);
         trackNode.setProperty("colour", (juce::int64)tcol.getARGB(), nullptr);
-        trackNode.setProperty("gain", audioTracks[t].gain.load(std::memory_order_relaxed), nullptr);
+        trackNode.setProperty("gain", audioTracks[t]->gain.load(std::memory_order_relaxed), nullptr);
 
         trackNode.setProperty("instrument_type", trackInstruments[t], nullptr);
 
-        if (auto* inst = audioTracks[t].activeInstrument.load(std::memory_order_acquire)) {
+        if (auto* inst = audioTracks[t]->activeInstrument.load(std::memory_order_acquire)) {
             if (trackInstruments[t] == "Oscillator" || trackInstruments[t] == "DrumRack") {
                 auto state = inst->saveState();
                 trackNode.addChild(state, -1, nullptr);
@@ -1789,10 +1913,68 @@ void MainComponent::syncProjectToUI()
         if (clipsNode.getNumChildren() > 0)
             trackNode.addChild(clipsNode, -1, nullptr);
             
+        // ArrangementClips
+        juce::ValueTree arrangementNode("ArrangementClips");
+        for (const auto& aClip : arrangementTracks[t]) {
+            juce::ValueTree aClipNode("ArrangementClip");
+            aClipNode.setProperty("startBar", aClip.startBar, nullptr);
+            aClipNode.setProperty("lengthBars", aClip.lengthBars, nullptr);
+            
+            juce::ValueTree innerClipNode("Clip");
+            innerClipNode.setProperty("name", aClip.data.name, nullptr);
+            innerClipNode.setProperty("colour", (juce::int64)aClip.data.colour.getARGB(), nullptr);
+            innerClipNode.setProperty("euclideanSteps", aClip.data.euclideanSteps, nullptr);
+            innerClipNode.setProperty("euclideanPulses", aClip.data.euclideanPulses, nullptr);
+            if (!aClip.data.hitMap.empty()) {
+                juce::String hex;
+                for (uint8_t b : aClip.data.hitMap) hex += juce::String::toHexString(b).paddedLeft('0', 2);
+                innerClipNode.setProperty("hitMap", hex, nullptr);
+            }
+            innerClipNode.setProperty("patternMode", aClip.data.patternMode, nullptr);
+            innerClipNode.setProperty("patternLengthBars", aClip.data.patternLengthBars, nullptr);
+
+            if (!aClip.data.midiNotes.empty()) {
+                juce::ValueTree midiNotesNode("MidiNotes");
+                for (const auto& n : aClip.data.midiNotes) {
+                    juce::ValueTree noteNode("Note");
+                    noteNode.setProperty("note", n.note, nullptr);
+                    noteNode.setProperty("startBeat", n.startBeat, nullptr);
+                    noteNode.setProperty("lengthBeats", n.lengthBeats, nullptr);
+                    noteNode.setProperty("velocity", n.velocity, nullptr);
+                    midiNotesNode.addChild(noteNode, -1, nullptr);
+                }
+                innerClipNode.addChild(midiNotesNode, -1, nullptr);
+            }
+
+            if (aClip.data.patternMode == "drumrack") {
+                juce::ValueTree drNode("DrumPatterns");
+                for (int p = 0; p < 16; ++p) {
+                    auto& pad = aClip.data.drumPatterns[p];
+                    if (pad.pulses > 0 || !pad.hitMap.empty()) {
+                        juce::ValueTree pNode("PadPattern");
+                        pNode.setProperty("padIndex", p, nullptr);
+                        pNode.setProperty("steps", pad.steps, nullptr);
+                        pNode.setProperty("pulses", pad.pulses, nullptr);
+                        if (!pad.hitMap.empty()) {
+                            juce::String hex;
+                            for (uint8_t b : pad.hitMap) hex += juce::String::toHexString(b).paddedLeft('0', 2);
+                            pNode.setProperty("hitMap", hex, nullptr);
+                        }
+                        drNode.addChild(pNode, -1, nullptr);
+                    }
+                }
+                innerClipNode.addChild(drNode, -1, nullptr);
+            }
+            aClipNode.addChild(innerClipNode, -1, nullptr);
+            arrangementNode.addChild(aClipNode, -1, nullptr);
+        }
+        if (arrangementNode.getNumChildren() > 0)
+            trackNode.addChild(arrangementNode, -1, nullptr);
+            
         // Effects
         juce::ValueTree effectsNode("Effects");
         for (int i = 0; i < Track::MAX_EFFECTS; ++i) {
-            if (auto* effect = audioTracks[t].effectChain[i].load(std::memory_order_acquire)) {
+            if (auto* effect = audioTracks[t]->effectChain[i].load(std::memory_order_acquire)) {
                 juce::ValueTree effectNode("Effect");
                 effectNode.setProperty("type", effect->getName(), nullptr);
                 effectNode.addChild(effect->saveState(), -1, nullptr);
@@ -1824,9 +2006,9 @@ void MainComponent::syncProjectToUI()
 
 void MainComponent::loadAudioFileIntoTrack(int trackIdx, const juce::File& file)
 {
-    if (trackIdx < 0 || trackIdx >= MAX_TRACKS) return;
+    if (trackIdx < 0 || trackIdx >= (int)audioTracks.size()) return;
 
-    if (auto* inst = audioTracks[trackIdx].activeInstrument.load(std::memory_order_acquire)) {
+    if (auto* inst = audioTracks[trackIdx]->activeInstrument.load(std::memory_order_acquire)) {
         inst->loadFile(file);
     }
 
@@ -1838,7 +2020,7 @@ void MainComponent::loadAudioFileIntoTrack(int trackIdx, const juce::File& file)
             delete reader;
 
             juce::MessageManager::callAsync([this, newBuffer, trackIdx, file] {
-                if (auto* inst = audioTracks[trackIdx].activeInstrument.load(std::memory_order_acquire)) {
+                if (auto* inst = audioTracks[trackIdx]->activeInstrument.load(std::memory_order_acquire)) {
                     if (auto* simpler = dynamic_cast<SimplerProcessor*>(inst)) {
                         simpler->loadNewBuffer(newBuffer);
                     } else {
@@ -1906,9 +2088,9 @@ void MainComponent::regenerateEuclideanMidi(ClipData& clip) {
 }
 
 void MainComponent::loadAudioFileIntoDrumPad(int trackIdx, int padIndex, const juce::File& file) {
-    if (trackIdx < 0 || trackIdx >= MAX_TRACKS) return;
+    if (trackIdx < 0 || trackIdx >= (int)audioTracks.size()) return;
 
-    if (auto* inst = audioTracks[trackIdx].activeInstrument.load(std::memory_order_acquire)) {
+    if (auto* inst = audioTracks[trackIdx]->activeInstrument.load(std::memory_order_acquire)) {
         if (auto* dr = dynamic_cast<DrumRackProcessor*>(inst)) {
             juce::Thread::launch([this, file, trackIdx, padIndex] {
                 if (auto* reader = formatManager.createReaderFor(file)) {
@@ -1918,7 +2100,7 @@ void MainComponent::loadAudioFileIntoDrumPad(int trackIdx, int padIndex, const j
                     delete reader;
 
                     juce::MessageManager::callAsync([this, newBuffer, trackIdx, padIndex, file] {
-                        if (auto* inst = audioTracks[trackIdx].activeInstrument.load(std::memory_order_acquire)) {
+                        if (auto* inst = audioTracks[trackIdx]->activeInstrument.load(std::memory_order_acquire)) {
                             if (auto* dr = dynamic_cast<DrumRackProcessor*>(inst)) {
                                 dr->loadBufferToPad(padIndex, newBuffer, file);
                             } else {
@@ -1940,8 +2122,8 @@ void MainComponent::showDeviceEditorForTrack(int trackIdx) {
     Track* track = nullptr;
     if (trackIdx == 999) {
         track = &returnTrackA;
-    } else if (trackIdx >= 0 && trackIdx < MAX_TRACKS) {
-        track = &audioTracks[trackIdx];
+    } else if (trackIdx >= 0 && trackIdx < (int)audioTracks.size()) {
+        track = audioTracks[trackIdx].get();
     } else {
         return;
     }
@@ -2009,4 +2191,120 @@ void MainComponent::updateDrumRackPatternEditor() {
             patternEditor.loadDrumPadData(pad.steps, pad.pulses, pad.hitMap);
         }
     }
+}
+
+void MainComponent::exportProject(const juce::File& outputFile, const juce::String& format)
+{
+    double endBar = 1.0;
+    for (int t = 0; t < numActiveTracks.load(std::memory_order_relaxed); ++t) {
+        for (const auto& aClip : arrangementTracks[t]) {
+            double clipEnd = aClip.startBar + aClip.lengthBars;
+            if (clipEnd > endBar) endBar = clipEnd;
+        }
+    }
+    
+    // Add a 1-bar tail
+    endBar += 1.0;
+    
+    double samplesPerBeat = transportClock.getSamplesPerBeat();
+    double beatsPerBar = 4.0;
+    int totalSamplesToRender = static_cast<int>((endBar - 1.0) * beatsPerBar * samplesPerBeat);
+    
+    if (totalSamplesToRender <= 0) {
+        juce::MessageManager::callAsync([]() {
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Export Failed", "The project is empty.");
+        });
+        return;
+    }
+
+    // 1. Temporarily stop the audio engine from pulling blocks
+    isExporting.store(true, std::memory_order_release);
+    
+    // 2. Prepare temp file
+    juce::File tempWav = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("libedaw_export_temp.wav");
+    tempWav.deleteFile();
+    
+    std::unique_ptr<juce::FileOutputStream> outStream(tempWav.createOutputStream());
+    if (!outStream) {
+        isExporting.store(false, std::memory_order_release);
+        juce::MessageManager::callAsync([]() {
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Export Failed", "Could not create temporary file.");
+        });
+        return;
+    }
+    
+    juce::WavAudioFormat wavFormat;
+    std::unique_ptr<juce::AudioFormatWriter> writer(wavFormat.createWriterFor(outStream.get(), currentSampleRate, 2, 16, {}, 0));
+    if (!writer) {
+        isExporting.store(false, std::memory_order_release);
+        juce::MessageManager::callAsync([]() {
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Export Failed", "Could not create audio writer.");
+        });
+        return;
+    }
+    outStream.release(); // Writer takes ownership
+    
+    // 3. Reset internal ring buffer and transport
+    transportClock.stop();
+    appBuffer.clear();
+    renderTransportOffset.store(0, std::memory_order_release);
+
+    transportClock.play();
+    
+    renderIsArrangementMode.store(true, std::memory_order_release);
+    juce::MessageManager::callAsync([this]() { syncArrangementFromSession(); });
+    // Wait briefly for UI message thread to sync the arrangement struct to atomic
+    juce::Thread::sleep(100);
+
+    // 4. Drain blocks as the RenderThread fills them
+    juce::AudioBuffer<float> exportBuffer(2, currentBufferSize);
+    int samplesRendered = 0;
+    
+    while (samplesRendered < totalSamplesToRender) {
+        if (juce::Thread::getCurrentThread() && juce::Thread::getCurrentThread()->threadShouldExit()) break;
+
+        // Manually wake the render thread to ensure it fills the buffer as fast as possible
+        renderWakeEvent.signal();
+
+        int ready = appBuffer.getNumReady();
+        if (ready >= currentBufferSize) {
+            exportBuffer.setSize(2, currentBufferSize, false, false, true);
+            appBuffer.readBlock(exportBuffer, currentBufferSize);
+            
+            int samplesToWrite = std::min(currentBufferSize, totalSamplesToRender - samplesRendered);
+            writer->writeFromAudioSampleBuffer(exportBuffer, 0, samplesToWrite);
+            samplesRendered += samplesToWrite;
+        } else {
+            juce::Thread::sleep(1);
+        }
+    }
+    
+    // 5. Cleanup and restore state
+    transportClock.stop();
+    writer.reset();
+    
+    isExporting.store(false, std::memory_order_release);
+    
+    // 6. Convert if necessary
+    if (format == "WAV") {
+        outputFile.deleteFile();
+        tempWav.moveFileTo(outputFile);
+    } else {
+        juce::ChildProcess ffmpeg;
+        juce::StringArray args;
+        args.add("ffmpeg");
+        args.add("-y");
+        args.add("-i");
+        args.add(tempWav.getFullPathName());
+        args.add(outputFile.getFullPathName());
+        
+        if (ffmpeg.start(args)) {
+            ffmpeg.waitForProcessToFinish(30000);
+        }
+        tempWav.deleteFile();
+    }
+    
+    juce::MessageManager::callAsync([]() {
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "Export Complete", "Audio exported successfully.");
+    });
 }

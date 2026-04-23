@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 #include <atomic>
+#include <array>
 
 #include "LockFreeQueue.h"
 #include "TrackCommand.h"
@@ -268,15 +269,20 @@ private:
     void syncProjectToUI();
     void syncUIToProject();
     void loadAudioFileIntoTrack(int trackIdx, const juce::File& file);
+    void exportProject(const juce::File& outputFile, const juce::String& format);
 
     // ── Audio Graph Elements ─────────────────────────────────────────────────
+    // Tracks are heap-allocated (Track has non-movable std::atomic members).
+    // Pre-reserved to 128 so no reallocation occurs during the session
+    // (vector pointer stability is required by the lock-free render thread).
     Track masterTrack;
     Track returnTrackA;
-    Track audioTracks[MAX_TRACKS];
+    std::vector<std::unique_ptr<Track>> audioTracks; // indexed 0..numActiveTracks-1
     std::atomic<int> numActiveTracks {0}; // written UI, read audio+render thread
 
     // ── Clip Grid State (UI thread only) ─────────────────────────────────────
-    ClipData clipGrid[MAX_TRACKS][NUM_SCENES];
+    // clipGrid[t][s] — grows in sync with audioTracks
+    std::vector<std::array<ClipData, NUM_SCENES>> clipGrid;
     int selectedTrackIndex = -1;
     int selectedSceneIndex = -1;
     int selectedDrumPadIndex = 0;
@@ -291,13 +297,15 @@ private:
 
     enum class DAWView { Session, Arrangement };
     DAWView currentView { DAWView::Session };
-    std::vector<ArrangementClip> arrangementTracks[MAX_TRACKS]; // UI-thread only
+    std::vector<std::vector<ArrangementClip>> arrangementTracks; // UI-thread only, one inner vec per track
 
     // ── Arrangement Engine (Thread-Safe) ─────────────────────────────────────
     std::atomic<SharedArrangement*> renderArrangement {nullptr};
     LockFreeQueue<SharedArrangement*, 16> arrangementGarbageQueue;
     std::atomic<bool> renderIsArrangementMode {false};
     std::atomic<int64_t> renderTransportOffset {0};
+    
+    std::atomic<bool> isExporting {false};
 
     void switchToView(DAWView v);
     void syncArrangementFromSession();
@@ -308,8 +316,8 @@ private:
     float returnLevelDisplay = 0.0f;
 
     // ── Instrument Engine ──────────────────────────────────────────────────
-    juce::String     trackInstruments[MAX_TRACKS]; // Stores name of current instrument
-    juce::File       loadedFiles[MAX_TRACKS];
+    std::vector<juce::String> trackInstruments; // Stores name of current instrument, indexed by track
+    std::vector<juce::File>   loadedFiles;
     juce::AudioFormatManager formatManager;
     std::unique_ptr<juce::FileChooser> myChooser;
 

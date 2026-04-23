@@ -13,6 +13,7 @@ LiBeDAW is an Ableton Live–inspired Session View DAW engineered from first pri
 ## Features
 
 - 🎛️ **Session View** — Ableton-style clip grid with independent per-track launch control. Track and pattern renaming, color assignment, and mixer strips with live RMS metering.
+- 🎞️ **Arrangement View** — Timeline-based linear sequencing with drag-and-drop clip placement, dynamic horizontal scrolling, and full project persistence.
 - 🥁 **Euclidean Rhythm Sequencer** — Bjorklund's algorithm for polyrhythmic pattern generation with visual circle editor.
 - 🎹 **MIDI Pattern Editor** — Piano-roll style note editing per clip slot with sample-accurate rendering and `allNotesOff` handling for glitch-free transitions.
 - 🎹 **Built-in Instruments**:
@@ -27,6 +28,7 @@ LiBeDAW is an Ableton Live–inspired Session View DAW engineered from first pri
   - Send/Return routing (post-fader) with dedicated master and return track effect chains.
 - 📁 **Asset Browser** — Drag-and-drop file browser with persistent folder bookmarks and dynamically generated drag tiles for instruments and effects.
 - 💾 **Project Management** — Full save/load via `juce::ValueTree` serialization (custom `.LBD` project file format).
+- 📤 **Audio Export** — High-quality offline rendering bounce engine supporting WAV, MP3, FLAC, and OGG formats (via FFmpeg integration).
 - 🔌 **Plugin Hosting** — VST3 and LV2 support via JUCE.
 - ⚙️ **Audio Device Settings** — Runtime soundcard/buffer/sample-rate configuration.
 - 🕹️ **Global Transport** — Sample-accurate BPM clock driving all sequencers.
@@ -45,6 +47,7 @@ LiBeDAW is built on strict real-time safety principles:
 | Memory on audio thread | **Zero allocation** — pre-allocated pools only |
 | Plugin hot-swapping | Garbage collection queue on UI thread |
 | Track commands | Lock-free `TrackCommand` FIFO ring buffer |
+| Offline Rendering | Rapid-drain loop over `AppAudioBuffer` bypassing RT hardware limits |
 
 ### Key Components
 
@@ -52,7 +55,7 @@ LiBeDAW is built on strict real-time safety principles:
 Source/
 ├── Core/
 │   ├── Main.cpp                  # JUCE application entry point
-│   ├── MainComponent.{h,cpp}     # Root component, audio engine, transport
+│   ├── MainComponent.{h,cpp}     # Root component, audio engine, export bounce
 │   ├── AppAudioBuffer.h          # Lock-free audio buffer abstraction
 │   ├── LockFreeQueue.h           # SPSC ring buffer implementation
 │   ├── TrackCommand.h            # Audio-thread command message types
@@ -81,6 +84,7 @@ Source/
 │   └── PatternPool.h             # Pre-allocated pattern memory pool
 └── UI/
     ├── SessionView.h             # Clip grid UI (Track columns, clip slots)
+    ├── ArrangementView.h         # Timeline sequencer with horizontal scrolling
     ├── BrowserComponent.h        # Asset file browser with bookmarks
     ├── DeviceView.h              # Bottom device rack & effect chains
     └── TopBarComponent.h         # Transport controls & project management
@@ -95,13 +99,13 @@ Source/
 - **OS**: Linux (Debian Sid / Ubuntu 22.04+ recommended)
 - **Compiler**: GCC 12+ or Clang 15+ (C++20 required)
 - **CMake**: 3.20+
-- **Dependencies**: `pkg-config`, `libasound2-dev`, `libfreetype6-dev`, `libfontconfig1-dev`, `libcurl4-openssl-dev`, `libx11-dev`, `libxrandr-dev`, `libxinerama-dev`, `libxcursor-dev`, `libgl1-mesa-dev`, `libglu1-mesa-dev`, `libwebkit2gtk-4.0-dev`
+- **Dependencies**: `pkg-config`, `libasound2-dev`, `libfreetype6-dev`, `libfontconfig1-dev`, `libcurl4-openssl-dev`, `libx11-dev`, `libxrandr-dev`, `libxinerama-dev`, `libxcursor-dev`, `libgl1-mesa-dev`, `libglu1-mesa-dev`, `libwebkit2gtk-4.0-dev`, `ffmpeg` (for MP3/FLAC/OGG export)
 
 Install dependencies on Debian/Ubuntu:
 ```bash
 sudo apt install cmake build-essential pkg-config libasound2-dev libfreetype6-dev \
   libfontconfig1-dev libcurl4-openssl-dev libx11-dev libxrandr-dev libxinerama-dev \
-  libxcursor-dev libgl1-mesa-dev libglu1-mesa-dev libwebkit2gtk-4.0-dev
+  libxcursor-dev libgl1-mesa-dev libglu1-mesa-dev libwebkit2gtk-4.0-dev ffmpeg
 ```
 
 ### Build
@@ -113,12 +117,12 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
-The binary will be at `build/LiBeDAW_artefacts/Release/LiBeDAW`.
+The binary will be at `build/LiBeDAW_artefacts/LiBeDAW`.
 
 ### Run
 
 ```bash
-./build/LiBeDAW_artefacts/Release/LiBeDAW
+./build/LiBeDAW_artefacts/LiBeDAW
 ```
 
 ---
@@ -130,19 +134,21 @@ The binary will be at `build/LiBeDAW_artefacts/Release/LiBeDAW`.
 3. **Add effects** — Switch to the Effects tab in the Browser and drag any effect into the Device View chain at the bottom of the screen.
 4. **Program a pattern** — Click a clip slot to open the Pattern Editor. Toggle steps or use the Euclidean circle to generate rhythms.
 5. **Organize** — Right-click track headers or clips to assign custom names and colors.
-6. **Launch clips** — Press ▶ on any clip slot to queue it for launch on the next bar.
-7. **Play** — Hit the global Transport Play button. All queued clips launch sample-accurately.
-8. **Save** — `File → Save Project` to serialize the full session as an `.LBD` file.
+6. **Timeline Sequencing** — Switch to the **Arrangement View** to lay out clips along a continuous horizontal timeline.
+7. **Launch clips** — Press ▶ on any clip slot to queue it for launch on the next bar.
+8. **Play** — Hit the global Transport Play button. All queued clips launch sample-accurately.
+9. **Export Audio** — Click `Export Audio` in the top bar to render your composition to WAV, MP3, FLAC, or OGG format.
+10. **Save** — `File → Save Project` to serialize the full session as an `.LBD` file.
 
 ---
 
 ## Roadmap
 
+- [x] Arrangement View
 - [ ] Piano-roll quantization & velocity editing
 - [ ] VST3 plugin rack in Device View
 - [ ] MIDI controller mapping
 - [ ] Audio clip recording
-- [ ] Arrangement View
 
 ---
 
