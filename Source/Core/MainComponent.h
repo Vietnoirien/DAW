@@ -249,6 +249,8 @@ public:
     
     juce::String activeAutomationParameterId;
     int activeAutomationTrackIdx = -1;
+    // In Arrangement mode: the clip the user last clicked (nullptr = none)
+    ArrangementClip* selectedArrangementClip = nullptr;
 
     void prepareToPlay (int samplesPerBlockExpected, double sampleRate) override;
     void getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill) override;

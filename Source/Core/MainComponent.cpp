@@ -349,45 +349,93 @@ MainComponent::MainComponent()
 
     deviceView.canAddAutomation = [this]() -> bool {
         if (selectedTrackIndex < 0 || selectedTrackIndex >= (int)audioTracks.size()) return false;
+        // Arrangement mode: need a selected clip
+        if (currentView == DAWView::Arrangement)
+            return selectedArrangementClip != nullptr;
+        // Session mode: need a clip in the grid
         if (selectedSceneIndex < 0 || selectedSceneIndex >= NUM_SCENES) return false;
         return clipGrid[selectedTrackIndex][selectedSceneIndex].hasClip;
     };
 
     deviceView.hasAutomationForParam = [this](const juce::String& paramId) -> bool {
-        if (selectedTrackIndex < 0 || selectedSceneIndex < 0) return false;
-        if (selectedTrackIndex >= (int)audioTracks.size() || selectedSceneIndex >= NUM_SCENES) return false;
+        if (selectedTrackIndex < 0) return false;
+        // Arrangement mode: check the selected arrangement clip
+        if (currentView == DAWView::Arrangement) {
+            if (selectedArrangementClip == nullptr) return false;
+            for (const auto& lane : selectedArrangementClip->automationLanes)
+                if (lane.parameterId == paramId && !lane.points.empty()) return true;
+            return false;
+        }
+        // Session mode: check the clip grid
+        if (selectedSceneIndex < 0 || selectedTrackIndex >= (int)audioTracks.size()
+            || selectedSceneIndex >= NUM_SCENES) return false;
         const auto& clip = clipGrid[selectedTrackIndex][selectedSceneIndex];
         for (const auto& lane : clip.automationLanes)
-            if (lane.parameterId == paramId && !lane.points.empty())
-                return true;
+            if (lane.parameterId == paramId && !lane.points.empty()) return true;
         return false;
     };
 
     deviceView.onParameterTouched = [this](const juce::String& paramId) {
-        if (selectedTrackIndex >= 0 && selectedTrackIndex < (int)audioTracks.size()) {
-            activeAutomationParameterId = paramId;
-            activeAutomationTrackIdx = selectedTrackIndex;
-            
+        if (selectedTrackIndex < 0 || selectedTrackIndex >= (int)audioTracks.size()) return;
+        activeAutomationParameterId = paramId;
+        activeAutomationTrackIdx = selectedTrackIndex;
+
+        if (currentView == DAWView::Arrangement) {
+            // ── Arrangement mode: add automation lane to the SELECTED clip ──
+            if (selectedArrangementClip == nullptr) return;
+            auto& arrClip = *selectedArrangementClip;
+            int arrTrackIdx = arrClip.trackIndex;
+
+            // Seed the lane with the current parameter value if it doesn't exist yet
+            bool found = false;
+            for (auto& lane : arrClip.automationLanes)
+                if (lane.parameterId == paramId) { found = true; break; }
+
+            if (!found) {
+                float defaultVal = 0.5f;
+                if (arrTrackIdx >= 0 && arrTrackIdx < (int)audioTracks.size()) {
+                    if (auto* track = audioTracks[arrTrackIdx].get()) {
+                        auto it = track->automationRegistry.find(paramId);
+                        if (it != track->automationRegistry.end() && it->second.ptr != nullptr) {
+                            float rawVal = it->second.ptr->load(std::memory_order_relaxed);
+                            float range  = it->second.maxVal - it->second.minVal;
+                            if (range != 0.0f) defaultVal = (rawVal - it->second.minVal) / range;
+                        }
+                    }
+                }
+                arrClip.automationLanes.push_back({paramId, {}});
+                double lenBeats = arrClip.lengthBars * 4.0;
+                arrClip.automationLanes.back().points.push_back({0.0, defaultVal});
+                arrClip.automationLanes.back().points.push_back({lenBeats, defaultVal});
+            }
+
+            // Show the overlay for the focused track
+            if (arrTrackIdx >= 0 && arrTrackIdx < (int)arrangementTracks.size()) {
+                arrangementView.setArrangementAutomation(
+                    arrTrackIdx,
+                    &arrangementTracks[arrTrackIdx],
+                    paramId);
+                // Re-push shared arrangement so render thread sees new lanes
+                syncArrangementFromSession();
+            }
+        } else {
+            // ── Session mode: show automation in the pattern editor ────────
             if (selectedSceneIndex >= 0) {
                 auto& clip = clipGrid[selectedTrackIndex][selectedSceneIndex];
                 AutomationLane* targetLane = nullptr;
                 for (auto& lane : clip.automationLanes) {
-                    if (lane.parameterId == paramId) {
-                        targetLane = &lane;
-                        break;
-                    }
+                    if (lane.parameterId == paramId) { targetLane = &lane; break; }
                 }
                 if (!targetLane) {
                     clip.automationLanes.push_back({paramId, {}});
                     targetLane = &clip.automationLanes.back();
-                    
+
                     float defaultVal = 0.5f;
                     if (auto* track = audioTracks[selectedTrackIndex].get()) {
                         auto it = track->automationRegistry.find(paramId);
                         if (it != track->automationRegistry.end() && it->second.ptr != nullptr) {
                             float rawVal = it->second.ptr->load(std::memory_order_relaxed);
-                            // Unmap back to [0.0, 1.0]
-                            float range = it->second.maxVal - it->second.minVal;
+                            float range  = it->second.maxVal - it->second.minVal;
                             if (range != 0.0f) defaultVal = (rawVal - it->second.minVal) / range;
                         }
                     }
@@ -397,8 +445,8 @@ MainComponent::MainComponent()
                 }
                 patternEditor.setActiveAutomationLane(targetLane, paramId, clip.patternLengthBars);
             }
-            DBG("Parameter focused for automation: " << paramId);
         }
+        DBG("Parameter focused for automation: " << paramId);
     };
 
     // ── Transport ─────────────────────────────────────────────────────────────
@@ -1103,6 +1151,26 @@ MainComponent::MainComponent()
         juce::ignoreUnused(t, c);
     };
 
+    arrangementView.onTrackSelected = [this](int trackIdx) {
+        if (trackIdx < 0 || trackIdx >= (int)audioTracks.size()) return;
+        selectedTrackIndex = trackIdx;
+        arrangementView.setSelectedTrack(trackIdx);
+        showDeviceEditorForTrack(trackIdx);
+        resized(); // re-layout bottom panel if device view changed height
+    };
+
+    arrangementView.onClipSelected = [this](ArrangementClip* clip) {
+        if (clip == nullptr) return;
+        selectedArrangementClip = clip;
+        int trackIdx = clip->trackIndex;
+        if (trackIdx < 0 || trackIdx >= (int)audioTracks.size()) return;
+        selectedTrackIndex = trackIdx;
+        arrangementView.setSelectedTrack(trackIdx);
+        // Load device editor so the user can right-click its knobs
+        showDeviceEditorForTrack(trackIdx);
+        resized();
+    };
+
     arrangementView.onClipPlaced = [this](int trackIdx, double startBar, const ClipData& newClip) {
         if (trackIdx >= 0 && trackIdx < (int)arrangementTracks.size()) {
             ArrangementClip ac;
@@ -1126,6 +1194,10 @@ MainComponent::MainComponent()
     arrangementView.onClipDeleted = [this](ArrangementClip* clip) {
         if (clip && clip->trackIndex >= 0 && clip->trackIndex < (int)arrangementTracks.size()) {
             auto& trackClips = arrangementTracks[clip->trackIndex];
+            if (selectedArrangementClip == clip) {
+                selectedArrangementClip = nullptr;
+                arrangementView.setSelectedClip(nullptr);
+            }
             trackClips.erase(std::remove_if(trackClips.begin(), trackClips.end(),
                 [clip](const ArrangementClip& c) { return &c == clip; }), trackClips.end());
             syncArrangementFromSession();
@@ -1160,6 +1232,12 @@ MainComponent::MainComponent()
             }
             syncArrangementFromSession();
         }
+    };
+
+    // When points are edited on the arrangement automation overlay, re-push
+    // a new SharedArrangement so the render thread evaluates the updated lanes.
+    arrangementView.automationOverlay.onAutomationChanged = [this]() {
+        syncArrangementFromSession();
     };
 
     // ── Audio Device ──────────────────────────────────────────────────
@@ -1324,6 +1402,12 @@ void MainComponent::resized()
         sessionView.setVisible(false);
         arrangementView.setVisible(true);
         arrangementView.setBounds(bounds);
+
+        // In Arrangement mode, the pattern editor is replaced by the arrangement
+        // automation overlay on the track row — hide it here so it doesn’t take
+        // up the bottom panel space.
+        patternEditor.setVisible(false);
+        deviceView.setBounds(bottomPanel);
     }
 }
 
@@ -1349,8 +1433,23 @@ void MainComponent::switchToView(DAWView v)
     bool viewChanged = (currentView != v);
     currentView = v;
     renderIsArrangementMode.store(v == DAWView::Arrangement, std::memory_order_release);
-    if (v == DAWView::Arrangement)
+    if (v == DAWView::Arrangement) {
         syncArrangementFromSession(); // Always re-sync when entering Arrangement
+        // Re-show overlay for previously focused parameter if any
+        if (!activeAutomationParameterId.isEmpty()
+            && activeAutomationTrackIdx >= 0
+            && activeAutomationTrackIdx < (int)arrangementTracks.size()) {
+            arrangementView.setArrangementAutomation(
+                activeAutomationTrackIdx,
+                &arrangementTracks[activeAutomationTrackIdx],
+                activeAutomationParameterId);
+        }
+    } else {
+        // Switching back to Session — clear the arrangement automation overlay and selection
+        arrangementView.clearArrangementAutomation();
+        selectedArrangementClip = nullptr;
+        arrangementView.setSelectedClip(nullptr);
+    }
     if (viewChanged)
         resized();
 }
