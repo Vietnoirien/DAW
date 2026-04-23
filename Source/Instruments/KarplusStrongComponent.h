@@ -1,45 +1,13 @@
 #pragma once
 #include <JuceHeader.h>
 #include "KarplusStrongProcessor.h"
+#include "../UI/LiBeLookAndFeel.h"
 
-// ============================================================
-// KS Look and Feel (green/wood theme)
-// ============================================================
-class KSLookAndFeel : public juce::LookAndFeel_V4 {
-public:
-    KSLookAndFeel() {
-        setColour(juce::Slider::rotarySliderFillColourId,    juce::Colour(0xff44DD88));
-        setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xff0A2015));
-        setColour(juce::Slider::thumbColourId,               juce::Colour(0xff99FFCC));
-        setColour(juce::ComboBox::backgroundColourId,        juce::Colour(0xff081208));
-        setColour(juce::ComboBox::textColourId,              juce::Colour(0xff44DD88));
-        setColour(juce::ComboBox::outlineColourId,           juce::Colour(0xff0A3020));
-    }
-    void drawRotarySlider(juce::Graphics& g, int x, int y, int w, int h,
-                          float pos, float sa, float ea, juce::Slider&) override {
-        float cx=x+w*0.5f, cy=y+h*0.5f, r=(float)juce::jmin(w/2,h/2)-3.0f;
-        float angle=sa+pos*(ea-sa);
-        juce::Path arc; arc.addCentredArc(cx,cy,r,r,0,sa,ea,true);
-        g.setColour(juce::Colour(0xff0A2015)); g.strokePath(arc,juce::PathStrokeType(3));
-        juce::Path fill; fill.addCentredArc(cx,cy,r,r,0,sa,angle,true);
-        g.setColour(juce::Colour(0xff44DD88)); g.strokePath(fill,juce::PathStrokeType(3));
-        g.setColour(juce::Colour(0xff081208));
-        g.fillEllipse(cx-r*0.6f,cy-r*0.6f,r*1.2f,r*1.2f);
-        juce::Path p; p.addRectangle(-1.5f,-r*0.5f,3.0f,r*0.5f);
-        p.applyTransform(juce::AffineTransform::rotation(angle).translated(cx,cy));
-        g.setColour(juce::Colour(0xff99FFCC)); g.fillPath(p);
-    }
-};
-
-// ============================================================
-// String vibration visualization
-// ============================================================
+// ─── String visualization ─────────────────────────────────────────────────────
 class StringVizComponent : public juce::Component, public juce::Timer {
 public:
     void setPlucked(float damping) {
-        currentDamping = damping;
-        pluckPhase = 0.0f;
-        startTimerHz(60);
+        currentDamping = damping; pluckPhase = 0.0f; startTimerHz(60);
     }
     void timerCallback() override {
         pluckPhase += 0.02f;
@@ -47,149 +15,127 @@ public:
         repaint();
     }
     void paint(juce::Graphics& g) override {
-        g.fillAll(juce::Colour(0xff030A05));
-        g.setColour(juce::Colour(0xff0A2015)); g.drawRect(getLocalBounds(),1);
+        g.fillAll(juce::Colour(0xff04080A));
+        g.setColour(juce::Colour(0xff0A2015)); g.drawRect(getLocalBounds(), 1);
 
         float midY = getHeight() * 0.5f;
         float decay = std::pow(1.0f - currentDamping, 2.0f);
         float amp   = getHeight() * 0.35f * (1.0f - pluckPhase) * decay;
 
-        juce::Path string;
+        juce::Path s;
         for (int x = 0; x < getWidth(); ++x) {
-            float t  = x / (float)getWidth();
-            float y  = midY + amp * std::sin(t * juce::MathConstants<float>::pi)
-                            * std::sin(pluckPhase * 12.0f * juce::MathConstants<float>::pi * t);
-            if (x == 0) string.startNewSubPath((float)x, y);
-            else         string.lineTo((float)x, y);
+            float t = x / (float)getWidth();
+            float y = midY + amp * std::sin(t * juce::MathConstants<float>::pi)
+                           * std::sin(pluckPhase * 12.0f * juce::MathConstants<float>::pi * t);
+            if (x == 0) s.startNewSubPath((float)x, y); else s.lineTo((float)x, y);
         }
-
-        // String body
-        g.setColour(juce::Colour(0xff44DD88).withAlpha(0.8f));
-        g.strokePath(string, juce::PathStrokeType(2.0f));
-
-        // Bridge markers
+        g.setColour(juce::Colour(0xff44DD88).withAlpha(0.85f));
+        g.strokePath(s, juce::PathStrokeType(2.0f));
         g.setColour(juce::Colour(0xff335522));
-        g.fillRect(0, (int)midY - 4, 4, 8);
-        g.fillRect(getWidth() - 4, (int)midY - 4, 4, 8);
-
+        g.fillRect(0, (int)midY-4, 4, 8); g.fillRect(getWidth()-4, (int)midY-4, 4, 8);
         g.setColour(juce::Colour(0xff44DD88).withAlpha(0.5f));
         g.setFont(juce::FontOptions(9.0f));
-        g.drawText("KARPLUS-STRONG", 4, 2, 140, 12, juce::Justification::centredLeft);
+        g.drawText("STRING", 5, 2, 80, 11, juce::Justification::centredLeft);
     }
 private:
-    float currentDamping { 0.5f };
-    float pluckPhase     { 1.0f };
+    float currentDamping{0.5f}, pluckPhase{1.0f};
 };
 
-// ============================================================
-// KarplusStrongComponent
-// ============================================================
+// ─── KarplusStrongComponent ───────────────────────────────────────────────────
+// Layout (320px tall):
+//  ┌────────────────────────────────────────────────────────┐
+//  │  KARPLUS-STRONG  |  PHYSICAL MODELING       [title]   │
+//  ├────────────────┬───────────────────────────────────────┤
+//  │ [String viz  ] │  EXCITATION                          │
+//  │                │  [en▾] [Noise Burst▾]               │
+//  │                │  [Lvl][Damp][Stretch][Pickup][Decay] │
+//  │                │  ─────────────────────────────────   │
+//  │                │  AMP                                 │
+//  │                │  [Atk][Rel][Master]                  │
+//  └────────────────┴───────────────────────────────────────┘
 class KarplusStrongComponent : public juce::Component {
 public:
-    explicit KarplusStrongComponent(KarplusStrongProcessor* proc) : processor(proc) {
+    explicit KarplusStrongComponent(KarplusStrongProcessor* proc) : processor(proc), laf(juce::Colour(0xff44DD88)) {
         setLookAndFeel(&laf);
         addAndMakeVisible(stringViz);
 
-        // Excitation type
-        addAndMakeVisible(exTypeLabel);
-        exTypeLabel.setText("Excitation", juce::dontSendNotification);
-        exTypeLabel.setColour(juce::Label::textColourId, juce::Colour(0xff44DD88));
-        exTypeLabel.setFont(juce::FontOptions(11.0f, juce::Font::bold));
-
         addAndMakeVisible(exTypeCombo);
-        exTypeCombo.addItem("Noise Burst",    1);
-        exTypeCombo.addItem("Impulse",        2);
+        exTypeCombo.addItem("Noise Burst", 1); exTypeCombo.addItem("Impulse", 2);
         exTypeCombo.addItem("Filtered Noise", 3);
         exTypeCombo.setSelectedId(proc->params.excitationType.load()+1, juce::dontSendNotification);
-        exTypeCombo.onChange=[this]{
-            processor->params.excitationType.store(exTypeCombo.getSelectedId()-1);
+        exTypeCombo.onChange = [this] { processor->params.excitationType.store(exTypeCombo.getSelectedId()-1); };
+
+        auto& p = proc->params;
+        auto sk = [&](LiBeKnob& k, const char* lbl, double v, double mn, double mx, double dv, const char* pid) {
+            k.setup(lbl, v, mn, mx, dv, pid, juce::Colour(0xff44DD88)); addAndMakeVisible(k);
         };
+        sk(kLvl,    "Level",   p.excitationLevel.load(), 0.0,   1.0,  1.0,   "KS/ExcitationLevel");
+        sk(kDamp,   "Damp",    p.damping.load(),          0.0,   1.0,  0.5,   "KS/Damping");
+        sk(kStr,    "Stretch", p.stretch.load(),          1.0,   2.0,  1.0,   "KS/Stretch");
+        sk(kPickup, "Pickup",  p.pickupPos.load(),        0.0,   1.0,  0.5,   "KS/Pickup");
+        sk(kDecay,  "Decay",   p.decayTime.load(),        0.1,   5.0,  1.0,   "KS/DecayTime");
+        sk(kAtk,    "Atk",     p.attack.load(),           0.001, 0.5,  0.001, "KS/Attack");
+        sk(kRel,    "Rel",     p.release.load(),          0.001, 2.0,  0.1,   "KS/Release");
+        sk(kMast,   "Master",  p.masterLevel.load(),      0.0,   1.0,  0.8,   "KS/MasterLevel");
 
-        auto sk=[&](juce::Slider& s,double v,double mn,double mx,double def=-1){
-            addAndMakeVisible(s);
-            s.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-            s.setTextBoxStyle(juce::Slider::NoTextBox,false,0,0);
-            s.setRange(mn,mx); s.setValue(v,juce::dontSendNotification);
-            s.setDoubleClickReturnValue(true,def<0?v:def);
-        };
-        auto& p=proc->params;
-        sk(exLevelKnob, p.excitationLevel.load(), 0, 1, 1);
-        sk(dampingKnob, p.damping.load(),          0, 1, 0.5);
-        sk(stretchKnob, p.stretch.load(),          1, 2, 1);
-        sk(pickupKnob,  p.pickupPos.load(),         0, 1, 0.5);
-        sk(decayKnob,   p.decayTime.load(),         0.1, 5, 1);
-        sk(masterKnob,  p.masterLevel.load(),       0, 1, 0.8);
-        sk(attackKnob,  p.attack.load(),            0.001, 0.5, 0.001);
-        sk(releaseKnob, p.release.load(),           0.001, 2, 0.1);
+        kLvl.slider.onValueChange    = [&p,this] { p.excitationLevel.store((float)kLvl.slider.getValue()); };
+        kDamp.slider.onValueChange   = [&p,this] { p.damping.store        ((float)kDamp.slider.getValue()); };
+        kStr.slider.onValueChange    = [&p,this] { p.stretch.store        ((float)kStr.slider.getValue()); };
+        kPickup.slider.onValueChange = [&p,this] { p.pickupPos.store      ((float)kPickup.slider.getValue()); };
+        kDecay.slider.onValueChange  = [&p,this] { p.decayTime.store      ((float)kDecay.slider.getValue()); };
+        kAtk.slider.onValueChange    = [&p,this] { p.attack.store         ((float)kAtk.slider.getValue()); };
+        kRel.slider.onValueChange    = [&p,this] { p.release.store        ((float)kRel.slider.getValue()); };
+        kMast.slider.onValueChange   = [&p,this] { p.masterLevel.store    ((float)kMast.slider.getValue()); };
 
-        exLevelKnob.onValueChange =[&]{p.excitationLevel.store((float)exLevelKnob.getValue());};
-        dampingKnob.onValueChange =[&]{p.damping.store((float)dampingKnob.getValue());};
-        stretchKnob.onValueChange =[&]{p.stretch.store((float)stretchKnob.getValue());};
-        pickupKnob.onValueChange  =[&]{p.pickupPos.store((float)pickupKnob.getValue());};
-        decayKnob.onValueChange   =[&]{p.decayTime.store((float)decayKnob.getValue());};
-        masterKnob.onValueChange  =[&]{p.masterLevel.store((float)masterKnob.getValue());};
-        attackKnob.onValueChange  =[&]{p.attack.store((float)attackKnob.getValue());};
-        releaseKnob.onValueChange =[&]{p.release.store((float)releaseKnob.getValue());};
-
-        setSize(520, 280);
+        setSize(680, 320);
     }
     ~KarplusStrongComponent() override { setLookAndFeel(nullptr); }
 
     void paint(juce::Graphics& g) override {
-        g.fillAll(juce::Colour(0xff030A05));
-        g.setColour(juce::Colour(0xff0A1A0A)); g.fillRect(0,0,getWidth(),30);
-        g.setColour(juce::Colour(0xff44DD88));
-        g.setFont(juce::FontOptions(14.0f,juce::Font::bold));
-        g.drawText("KARPLUS-STRONG  |  PHYSICAL MODELING",10,0,getWidth()-10,30,juce::Justification::centredLeft);
-        g.setColour(juce::Colour(0xff0A2015)); g.drawHorizontalLine(30,0.0f,(float)getWidth());
+        g.fillAll(juce::Colour(0xff07070E));
+        g.setColour(juce::Colour(0xff0A1A0A)); g.fillRect(0, 0, getWidth(), kTH);
+        g.setColour(juce::Colour(0xff44DD88)); g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
+        g.drawText("KARPLUS-STRONG  |  PHYSICAL MODELING", 12, 0, getWidth()-12, kTH, juce::Justification::centredLeft);
+        g.setColour(juce::Colour(0xff202030));
+        g.drawHorizontalLine(kTH, 0.0f, (float)getWidth());
+        g.drawVerticalLine(kLeftW, (float)kTH, (float)getHeight());
 
-        g.setColour(juce::Colours::grey); g.setFont(juce::FontOptions(9.0f));
-        struct{juce::Slider*s;const char*l;}lbs[]={
-            {&exLevelKnob,"Level"},{&dampingKnob,"Damp"},{&stretchKnob,"Stretch"},
-            {&pickupKnob,"Pickup"},{&decayKnob,"Decay"},{&masterKnob,"Master"},
-            {&attackKnob,"Atk"},{&releaseKnob,"Rel"}
+        int rx = kLeftW + 10;
+        auto sl = [&](const char* t, int x, int y) {
+            g.setColour(juce::Colour(0xff44DD88).withAlpha(0.65f));
+            g.setFont(juce::FontOptions(9.0f, juce::Font::bold));
+            g.drawText(t, x, y, 160, 12, juce::Justification::centredLeft);
         };
-        for(auto& l:lbs)
-            g.drawText(l.l,l.s->getX(),l.s->getBottom(),l.s->getWidth(),11,juce::Justification::centred);
-
-        g.setColour(juce::Colour(0xff44DD88).withAlpha(0.6f));
-        g.setFont(juce::FontOptions(10.0f,juce::Font::bold));
-        g.drawText("PLUCK MODEL",exLevelKnob.getX()-2,exLevelKnob.getY()-16,100,14,juce::Justification::centredLeft);
-        g.drawText("AMP",attackKnob.getX()-2,attackKnob.getY()-16,60,14,juce::Justification::centredLeft);
+        sl("EXCITATION", rx, exTypeCombo.getY() - 13);
+        sl("AMP",        rx, kAtk.getY() - 13);
     }
 
     void resized() override {
-        auto b=getLocalBounds(); b.removeFromTop(30);
-        stringViz.setBounds(b.removeFromLeft(200).reduced(6));
-        b.reduce(4,4);
-        int kw=40;
-        auto topRow=b.removeFromTop(26);
-        exTypeLabel.setBounds(topRow.removeFromLeft(70));
-        exTypeCombo.setBounds(topRow.removeFromLeft(130));
+        auto b = getLocalBounds().withTrimmedTop(kTH);
+        stringViz.setBounds(b.removeFromLeft(kLeftW).reduced(6));
 
-        b.removeFromTop(22);
-        auto r1=b.removeFromTop(kw);
-        exLevelKnob.setBounds(r1.removeFromLeft(kw)); r1.removeFromLeft(6);
-        dampingKnob.setBounds(r1.removeFromLeft(kw)); r1.removeFromLeft(6);
-        stretchKnob.setBounds(r1.removeFromLeft(kw)); r1.removeFromLeft(6);
-        pickupKnob.setBounds (r1.removeFromLeft(kw)); r1.removeFromLeft(6);
-        decayKnob.setBounds  (r1.removeFromLeft(kw)); r1.removeFromLeft(6);
-        masterKnob.setBounds (r1.removeFromLeft(kw));
-
-        b.removeFromTop(22);
-        auto r2=b.removeFromTop(kw);
-        attackKnob.setBounds (r2.removeFromLeft(kw)); r2.removeFromLeft(6);
-        releaseKnob.setBounds(r2.removeFromLeft(kw));
+        auto right = b.reduced(8, 3);
+        right.removeFromTop(14);
+        exTypeCombo.setBounds(right.removeFromTop(22).removeFromLeft(160));
+        right.removeFromTop(4);
+        int x = right.getX(), y = right.getY();
+        for (auto* k : std::initializer_list<LiBeKnob*>{ &kLvl, &kDamp, &kStr, &kPickup, &kDecay }) {
+            k->setBounds(x, y, LiBeKnob::kW, LiBeKnob::kH); x += LiBeKnob::kW + 4;
+        }
+        right.removeFromTop(LiBeKnob::kH + 14);
+        x = right.getX(); y = right.getY();
+        for (auto* k : std::initializer_list<LiBeKnob*>{ &kAtk, &kRel, &kMast }) {
+            k->setBounds(x, y, LiBeKnob::kW, LiBeKnob::kH); x += LiBeKnob::kW + 4;
+        }
     }
 
 private:
+    static constexpr int kTH = 30, kLeftW = 200;
     KarplusStrongProcessor* processor;
-    KSLookAndFeel laf;
+    LiBeLookAndFeel laf;
     StringVizComponent stringViz;
-    juce::Label    exTypeLabel;
     juce::ComboBox exTypeCombo;
-    juce::Slider   exLevelKnob, dampingKnob, stretchKnob, pickupKnob, decayKnob;
-    juce::Slider   masterKnob, attackKnob, releaseKnob;
+    LiBeKnob kLvl, kDamp, kStr, kPickup, kDecay, kAtk, kRel, kMast;
 };
 
 inline std::unique_ptr<juce::Component> KarplusStrongProcessor::createEditor() {

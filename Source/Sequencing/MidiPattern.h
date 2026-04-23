@@ -24,7 +24,7 @@ public:
             notes.push_back({ msg.getNoteNumber(), startBeat, 0.125, msg.getFloatVelocity() });
     }
 
-    void clear() override { notes.clear(); }
+    void clear() override { Pattern::clear(); notes.clear(); }
 
     double getLengthBeats() const override {
         return patternLengthBars * 4.0;

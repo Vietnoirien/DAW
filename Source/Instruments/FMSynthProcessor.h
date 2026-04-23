@@ -360,6 +360,32 @@ public:
         }
     }
 
+    void registerAutomationParameters(AutomationRegistry* registry) override {
+        if (!registry) return;
+        
+        // IDs must exactly match the `parameterId` property set in FMSynthComponent.h
+        registry->registerParameter("FM/Global/Master Level", &params.masterLevel, 0.0f, 2.0f);
+        
+        registry->registerParameter("FM/Global Amp/Attack", &params.ampAttack, 0.001f, 5.0f);
+        registry->registerParameter("FM/Global Amp/Decay", &params.ampDecay, 0.001f, 5.0f);
+        registry->registerParameter("FM/Global Amp/Sustain", &params.ampSustain, 0.0f, 1.0f);
+        registry->registerParameter("FM/Global Amp/Release", &params.ampRelease, 0.001f, 5.0f);
+        
+        registry->registerParameter("FM/Filter/Cutoff", &params.filterCutoff, 20.0f, 20000.0f);
+        registry->registerParameter("FM/Filter/Resonance", &params.filterResonance, 0.1f, 10.0f);
+        
+        for (int i = 0; i < 4; ++i) {
+            juce::String prefix = "FM/OP " + juce::String(i + 1) + "/";
+            registry->registerParameter(prefix + "Ratio", &params.ops[i].ratio, 0.125f, 16.0f);
+            registry->registerParameter(prefix + "Level", &params.ops[i].level, 0.0f, 1.0f);
+            registry->registerParameter(prefix + "Feedback", &params.ops[i].feedback, 0.0f, 1.0f);
+            registry->registerParameter(prefix + "Attack", &params.ops[i].attack, 0.001f, 5.0f);
+            registry->registerParameter(prefix + "Decay", &params.ops[i].decay, 0.001f, 5.0f);
+            registry->registerParameter(prefix + "Sustain", &params.ops[i].sustain, 0.0f, 1.0f);
+            registry->registerParameter(prefix + "Release", &params.ops[i].release, 0.001f, 5.0f);
+        }
+    }
+
     std::unique_ptr<juce::Component> createEditor() override;
     juce::String getName() const override { return "FMSynth"; }
 

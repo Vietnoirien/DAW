@@ -1,6 +1,7 @@
 #pragma once
 #include <JuceHeader.h>
 #include <memory>
+#include "../Core/ClipData.h"
 
 /**
  * Base interface for all internal DAW instruments (Synthesizers, Samplers).
@@ -22,6 +23,9 @@ public:
     // State persistence
     virtual juce::ValueTree saveState() const = 0;
     virtual void loadState(const juce::ValueTree& tree) = 0;
+
+    // Automation Registry
+    virtual void registerAutomationParameters(AutomationRegistry* registry) = 0;
 
     // UI Creation
     virtual std::unique_ptr<juce::Component> createEditor() = 0;

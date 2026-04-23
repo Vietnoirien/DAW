@@ -92,6 +92,7 @@ public:
     }
 
     void clear() override {
+        Pattern::clear();
         hitMap.clear();
     }
 

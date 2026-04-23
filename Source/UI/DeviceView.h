@@ -51,12 +51,47 @@ public:
 class DeviceView : public juce::Component, public juce::DragAndDropTarget, public juce::FileDragAndDropTarget {
 public:
     std::function<void(const juce::File&)> onFileDropped;
+    std::function<void(const juce::String&)> onParameterTouched;
+    std::function<bool()> canAddAutomation;
+    // Returns true if the selected clip already has an automation lane for this parameter
+    std::function<bool(const juce::String&)> hasAutomationForParam;
 
     DeviceView() {
         setOpaque(true);
         viewport.setViewedComponent(&chainContainer, false);
         viewport.setScrollBarsShown(false, true);
         addAndMakeVisible(viewport);
+        
+        // Listen to mouse events from all child components (sliders)
+        addMouseListener(this, true);
+    }
+
+    void mouseDown(const juce::MouseEvent& event) override {
+        if (event.mods.isPopupMenu()) {
+            if (canAddAutomation && !canAddAutomation()) return;
+
+            if (auto* c = event.originalComponent) {
+                juce::Component* target = c;
+                juce::String paramId = target->getProperties()["parameterId"].toString();
+                while (target && paramId.isEmpty()) {
+                    target = target->getParentComponent();
+                    if (target) paramId = target->getProperties()["parameterId"].toString();
+                }
+
+                if (paramId.isNotEmpty()) {
+                    bool hasLane = hasAutomationForParam && hasAutomationForParam(paramId);
+                    juce::String label = (hasLane ? "Edit Automation: " : "Add Automation: ") + paramId;
+                    juce::PopupMenu m;
+                    m.addItem(1, label);
+                    m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(c),
+                        [this, paramId](int result) {
+                            if (result == 1 && onParameterTouched) {
+                                onParameterTouched(paramId);
+                            }
+                        });
+                }
+            }
+        }
     }
 
     void paint(juce::Graphics& g) override {
@@ -84,6 +119,32 @@ public:
     juce::Component* getFirstEditor() const {
         if (chainContainer.editors.isEmpty()) return nullptr;
         return chainContainer.editors.getFirst();
+    }
+
+    struct AutomationParamInfo { bool isAutomated; float minNorm; float maxNorm; };
+
+    void updateAutomationIndicators(const std::unordered_map<juce::String, AutomationParamInfo>& params) {
+        std::function<void(juce::Component*)> walk = [&](juce::Component* c) {
+            auto paramId = c->getProperties()["parameterId"].toString();
+            if (paramId.isNotEmpty()) {
+                auto it = params.find(paramId);
+                bool isAuto = (it != params.end()) && it->second.isAutomated;
+                c->getProperties().set("isAutomated",       isAuto);
+                c->getProperties().set("automationMinNorm", isAuto ? it->second.minNorm : 0.0f);
+                c->getProperties().set("automationMaxNorm", isAuto ? it->second.maxNorm : 1.0f);
+                c->repaint();
+            }
+            for (auto* child : c->getChildren()) walk(child);
+        };
+        walk(&chainContainer);
+    }
+
+    // Legacy overload — called with just a list of automated param IDs (no range info)
+    void updateAutomationIndicators(const std::vector<juce::String>& automatedParams) {
+        std::unordered_map<juce::String, AutomationParamInfo> m;
+        for (const auto& id : automatedParams)
+            m[id] = { true, 0.0f, 1.0f };
+        updateAutomationIndicators(m);
     }
 
     // -- Internal JUCE Drag and Drop --

@@ -162,6 +162,17 @@ public:
             }
         }
     }
+    
+    void registerAutomationParameters(AutomationRegistry* registry) override {
+        if (!registry) return;
+        for (int i = 0; i < 16; ++i) {
+            juce::String prefix = "DrumRack/Pad " + juce::String(i + 1) + "/";
+            registry->registerParameter(prefix + "Gain",  &settings[i].gain,        0.0f,  2.0f);
+            registry->registerParameter(prefix + "Pan",   &settings[i].pan,         -1.0f, 1.0f);
+            registry->registerParameter(prefix + "Pitch", &settings[i].pitchOffset, -24.0f, 24.0f);
+            registry->registerParameter(prefix + "Decay", &settings[i].decay,        0.05f, 5.0f);
+        }
+    }
 
     std::unique_ptr<juce::Component> createEditor() override;
     

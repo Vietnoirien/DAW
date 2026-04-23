@@ -215,7 +215,7 @@ public:
     void clear() override { for(auto& v:voices)v.noteOff(); }
 
     juce::ValueTree saveState() const override {
-        juce::ValueTree t("WavetableState");
+        juce::ValueTree t("WavetableSynthState");
         auto saveOsc=[&](const juce::String& id,const WTParams::Osc& o){
             juce::ValueTree n(id);
             n.setProperty("en",o.enabled.load(),nullptr); n.setProperty("wt",o.wtPos.load(),nullptr);
@@ -259,6 +259,44 @@ public:
         params.ampS.store((float)t.getProperty("aS",1.0f));   params.ampR.store((float)t.getProperty("aR",0.2f));
         params.filtA.store((float)t.getProperty("fA",0.01f)); params.filtD.store((float)t.getProperty("fD",0.2f));
         params.filtS.store((float)t.getProperty("fS",0.5f));  params.filtR.store((float)t.getProperty("fRR",0.3f));
+    }
+
+    void registerAutomationParameters(AutomationRegistry* registry) override {
+        if (!registry) return;
+        
+        // IDs must exactly match `parameterId` properties set in WavetableSynthComponent.h
+        // OSC A — WTOscPanel uses "WT/" + name + "/..." where name is "OSC A"
+        registry->registerParameter("WT/OSC A/Position",  &params.oscA.wtPos,        0.0f,  (float)(kWTCount - 1));
+        registry->registerParameter("WT/OSC A/Octave",    &params.oscA.octave,       -3.0f,  3.0f);
+        registry->registerParameter("WT/OSC A/Coarse",    &params.oscA.coarse,      -24.0f, 24.0f);
+        registry->registerParameter("WT/OSC A/Level",     &params.oscA.level,         0.0f,  1.0f);
+        registry->registerParameter("WT/OSC A/Pan",       &params.oscA.pan,           0.0f,  1.0f);
+        registry->registerParameter("WT/OSC A/Unison",    &params.oscA.unisonDetune,  0.0f,  1.0f);
+        registry->registerParameter("WT/OSC A/Detune",    &params.oscA.unisonSpread,  0.0f,  1.0f);
+        
+        // OSC B
+        registry->registerParameter("WT/OSC B/Position",  &params.oscB.wtPos,        0.0f,  (float)(kWTCount - 1));
+        registry->registerParameter("WT/OSC B/Octave",    &params.oscB.octave,       -3.0f,  3.0f);
+        registry->registerParameter("WT/OSC B/Coarse",    &params.oscB.coarse,      -24.0f, 24.0f);
+        registry->registerParameter("WT/OSC B/Level",     &params.oscB.level,         0.0f,  1.0f);
+        registry->registerParameter("WT/OSC B/Pan",       &params.oscB.pan,           0.0f,  1.0f);
+        registry->registerParameter("WT/OSC B/Unison",    &params.oscB.unisonDetune,  0.0f,  1.0f);
+        registry->registerParameter("WT/OSC B/Detune",    &params.oscB.unisonSpread,  0.0f,  1.0f);
+        
+        registry->registerParameter("WT/Global/Master Level", &params.masterLevel, 0.0f, 1.0f);
+        registry->registerParameter("WT/Global Amp/Attack",   &params.ampA,   0.001f, 5.0f);
+        registry->registerParameter("WT/Global Amp/Decay",    &params.ampD,   0.001f, 5.0f);
+        registry->registerParameter("WT/Global Amp/Sustain",  &params.ampS,   0.0f,   1.0f);
+        registry->registerParameter("WT/Global Amp/Release",  &params.ampR,   0.001f, 5.0f);
+        
+        registry->registerParameter("WT/Filter Env/Attack",  &params.filtA,  0.001f, 5.0f);
+        registry->registerParameter("WT/Filter Env/Decay",   &params.filtD,  0.001f, 5.0f);
+        registry->registerParameter("WT/Filter Env/Sustain", &params.filtS,  0.0f,   1.0f);
+        registry->registerParameter("WT/Filter Env/Release", &params.filtR,  0.001f, 5.0f);
+        
+        registry->registerParameter("WT/Filter/Cutoff",     &params.filterCutoff,  20.0f, 20000.0f);
+        registry->registerParameter("WT/Filter/Resonance",  &params.filterRes,      0.1f,    10.0f);
+        registry->registerParameter("WT/Filter/Env Amount", &params.filterEnvAmt,  -1.0f,     1.0f);
     }
 
     std::unique_ptr<juce::Component> createEditor() override;

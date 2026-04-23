@@ -349,6 +349,38 @@ public:
         }
     }
     
+    void registerAutomationParameters(AutomationRegistry* registry) override {
+        if (!registry) return;
+
+        // IDs must exactly match the `parameterId` set in OscComponent.h
+        // OscPanel uses: "Oscillator/" + name + "/..." where name = "OSC A", "OSC B", "OSC C"
+        for (auto& [oscName, osc] : std::initializer_list<std::pair<juce::String, OscParams::Osc*>>{
+            {"OSC A", &params.oscA}, {"OSC B", &params.oscB}, {"OSC C", &params.oscC}
+        }) {
+            juce::String pre = "Oscillator/" + oscName + "/";
+            registry->registerParameter(pre + "Octave",  &osc->octave,       -2.0f,  2.0f);
+            registry->registerParameter(pre + "Coarse",  &osc->coarse,      -24.0f, 24.0f);
+            registry->registerParameter(pre + "Detune",  &osc->unisonDetune,  0.0f,  1.0f);
+            registry->registerParameter(pre + "Level",   &osc->level,         0.0f,  1.0f);
+        }
+
+        // FilterPanel uses "Oscillator/Filter/..."
+        registry->registerParameter("Oscillator/Filter/Cutoff",     &params.filter.cutoff,    20.0f, 20000.0f);
+        registry->registerParameter("Oscillator/Filter/Resonance",  &params.filter.resonance,  0.1f,    10.0f);
+        registry->registerParameter("Oscillator/Filter/Env Amount", &params.filter.envAmount, -1.0f,     1.0f);
+
+        // EnvPanel uses "Oscillator/" + name + "/..." where name = "Amp Env" and "Filter Env"
+        registry->registerParameter("Oscillator/Amp Env/Attack",    &params.ampEnv.attack,   0.001f, 5.0f);
+        registry->registerParameter("Oscillator/Amp Env/Decay",     &params.ampEnv.decay,    0.001f, 5.0f);
+        registry->registerParameter("Oscillator/Amp Env/Sustain",   &params.ampEnv.sustain,   0.0f,  1.0f);
+        registry->registerParameter("Oscillator/Amp Env/Release",   &params.ampEnv.release,  0.001f, 5.0f);
+
+        registry->registerParameter("Oscillator/Filter Env/Attack",  &params.filterEnv.attack,   0.001f, 5.0f);
+        registry->registerParameter("Oscillator/Filter Env/Decay",   &params.filterEnv.decay,    0.001f, 5.0f);
+        registry->registerParameter("Oscillator/Filter Env/Sustain", &params.filterEnv.sustain,   0.0f,  1.0f);
+        registry->registerParameter("Oscillator/Filter Env/Release", &params.filterEnv.release,  0.001f, 5.0f);
+    }
+    
     std::unique_ptr<juce::Component> createEditor() override;
     juce::String getName() const override { return "Oscillator"; }
 

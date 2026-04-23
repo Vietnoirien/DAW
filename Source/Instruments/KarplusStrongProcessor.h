@@ -203,7 +203,7 @@ public:
     void clear() override { for (auto& v : voices) v.noteOff(); }
 
     juce::ValueTree saveState() const override {
-        juce::ValueTree t("KSState");
+        juce::ValueTree t("KarplusStrongState");
         t.setProperty("exType",   params.excitationType.load(),  nullptr);
         t.setProperty("exLevel",  params.excitationLevel.load(), nullptr);
         t.setProperty("damping",  params.damping.load(),         nullptr);
@@ -226,6 +226,20 @@ public:
         params.masterLevel.store    ((float)t.getProperty("master",  0.8f));
         params.attack.store         ((float)t.getProperty("attack",  0.001f));
         params.release.store        ((float)t.getProperty("release", 0.1f));
+    }
+    
+    void registerAutomationParameters(AutomationRegistry* registry) override {
+        if (!registry) return;
+        
+        // IDs must exactly match the `parameterId` set in KarplusStrongComponent.h
+        registry->registerParameter("KS/MasterLevel",      &params.masterLevel,      0.0f,  1.0f);
+        registry->registerParameter("KS/ExcitationLevel",  &params.excitationLevel,  0.0f,  1.0f);
+        registry->registerParameter("KS/Damping",          &params.damping,           0.0f,  0.9999f);
+        registry->registerParameter("KS/Stretch",          &params.stretch,           1.0f,  2.0f);
+        registry->registerParameter("KS/Pickup",           &params.pickupPos,         0.0f,  1.0f);
+        registry->registerParameter("KS/DecayTime",        &params.decayTime,         0.1f,  5.0f);
+        registry->registerParameter("KS/Attack",           &params.attack,            0.001f, 0.5f);
+        registry->registerParameter("KS/Release",          &params.release,           0.001f, 2.0f);
     }
 
     std::unique_ptr<juce::Component> createEditor() override;

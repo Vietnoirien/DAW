@@ -2,6 +2,7 @@
 #include <JuceHeader.h>
 #include <cmath>
 #include "ClipData.h"
+#include "AutomationEditor.h"
 
 class EuclideanCircleViewer : public juce::Component {
 public:
@@ -134,6 +135,7 @@ public:
     PatternEditor() {
         addAndMakeVisible(euclideanViewer);
         addAndMakeVisible(pianoRollViewer);
+        addAndMakeVisible(automationViewer);
 
         euclideanViewer.onHitMapToggled = [this](const std::vector<uint8_t>& map) {
             if (onEuclideanHitMapChanged) onEuclideanHitMapChanged(map);
@@ -141,6 +143,10 @@ public:
 
         pianoRollViewer.onNotesChanged = [this](const std::vector<MidiNote>& notes) {
             if (onMidiNotesChanged) onMidiNotesChanged(notes);
+        };
+
+        automationViewer.onAutomationChanged = [this]() {
+            if (onAutomationLaneChanged) onAutomationLaneChanged();
         };
 
         auditionToggle.setButtonText("Audition");
@@ -172,11 +178,15 @@ public:
 
         modeSelector.addItem("Piano Roll", 1);
         modeSelector.addItem("Euclidean", 2);
+        modeSelector.addItem("Automation", 3);
         modeSelector.setSelectedId(2);
         modeSelector.onChange = [this]() {
             updateMode();
             if (onModeChanged) {
-                onModeChanged(modeSelector.getSelectedId() == 1 ? "pianoroll" : "euclidean");
+                juce::String modeStr = "euclidean";
+                if (modeSelector.getSelectedId() == 1) modeStr = "pianoroll";
+                else if (modeSelector.getSelectedId() == 3) modeStr = "automation";
+                onModeChanged(modeStr);
             }
         };
         addAndMakeVisible(modeSelector);
@@ -195,6 +205,7 @@ public:
 
         euclideanViewer.setBounds(bounds);
         pianoRollViewer.setBounds(bounds);
+        automationViewer.setBounds(bounds);
     }
 
     void sliderValueChanged(juce::Slider* slider) override {
@@ -210,17 +221,24 @@ public:
     }
 
     void updateMode() {
-        bool isEuc = modeSelector.getSelectedId() == 2;
+        int modeId = modeSelector.getSelectedId();
+        bool isEuc = modeId == 2;
+        bool isAuto = modeId == 3;
+        
         euclideanViewer.setVisible(isEuc);
-        pianoRollViewer.setVisible(!isEuc);
+        pianoRollViewer.setVisible(modeId == 1);
+        automationViewer.setVisible(isAuto);
+        
         stepsSlider.setVisible(isEuc);
         pulsesSlider.setVisible(isEuc);
-        auditionToggle.setVisible(!isEuc);
+        auditionToggle.setVisible(modeId == 1);
     }
 
     void setPlayheadPhase(float phase) {
         if (modeSelector.getSelectedId() == 2) {
             euclideanViewer.setPlayheadPhase(phase);
+        } else if (modeSelector.getSelectedId() == 3) {
+            automationViewer.setPlayheadPhase(phase);
         }
     }
 
@@ -239,7 +257,11 @@ public:
 
         pianoRollViewer.setNotes(clip.midiNotes);
 
-        int modeId = (clip.patternMode == "pianoroll") ? 1 : 2;
+        int modeId = 2; // Euclidean
+        if (clip.patternMode == "pianoroll") modeId = 1;
+        else if (clip.patternMode == "automation") modeId = 3;
+        else if (clip.patternMode == "drumrack") modeId = 1; // DrumRack uses piano roll mostly
+
         modeSelector.setSelectedId (modeId, juce::dontSendNotification);
         updateMode();
     }
@@ -264,10 +286,23 @@ public:
     std::function<void(const juce::String&)> onModeChanged;
     std::function<void(int, int)> onAuditionNoteOn;
     std::function<void(int)> onAuditionNoteOff;
+    std::function<void()> onAutomationLaneChanged;
+
+    void setActiveAutomationLane(AutomationLane* lane, const juce::String& paramId, double patternLengthBars) {
+        automationViewer.setAutomationLane(lane, patternLengthBars > 0.0 ? patternLengthBars * 4.0 : 4.0);
+        automationViewer.setParameterId(paramId);
+        
+        // If the user touched a parameter, automatically switch to the automation view
+        // to make it easy to edit what they just touched
+        if (lane && !paramId.isEmpty()) {
+            modeSelector.setSelectedId(3, juce::sendNotificationSync);
+        }
+    }
 
 private:
     EuclideanCircleViewer euclideanViewer;
     PianoRollViewer pianoRollViewer;
+    AutomationEditorViewer automationViewer;
     juce::Slider stepsSlider;
     juce::Slider pulsesSlider;
     juce::ComboBox modeSelector;

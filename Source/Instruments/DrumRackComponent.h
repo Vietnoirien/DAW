@@ -2,114 +2,110 @@
 #include <JuceHeader.h>
 #include "DrumRackProcessor.h"
 #include "../Sequencing/PatternEditor.h"
+#include "../UI/LiBeLookAndFeel.h"
 
-class DrumRackComponent : public juce::Component, public juce::FileDragAndDropTarget, public juce::DragAndDropTarget, public juce::Timer {
+// ─── DrumRackComponent ────────────────────────────────────────────────────────
+// Layout (320px tall):
+//  ┌────────────────────────────────────────────────────────────────────────────┐
+//  │  DRUM RACK  |  16 PADS                                         [title]    │
+//  ├──────────────────────┬─────────────────────────────────────────────────────┤
+//  │  [4x4 pad grid]      │  [waveform display]                                │
+//  │                      │  ─────────────────────────────────────────────      │
+//  │                      │  PAD CONTROLS                                       │
+//  │                      │  [Gain] [Pan] [Pitch] [Decay]                      │
+//  └──────────────────────┴─────────────────────────────────────────────────────┘
+class DrumRackComponent : public juce::Component,
+                          public juce::FileDragAndDropTarget,
+                          public juce::DragAndDropTarget,
+                          public juce::Timer
+{
 public:
-    DrumRackComponent(DrumRackProcessor* p) : processor(p) {
-        setOpaque(true);
-        // Pad Buttons
+    DrumRackComponent(DrumRackProcessor* p) : processor(p), laf(juce::Colour(0xffFF6600)) {
+        setLookAndFeel(&laf);
+
+        // 4x4 pad buttons
         for (int i = 0; i < 16; ++i) {
-            auto btn = std::make_unique<juce::TextButton>(juce::String("Pad ") + juce::String(i + 1));
-            btn->onClick = [this, i]() { selectPad(i); };
+            auto btn = std::make_unique<juce::TextButton>(juce::String(i + 1));
+            btn->onClick = [this, i] { selectPad(i); };
             addAndMakeVisible(*btn);
             padButtons.push_back(std::move(btn));
         }
 
-        // Knobs
-        auto setupKnob = [this](juce::Slider& sl, const juce::String& name, double min, double max, double val) {
-            sl.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-            sl.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 50, 20);
-            sl.setRange(min, max);
-            sl.setValue(val);
-            sl.setDoubleClickReturnValue(true, val);
-            sl.onValueChange = [this, &sl, name]() {
-                if (selectedPad >= 0 && selectedPad < 16) {
-                    if (name == "Gain") processor->settings[selectedPad].gain.store(sl.getValue());
-                    if (name == "Pan") processor->settings[selectedPad].pan.store(sl.getValue());
-                    if (name == "Pitch") processor->settings[selectedPad].pitchOffset.store(sl.getValue());
-                    if (name == "Decay") processor->settings[selectedPad].decay.store(sl.getValue());
-                }
-            };
-            addAndMakeVisible(sl);
+        // Per-pad knobs
+        auto sk = [&](LiBeKnob& k, const char* lbl, double v, double mn, double mx, double dv) {
+            k.setup(lbl, v, mn, mx, dv, "", juce::Colour(0xffFF6600));
+            addAndMakeVisible(k);
         };
+        sk(kGain,  "Gain",   1.0, 0.0,   2.0,   1.0);
+        sk(kPan,   "Pan",    0.0, -1.0,  1.0,   0.0);
+        sk(kPitch, "Pitch",  0.0, -24.0, 24.0,  0.0);
+        sk(kDecay, "Decay",  0.5, 0.05,  5.0,   0.5);
 
-        setupKnob(gainKnob, "Gain", 0.0, 2.0, 1.0);
-        setupKnob(panKnob, "Pan", -1.0, 1.0, 0.0);
-        setupKnob(pitchKnob, "Pitch", -24.0, 24.0, 0.0);
-        setupKnob(decayKnob, "Decay", 0.05, 5.0, 0.5);
+        kGain.slider.onValueChange  = [this] { if (selectedPad>=0) processor->settings[selectedPad].gain.store        ((float)kGain.slider.getValue()); };
+        kPan.slider.onValueChange   = [this] { if (selectedPad>=0) processor->settings[selectedPad].pan.store         ((float)kPan.slider.getValue()); };
+        kPitch.slider.onValueChange = [this] { if (selectedPad>=0) processor->settings[selectedPad].pitchOffset.store ((float)kPitch.slider.getValue()); };
+        kDecay.slider.onValueChange = [this] { if (selectedPad>=0) processor->settings[selectedPad].decay.store       ((float)kDecay.slider.getValue()); };
 
-        // Thumbnail
         formatManager.registerBasicFormats();
         thumbnail = std::make_unique<juce::AudioThumbnail>(512, formatManager, thumbnailCache);
 
         selectPad(0);
-        setSize(600, 200);
+        setSize(680, 320);
         startTimerHz(30);
     }
 
+    ~DrumRackComponent() override { setLookAndFeel(nullptr); }
+
     void resized() override {
-        auto bounds = getLocalBounds();
+        auto b = getLocalBounds().withTrimmedTop(kTH);
+        auto padArea = b.removeFromLeft(kPadAreaW).reduced(4);
 
-        // 4x4 Pad Grid
-        auto padArea = bounds.removeFromLeft(bounds.getWidth() / 3);
-        int padW = padArea.getWidth() / 4;
-        int padH = padArea.getHeight() / 4;
+        // 4x4 grid — row 0 = bottom (MPC style)
+        int pw = padArea.getWidth() / 4, ph = padArea.getHeight() / 4;
         for (int i = 0; i < 16; ++i) {
-            int row = 3 - (i / 4); // Bottom up like MPC
-            int col = i % 4;
-            padButtons[i]->setBounds(padArea.getX() + col * padW, padArea.getY() + row * padH, padW, padH);
-            padButtons[i]->setColour(juce::TextButton::buttonColourId, (i == selectedPad) ? juce::Colours::orange : juce::Colours::darkgrey);
+            int col = i % 4, row = 3 - (i / 4);
+            padButtons[i]->setBounds(padArea.getX() + col*pw, padArea.getY() + row*ph, pw, ph);
         }
+        updatePadColors();
 
-        // Params Area - Take full height on the right side
-        auto knobArea = bounds.removeFromRight(150);
-
-        // Waveform Area - Take top half of the remaining center space
-        auto topArea = bounds.removeFromTop(bounds.getHeight() / 2);
-        waveformBounds = topArea.reduced(5);
-
-        // Revert knob size to original (half the height of the top area)
-        int kw = knobArea.getWidth() / 2;
-        int kh = topArea.getHeight() / 2; 
-        constexpr int labelH = 16;
-        
-        int startX = knobArea.getX();
-        int startY = knobArea.getY() + 10;
-
-        // Position knobs with extra vertical space for labels
-        gainKnob.setBounds  (startX,      startY + labelH, kw, kh);
-        panKnob.setBounds   (startX + kw, startY + labelH, kw, kh);
-        pitchKnob.setBounds (startX,      startY + kh + labelH * 2 + 5, kw, kh);
-        decayKnob.setBounds (startX + kw, startY + kh + labelH * 2 + 5, kw, kh);
+        // Right panel: waveform + knobs
+        auto right = b.reduced(6, 4);
+        waveformBounds = right.removeFromTop(kWaveH);
+        right.removeFromTop(14); // "PAD CONTROLS" label space
+        int x = right.getX(), y = right.getY();
+        for (auto* k : std::initializer_list<LiBeKnob*>{ &kGain, &kPan, &kPitch, &kDecay }) {
+            k->setBounds(x, y, LiBeKnob::kW, LiBeKnob::kH); x += LiBeKnob::kW + 6;
+        }
     }
 
     void paint(juce::Graphics& g) override {
-        g.fillAll(juce::Colour(0xff2d2d2d));
+        g.fillAll(juce::Colour(0xff07070E));
 
-        // Draw waveform
-        g.setColour(juce::Colours::black);
-        g.fillRect(waveformBounds);
+        // Title bar
+        g.setColour(juce::Colour(0xff120A04)); g.fillRect(0, 0, getWidth(), kTH);
+        g.setColour(juce::Colour(0xffFF6600)); g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
+        g.drawText("DRUM RACK  |  16 PADS", 12, 0, getWidth()-12, kTH, juce::Justification::centredLeft);
+        g.setColour(juce::Colour(0xff202030));
+        g.drawHorizontalLine(kTH, 0.0f, (float)getWidth());
+        g.drawVerticalLine(kPadAreaW, (float)kTH, (float)getHeight());
 
-        g.setColour(juce::Colours::lightblue);
-        if (thumbnail->getTotalLength() > 0.0) {
+        // Waveform
+        g.setColour(juce::Colour(0xff080808)); g.fillRect(waveformBounds);
+        g.setColour(juce::Colour(0xff1A1008)); g.drawRect(waveformBounds, 1);
+        if (thumbnail && thumbnail->getTotalLength() > 0.0) {
+            g.setColour(juce::Colour(0xffFF8833));
             thumbnail->drawChannels(g, waveformBounds, 0.0, thumbnail->getTotalLength(), 1.0f);
         } else {
-            g.drawText("No Sample", waveformBounds, juce::Justification::centred);
+            g.setColour(juce::Colour(0xff555566));
+            g.setFont(juce::FontOptions(10.0f));
+            g.drawText("Drop Sample Here", waveformBounds, juce::Justification::centred);
         }
 
-        // Draw knob labels (in the 16px strip above each knob)
-        g.setFont(juce::Font(juce::FontOptions(9.5f, juce::Font::bold)));
-        g.setColour(juce::Colour(0xffaaaaaa));
-        auto drawKnobLabel = [&](const juce::Slider& knob, const juce::String& label) {
-            auto b = knob.getBounds();
-            // Draw 16px above the knob's top edge
-            g.drawText(label, b.getX(), b.getY() - 16, b.getWidth(), 14,
-                       juce::Justification::centred, false);
-        };
-        drawKnobLabel(gainKnob,  "GAIN");
-        drawKnobLabel(panKnob,   "PAN");
-        drawKnobLabel(pitchKnob, "PITCH");
-        drawKnobLabel(decayKnob, "DECAY");
+        // Section label
+        g.setColour(juce::Colour(0xffFF6600).withAlpha(0.65f));
+        g.setFont(juce::FontOptions(9.0f, juce::Font::bold));
+        g.drawText("PAD CONTROLS", kPadAreaW + 6, waveformBounds.getBottom() + 2, 160, 12,
+                   juce::Justification::centredLeft);
     }
 
     void timerCallback() override {
@@ -117,11 +113,10 @@ public:
             auto file = processor->settings[selectedPad].loadedFile;
             if (file != lastFile) {
                 lastFile = file;
-                if (file.existsAsFile()) {
+                if (file.existsAsFile())
                     thumbnail->setSource(new juce::FileInputSource(file));
-                } else {
+                else
                     thumbnail->clear();
-                }
                 repaint();
             }
         }
@@ -129,87 +124,74 @@ public:
 
     void selectPad(int idx) {
         selectedPad = idx;
-        
-        // Update Knobs
-        gainKnob.setValue(processor->settings[idx].gain.load(), juce::dontSendNotification);
-        panKnob.setValue(processor->settings[idx].pan.load(), juce::dontSendNotification);
-        pitchKnob.setValue(processor->settings[idx].pitchOffset.load(), juce::dontSendNotification);
-        decayKnob.setValue(processor->settings[idx].decay.load(), juce::dontSendNotification);
+        kGain.slider.setValue (processor->settings[idx].gain.load(),        juce::dontSendNotification);
+        kPan.slider.setValue  (processor->settings[idx].pan.load(),         juce::dontSendNotification);
+        kPitch.slider.setValue(processor->settings[idx].pitchOffset.load(), juce::dontSendNotification);
+        kDecay.slider.setValue(processor->settings[idx].decay.load(),       juce::dontSendNotification);
 
-        // Notify to update euclidean view
-        if (onPadSelected) {
-            onPadSelected(idx);
-        }
+        juce::String ps = "DrumRack/Pad " + juce::String(idx+1) + "/";
+        kGain.slider.getProperties().set ("parameterId", ps + "Gain");
+        kPan.slider.getProperties().set  ("parameterId", ps + "Pan");
+        kPitch.slider.getProperties().set("parameterId", ps + "Pitch");
+        kDecay.slider.getProperties().set("parameterId", ps + "Decay");
 
-        resized();
+        updatePadColors();
+        if (onPadSelected) onPadSelected(idx);
         repaint();
     }
 
-    // Drag and Drop support
+    // File drag-and-drop
     bool isInterestedInFileDrag(const juce::StringArray& files) override {
-        for (auto f : files) {
-            juce::File file(f);
-            auto ext = file.getFileExtension().toLowerCase();
-            if (ext == ".wav" || ext == ".aiff" || ext == ".aif" || ext == ".flac" || ext == ".mp3" || ext == ".ogg") 
-                return true;
-        }
+        for (auto& f : files) { auto e = juce::File(f).getFileExtension().toLowerCase();
+            if (e==".wav"||e==".aiff"||e==".aif"||e==".flac"||e==".mp3"||e==".ogg") return true; }
         return false;
     }
-
     void filesDropped(const juce::StringArray& files, int x, int y) override {
         if (files.isEmpty()) return;
         juce::File file(files[0]);
-        if (!file.existsAsFile()) return;
-
-        // Find which pad was dropped on
-        for (int i = 0; i < 16; ++i) {
-            if (padButtons[i]->getBounds().contains(x, y)) {
-                if (onSampleDropped) onSampleDropped(i, file);
-                selectPad(i);
-                return;
-            }
-        }
-
-        // If dropped outside pads but in the component, apply to selected pad
-        if (selectedPad >= 0) {
-            if (onSampleDropped) onSampleDropped(selectedPad, file);
-        }
+        for (int i = 0; i < 16; ++i)
+            if (padButtons[i]->getBounds().contains(x, y)) { if (onSampleDropped) onSampleDropped(i, file); selectPad(i); return; }
+        if (selectedPad >= 0 && onSampleDropped) onSampleDropped(selectedPad, file);
     }
-
-    // Internal JUCE Drag and Drop support
-    bool isInterestedInDragSource(const juce::DragAndDropTarget::SourceDetails& details) override {
-        return details.description.toString() == "FileBrowserDrag" || dynamic_cast<juce::FileTreeComponent*>(details.sourceComponent.get()) != nullptr;
+    bool isInterestedInDragSource(const juce::DragAndDropTarget::SourceDetails& d) override {
+        return d.description.toString()=="FileBrowserDrag"||dynamic_cast<juce::FileTreeComponent*>(d.sourceComponent.get())!=nullptr;
     }
-
-    void itemDropped(const juce::DragAndDropTarget::SourceDetails& details) override {
-        if (auto* tree = dynamic_cast<juce::FileTreeComponent*>(details.sourceComponent.get())) {
-            juce::File file = tree->getSelectedFile(0);
-            auto ext = file.getFileExtension().toLowerCase();
-            if (file.existsAsFile() && (ext == ".wav" || ext == ".aiff" || ext == ".aif" || ext == ".flac" || ext == ".mp3" || ext == ".ogg")) {
-                juce::StringArray arr;
-                arr.add(file.getFullPathName());
-                filesDropped(arr, details.localPosition.x, details.localPosition.y);
+    void itemDropped(const juce::DragAndDropTarget::SourceDetails& d) override {
+        if (auto* t = dynamic_cast<juce::FileTreeComponent*>(d.sourceComponent.get())) {
+            juce::File f = t->getSelectedFile(0);
+            auto e = f.getFileExtension().toLowerCase();
+            if (f.existsAsFile() && (e==".wav"||e==".aiff"||e==".aif"||e==".flac"||e==".mp3"||e==".ogg")) {
+                juce::StringArray a; a.add(f.getFullPathName());
+                filesDropped(a, d.localPosition.x, d.localPosition.y);
             }
         }
     }
 
-    // Callbacks to MainComponent
-    std::function<void(int padIndex)> onPadSelected;
-    std::function<void(int padIndex, juce::File)> onSampleDropped;
+    std::function<void(int)>              onPadSelected;
+    std::function<void(int, juce::File)>  onSampleDropped;
 
 private:
+    static constexpr int kTH = 30, kPadAreaW = 260, kWaveH = 100;
+
+    void updatePadColors() {
+        for (int i = 0; i < 16; ++i) {
+            padButtons[i]->setColour(juce::TextButton::buttonColourId,
+                i == selectedPad ? juce::Colour(0xff5A2A00) : juce::Colour(0xff111118));
+            padButtons[i]->setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffFF6600));
+            padButtons[i]->setColour(juce::TextButton::textColourOffId,
+                i == selectedPad ? juce::Colour(0xffFF8833) : juce::Colour(0xff666677));
+        }
+    }
+
     DrumRackProcessor* processor;
+    LiBeLookAndFeel laf;
     int selectedPad = 0;
 
     std::vector<std::unique_ptr<juce::TextButton>> padButtons;
-    
-    juce::Slider gainKnob;
-    juce::Slider panKnob;
-    juce::Slider pitchKnob;
-    juce::Slider decayKnob;
+    LiBeKnob kGain, kPan, kPitch, kDecay;
 
     juce::AudioFormatManager formatManager;
-    juce::AudioThumbnailCache thumbnailCache {5};
+    juce::AudioThumbnailCache thumbnailCache{5};
     std::unique_ptr<juce::AudioThumbnail> thumbnail;
     juce::Rectangle<int> waveformBounds;
     juce::File lastFile;

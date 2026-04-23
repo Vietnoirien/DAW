@@ -14,6 +14,8 @@ public:
     juce::ValueTree saveState() const override;
     void loadState(const juce::ValueTree& tree) override;
 
+    void registerAutomationParameters(AutomationRegistry* registry) override;
+
     std::unique_ptr<juce::Component> createEditor() override;
     juce::String getName() const override { return "Reverb"; }
 
@@ -40,6 +42,8 @@ public:
     juce::ValueTree saveState() const override;
     void loadState(const juce::ValueTree& tree) override;
 
+    void registerAutomationParameters(AutomationRegistry* registry) override;
+
     std::unique_ptr<juce::Component> createEditor() override;
     juce::String getName() const override { return "Delay"; }
 
@@ -63,6 +67,8 @@ public:
 
     juce::ValueTree saveState() const override;
     void loadState(const juce::ValueTree& tree) override;
+
+    void registerAutomationParameters(AutomationRegistry* registry) override;
 
     std::unique_ptr<juce::Component> createEditor() override;
     juce::String getName() const override { return "Chorus"; }
@@ -89,6 +95,8 @@ public:
     juce::ValueTree saveState() const override;
     void loadState(const juce::ValueTree& tree) override;
 
+    void registerAutomationParameters(AutomationRegistry* registry) override;
+
     std::unique_ptr<juce::Component> createEditor() override;
     juce::String getName() const override { return "Filter"; }
 
@@ -111,6 +119,8 @@ public:
 
     juce::ValueTree saveState() const override;
     void loadState(const juce::ValueTree& tree) override;
+
+    void registerAutomationParameters(AutomationRegistry* registry) override;
 
     std::unique_ptr<juce::Component> createEditor() override;
     juce::String getName() const override { return "Compressor"; }
@@ -137,6 +147,8 @@ public:
     juce::ValueTree saveState() const override;
     void loadState(const juce::ValueTree& tree) override;
 
+    void registerAutomationParameters(AutomationRegistry* registry) override;
+
     std::unique_ptr<juce::Component> createEditor() override;
     juce::String getName() const override { return "Limiter"; }
 
@@ -159,6 +171,8 @@ public:
 
     juce::ValueTree saveState() const override;
     void loadState(const juce::ValueTree& tree) override;
+
+    void registerAutomationParameters(AutomationRegistry* registry) override;
 
     std::unique_ptr<juce::Component> createEditor() override;
     juce::String getName() const override { return "Phaser"; }
@@ -186,6 +200,8 @@ public:
     juce::ValueTree saveState() const override;
     void loadState(const juce::ValueTree& tree) override;
 
+    void registerAutomationParameters(AutomationRegistry* registry) override;
+
     std::unique_ptr<juce::Component> createEditor() override;
     juce::String getName() const override { return "Saturation"; }
 
@@ -208,6 +224,8 @@ public:
 
     juce::ValueTree saveState() const override;
     void loadState(const juce::ValueTree& tree) override;
+
+    void registerAutomationParameters(AutomationRegistry* registry) override;
 
     std::unique_ptr<juce::Component> createEditor() override;
     juce::String getName() const override { return "ParametricEQ"; }

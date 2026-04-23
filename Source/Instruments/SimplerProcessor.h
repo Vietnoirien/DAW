@@ -97,6 +97,11 @@ public:
     void loadState(const juce::ValueTree& tree) override {
         juce::ignoreUnused(tree);
     }
+    
+    void registerAutomationParameters(AutomationRegistry* registry) override {
+        // Simpler currently has no automatable parameters
+        juce::ignoreUnused(registry);
+    }
 
     std::unique_ptr<juce::Component> createEditor() override;
     

@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include <atomic>
 #include <array>
+#include <unordered_map>
 
 #include "LockFreeQueue.h"
 #include "TrackCommand.h"
@@ -27,7 +28,7 @@
 #include "AppAudioBuffer.h"
 #include "ProjectManager.h"
 
-struct Track
+struct Track : public AutomationRegistry
 {
     std::atomic<float> gain     { 1.0f };
     std::atomic<float> sendALevel { 0.0f };
@@ -50,6 +51,18 @@ struct Track
     double   patternStartSample {-1.0};
 
     juce::MidiBuffer midiBuffer;
+    
+    // ── Parameter Automation Registry ──
+    struct AutomatableParameter {
+        std::atomic<float>* ptr;
+        float minVal;
+        float maxVal;
+    };
+    std::unordered_map<juce::String, AutomatableParameter> automationRegistry;
+    
+    void registerParameter(const juce::String& id, std::atomic<float>* ptr, float minVal = 0.0f, float maxVal = 1.0f) override {
+        if (ptr) automationRegistry[id] = {ptr, minVal, maxVal};
+    }
 
     void processPatternCommands(int64_t blockStartSample, int numSamples,
                                 const GlobalTransport& transport)
@@ -234,6 +247,9 @@ public:
     void loadAudioFileIntoDrumPad(int trackIdx, int padIndex, const juce::File& file);
     void updateDrumRackPatternEditor();
     
+    juce::String activeAutomationParameterId;
+    int activeAutomationTrackIdx = -1;
+
     void prepareToPlay (int samplesPerBlockExpected, double sampleRate) override;
     void getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill) override;
     void releaseResources() override;

@@ -65,6 +65,35 @@ void RenderThread::run()
             bool isArrMode = owner.renderIsArrangementMode.load(std::memory_order_acquire);
             auto* currArrangement = owner.renderArrangement.load(std::memory_order_acquire);
 
+            auto evaluateAutomation = [](const std::list<AutomationLane>& lanes, double localBeat, Track* track) {
+                if (lanes.empty() || track->automationRegistry.empty()) return;
+                for (const auto& lane : lanes) {
+                    if (lane.points.empty()) continue;
+                    auto it = track->automationRegistry.find(lane.parameterId);
+                    if (it == track->automationRegistry.end() || it->second.ptr == nullptr) continue;
+
+                    float value = lane.points.front().value;
+                    if (localBeat <= lane.points.front().positionBeats) {
+                        value = lane.points.front().value;
+                    } else if (localBeat >= lane.points.back().positionBeats) {
+                        value = lane.points.back().value;
+                    } else {
+                        for (size_t i = 0; i < lane.points.size() - 1; ++i) {
+                            if (localBeat >= lane.points[i].positionBeats && localBeat < lane.points[i+1].positionBeats) {
+                                const auto& p1 = lane.points[i];
+                                const auto& p2 = lane.points[i+1];
+                                float ratio = static_cast<float>((localBeat - p1.positionBeats) / (p2.positionBeats - p1.positionBeats));
+                                value = p1.value + ratio * (p2.value - p1.value);
+                                break;
+                            }
+                        }
+                    }
+                    
+                    float mappedValue = it->second.minVal + value * (it->second.maxVal - it->second.minVal);
+                    it->second.ptr->store(mappedValue, std::memory_order_release);
+                }
+            };
+
             for (int t = 0; t < nTracks; ++t) {
                 // Always process to drain queue, but we will overwrite midiBuffer if in Arrangement mode
                 owner.audioTracks[t]->processPatternCommands(blockStart, bs, owner.transportClock);
@@ -85,12 +114,18 @@ void RenderThread::run()
                     double endBeat = currentBeat + (static_cast<double>(bs) / owner.transportClock.getSamplesPerBeat());
 
                     if (t < (int)currArrangement->tracks.size()) {
+
                         for (const auto& clip : currArrangement->tracks[t]) {
                             double clipStartBeat = (clip.startBar - 1.0) * 4.0;
                             double clipEndBeat = clipStartBeat + (clip.lengthBars * 4.0);
 
                             // If clip overlaps this block
                             if (clipEndBeat > currentBeat && clipStartBeat < endBeat) {
+                                // Evaluate Arrangement Clip Automation Lanes
+                                evaluateAutomation(clip.automationLanes, currentBeat - clipStartBeat, owner.audioTracks[t].get());
+                                // Evaluate Clip-level Automation Lanes (fallback if arrangement doesn't override)
+                                evaluateAutomation(clip.data.automationLanes, currentBeat - clipStartBeat, owner.audioTracks[t].get());
+
                                 double patternLengthBeats = clip.data.patternLengthBars > 0.0 ? clip.data.patternLengthBars * 4.0 : 4.0;
                                 
                                 for (const auto& note : clip.data.midiNotes) {
@@ -124,6 +159,18 @@ void RenderThread::run()
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                } else {
+                    // Session View (Pattern Mode) Automation
+                    if (owner.transportClock.getIsPlaying() && owner.audioTracks[t]->currentPattern) {
+                        double lenBeats = owner.audioTracks[t]->currentPattern->getLengthBeats();
+                        if (lenBeats > 0.0) {
+                            double elapsedBeats = static_cast<double>(blockStart - owner.audioTracks[t]->patternStartSample) / owner.transportClock.getSamplesPerBeat();
+                            if (elapsedBeats >= 0.0) {
+                                double localBeat = std::fmod(elapsedBeats, lenBeats);
+                                evaluateAutomation(owner.audioTracks[t]->currentPattern->automationLanes, localBeat, owner.audioTracks[t].get());
                             }
                         }
                     }
@@ -298,6 +345,60 @@ MainComponent::MainComponent()
             return;
         }
         loadAudioFileIntoTrack(trackIdx, file);
+    };
+
+    deviceView.canAddAutomation = [this]() -> bool {
+        if (selectedTrackIndex < 0 || selectedTrackIndex >= (int)audioTracks.size()) return false;
+        if (selectedSceneIndex < 0 || selectedSceneIndex >= NUM_SCENES) return false;
+        return clipGrid[selectedTrackIndex][selectedSceneIndex].hasClip;
+    };
+
+    deviceView.hasAutomationForParam = [this](const juce::String& paramId) -> bool {
+        if (selectedTrackIndex < 0 || selectedSceneIndex < 0) return false;
+        if (selectedTrackIndex >= (int)audioTracks.size() || selectedSceneIndex >= NUM_SCENES) return false;
+        const auto& clip = clipGrid[selectedTrackIndex][selectedSceneIndex];
+        for (const auto& lane : clip.automationLanes)
+            if (lane.parameterId == paramId && !lane.points.empty())
+                return true;
+        return false;
+    };
+
+    deviceView.onParameterTouched = [this](const juce::String& paramId) {
+        if (selectedTrackIndex >= 0 && selectedTrackIndex < (int)audioTracks.size()) {
+            activeAutomationParameterId = paramId;
+            activeAutomationTrackIdx = selectedTrackIndex;
+            
+            if (selectedSceneIndex >= 0) {
+                auto& clip = clipGrid[selectedTrackIndex][selectedSceneIndex];
+                AutomationLane* targetLane = nullptr;
+                for (auto& lane : clip.automationLanes) {
+                    if (lane.parameterId == paramId) {
+                        targetLane = &lane;
+                        break;
+                    }
+                }
+                if (!targetLane) {
+                    clip.automationLanes.push_back({paramId, {}});
+                    targetLane = &clip.automationLanes.back();
+                    
+                    float defaultVal = 0.5f;
+                    if (auto* track = audioTracks[selectedTrackIndex].get()) {
+                        auto it = track->automationRegistry.find(paramId);
+                        if (it != track->automationRegistry.end() && it->second.ptr != nullptr) {
+                            float rawVal = it->second.ptr->load(std::memory_order_relaxed);
+                            // Unmap back to [0.0, 1.0]
+                            float range = it->second.maxVal - it->second.minVal;
+                            if (range != 0.0f) defaultVal = (rawVal - it->second.minVal) / range;
+                        }
+                    }
+                    targetLane->points.push_back({0.0, defaultVal});
+                    double lenBeats = clip.patternLengthBars > 0.0 ? clip.patternLengthBars * 4.0 : 4.0;
+                    targetLane->points.push_back({lenBeats, defaultVal});
+                }
+                patternEditor.setActiveAutomationLane(targetLane, paramId, clip.patternLengthBars);
+            }
+            DBG("Parameter focused for automation: " << paramId);
+        }
     };
 
     // ── Transport ─────────────────────────────────────────────────────────────
@@ -517,7 +618,10 @@ MainComponent::MainComponent()
 
     patternEditor.onModeChanged = [this](const juce::String& mode) {
         if (selectedTrackIndex >= 0 && selectedSceneIndex >= 0) {
-            clipGrid[selectedTrackIndex][selectedSceneIndex].patternMode = mode;
+            // "automation" is a UI view-only state — never overwrite the clip's MIDI
+            // generation mode (pianoroll/euclidean/drumrack) with it.
+            if (mode != "automation")
+                clipGrid[selectedTrackIndex][selectedSceneIndex].patternMode = mode;
         }
     };
 
@@ -537,6 +641,34 @@ MainComponent::MainComponent()
             cmd.type = TrackCommand::Type::AuditionNoteOff;
             cmd.note = note;
             audioTracks[selectedTrackIndex]->commandQueue.push(cmd);
+        }
+    };
+
+    patternEditor.onAutomationLaneChanged = [this]() {
+        if (selectedTrackIndex < 0 || selectedSceneIndex < 0) return;
+        auto& clip = clipGrid[selectedTrackIndex][selectedSceneIndex];
+        
+        sessionView.setClipData(selectedTrackIndex, selectedSceneIndex, clip);
+
+        if (clip.isPlaying) {
+            double scheduleTime = transportClock.getIsPlaying() ? transportClock.getNextBarPosition() : 0.0;
+            Pattern* p = nullptr;
+            
+            const bool usePianoRoll = (clip.patternMode == "pianoroll" || clip.patternMode == "drumrack"
+                                       || (clip.patternMode == "automation" && !clip.midiNotes.empty()));
+            if (usePianoRoll) {
+                auto* mp = midiPool.rentPattern();
+                mp->setNotes(clip.midiNotes, clip.patternLengthBars);
+                p = mp;
+            } else {
+                auto* ep = euclideanPool.rentPattern();
+                ep->setHitMap(clip.hitMap);
+                p = ep;
+            }
+            p->automationLanes = clip.automationLanes;
+            
+            audioTracks[selectedTrackIndex]->commandQueue.push(
+                { TrackCommand::Type::PlayPattern, p, scheduleTime });
         }
     };
 
@@ -566,6 +698,21 @@ MainComponent::MainComponent()
             patternEditor.loadClipData(clip);
         }
         
+        if (!activeAutomationParameterId.isEmpty()) {
+            AutomationLane* targetLane = nullptr;
+            for (auto& lane : clip.automationLanes) {
+                if (lane.parameterId == activeAutomationParameterId) {
+                    targetLane = &lane;
+                    break;
+                }
+            }
+            if (!targetLane) {
+                clip.automationLanes.push_back({activeAutomationParameterId, {}});
+                targetLane = &clip.automationLanes.back();
+            }
+            patternEditor.setActiveAutomationLane(targetLane, activeAutomationParameterId, clip.patternLengthBars);
+        }
+        
         resized();
     };
 
@@ -581,6 +728,47 @@ MainComponent::MainComponent()
             patternEditor.loadClipData(clipGrid[t][s]);
         }
         
+        {
+            auto& clip = clipGrid[t][s];
+            AutomationLane* targetLane = nullptr;
+
+            if (!activeAutomationParameterId.isEmpty()) {
+                // Find existing lane — never create a blank one here if it already exists with points
+                for (auto& lane : clip.automationLanes) {
+                    if (lane.parameterId == activeAutomationParameterId) {
+                        targetLane = &lane;
+                        break;
+                    }
+                }
+                // Only create a new lane if this parameter has never been automated for this clip
+                if (!targetLane) {
+                    float defaultVal = 0.5f;
+                    if (auto* track = audioTracks[t].get()) {
+                        auto it = track->automationRegistry.find(activeAutomationParameterId);
+                        if (it != track->automationRegistry.end() && it->second.ptr != nullptr) {
+                            float rawVal = it->second.ptr->load(std::memory_order_relaxed);
+                            float range = it->second.maxVal - it->second.minVal;
+                            if (range != 0.0f) defaultVal = (rawVal - it->second.minVal) / range;
+                        }
+                    }
+                    clip.automationLanes.push_back({activeAutomationParameterId, {}});
+                    targetLane = &clip.automationLanes.back();
+                    double lenBeats = clip.patternLengthBars > 0.0 ? clip.patternLengthBars * 4.0 : 4.0;
+                    targetLane->points.push_back({0.0, defaultVal});
+                    targetLane->points.push_back({lenBeats, defaultVal});
+                }
+            } else if (!clip.automationLanes.empty()) {
+                // No active parameter focused — restore the first lane so the editor isn't blank
+                targetLane = &clip.automationLanes.front();
+                activeAutomationParameterId = targetLane->parameterId;
+                activeAutomationTrackIdx = t;
+            }
+
+            if (targetLane) {
+                patternEditor.setActiveAutomationLane(targetLane, activeAutomationParameterId, clip.patternLengthBars);
+            }
+        }
+
         resized();
         showDeviceEditorForTrack(t);
     };
@@ -599,7 +787,10 @@ MainComponent::MainComponent()
         auto& clip = clipGrid[t][s];
         Pattern* p = nullptr;
         
-        if (clip.patternMode == "pianoroll" || clip.patternMode == "drumrack") {
+        // "automation" is a view-only state — resolve to the real MIDI generation mode.
+        const bool usePianoRoll = (clip.patternMode == "pianoroll" || clip.patternMode == "drumrack"
+                                   || (clip.patternMode == "automation" && !clip.midiNotes.empty()));
+        if (usePianoRoll) {
             auto* mp = midiPool.rentPattern();
             mp->setNotes(clip.midiNotes, clip.patternLengthBars);
             p = mp;
@@ -614,6 +805,9 @@ MainComponent::MainComponent()
             p = ep;
         }
         
+        // Copy automation lanes so the render thread can evaluate them
+        p->automationLanes = clip.automationLanes;
+
         // Stop visually playing clip in the track
         for (int i = 0; i < NUM_SCENES; ++i) {
             if (i != s && clipGrid[t][i].isPlaying) {
@@ -731,7 +925,9 @@ MainComponent::MainComponent()
                 auto& clip = clipGrid[t][sceneIdx];
                 Pattern* p = nullptr;
 
-                if (clip.patternMode == "pianoroll" || clip.patternMode == "drumrack") {
+                const bool usePianoRoll = (clip.patternMode == "pianoroll" || clip.patternMode == "drumrack"
+                                           || (clip.patternMode == "automation" && !clip.midiNotes.empty()));
+                if (usePianoRoll) {
                     auto* mp = midiPool.rentPattern();
                     mp->setNotes(clip.midiNotes, clip.patternLengthBars);
                     p = mp;
@@ -746,6 +942,7 @@ MainComponent::MainComponent()
                     p = ep;
                 }
 
+                p->automationLanes = clip.automationLanes;
                 audioTracks[t]->commandQueue.push({ TrackCommand::Type::PlayPattern, p, schedSample });
                 clip.isPlaying = true;
                 sessionView.setClipData(t, sceneIdx, clip);
@@ -794,6 +991,7 @@ MainComponent::MainComponent()
         auto newInst = InstrumentFactory::create(type);
         if (newInst) {
             newInst->prepareToPlay(currentSampleRate);
+            newInst->registerAutomationParameters(audioTracks[targetIdx].get());
             if (auto* old = audioTracks[targetIdx]->activeInstrument.exchange(newInst.release(), std::memory_order_acq_rel)) {
                 audioTracks[targetIdx]->instrumentGarbageQueue.push(old);
             }
@@ -819,6 +1017,7 @@ MainComponent::MainComponent()
         auto newEffect = EffectFactory::create(type);
         if (newEffect) {
             newEffect->prepareToPlay(currentSampleRate);
+            newEffect->registerAutomationParameters(targetTrack);
 
             // Find an empty slot
             for (int i = 0; i < Track::MAX_EFFECTS; ++i) {
@@ -1590,10 +1789,7 @@ void MainComponent::syncUIToProject()
 
                             auto* currentInst = audioTracks[tIdx]->activeInstrument.load(std::memory_order_acquire);
 
-                            if (instrumentType == "Oscillator") {
-                                auto oscNode = trackNode.getChildWithName("OscillatorState");
-                                if (oscNode.isValid()) currentInst->loadState(oscNode);
-                            } else if (instrumentType == "Simpler") {
+                            if (instrumentType == "Simpler") {
                                 auto samplerNode = trackNode.getChildWithName("Sampler");
                                 if (samplerNode.isValid()) {
                                     juce::String filePath = samplerNode.getProperty("file_path", "");
@@ -1603,14 +1799,16 @@ void MainComponent::syncUIToProject()
                                         loadAudioFileIntoTrack(tIdx, f);
                                     }
                                 }
-                            } else if (instrumentType == "DrumRack") {
-                                auto stateNode = trackNode.getChildWithName("DrumRackState");
+                            } else {
+                                auto stateNode = trackNode.getChildWithName(instrumentType + "State");
                                 if (stateNode.isValid()) {
                                     currentInst->loadState(stateNode);
-                                    if (auto* dr = dynamic_cast<DrumRackProcessor*>(currentInst)) {
-                                        for (int i = 0; i < 16; ++i) {
-                                            if (dr->settings[i].loadedFile.existsAsFile()) {
-                                                loadAudioFileIntoDrumPad(tIdx, i, dr->settings[i].loadedFile);
+                                    if (instrumentType == "DrumRack") {
+                                        if (auto* dr = dynamic_cast<DrumRackProcessor*>(currentInst)) {
+                                            for (int i = 0; i < 16; ++i) {
+                                                if (dr->settings[i].loadedFile.existsAsFile()) {
+                                                    loadAudioFileIntoDrumPad(tIdx, i, dr->settings[i].loadedFile);
+                                                }
                                             }
                                         }
                                     }
@@ -1706,6 +1904,26 @@ void MainComponent::syncUIToProject()
                                             }
                                         }
                                     }
+
+                                    // Automation lanes
+                                    auto lanesNode = clipNode.getChildWithName("AutomationLanes");
+                                    if (lanesNode.isValid()) {
+                                        for (int li = 0; li < lanesNode.getNumChildren(); ++li) {
+                                            auto laneNode = lanesNode.getChild(li);
+                                            AutomationLane lane;
+                                            lane.parameterId = laneNode.getProperty("parameterId", "");
+                                            if (lane.parameterId.isEmpty()) continue;
+                                            for (int pi = 0; pi < laneNode.getNumChildren(); ++pi) {
+                                                auto ptNode = laneNode.getChild(pi);
+                                                AutomationPoint pt;
+                                                pt.positionBeats = ptNode.getProperty("pos",   0.0);
+                                                pt.value         = ptNode.getProperty("value", 0.5f);
+                                                lane.points.push_back(pt);
+                                            }
+                                            if (!lane.points.empty())
+                                                d.automationLanes.push_back(std::move(lane));
+                                        }
+                                    }
                                     
                                     clipGrid[tIdx][sIdx] = d;
                                     // Bake MIDI so clips are arrangement-ready after project load
@@ -1776,6 +1994,26 @@ void MainComponent::syncUIToProject()
                                                     for (int ci = 0; ci < phex.length(); ci += 2) pad.hitMap.push_back((uint8_t)phex.substring(ci, ci + 2).getHexValue32());
                                                 }
                                             }
+                                        }
+                                    }
+
+                                    // Automation lanes (arrangement clip)
+                                    auto lanesNode = clipNode.getChildWithName("AutomationLanes");
+                                    if (lanesNode.isValid()) {
+                                        for (int li = 0; li < lanesNode.getNumChildren(); ++li) {
+                                            auto laneNode = lanesNode.getChild(li);
+                                            AutomationLane lane;
+                                            lane.parameterId = laneNode.getProperty("parameterId", "");
+                                            if (lane.parameterId.isEmpty()) continue;
+                                            for (int pi = 0; pi < laneNode.getNumChildren(); ++pi) {
+                                                auto ptNode = laneNode.getChild(pi);
+                                                AutomationPoint pt;
+                                                pt.positionBeats = ptNode.getProperty("pos",   0.0);
+                                                pt.value         = ptNode.getProperty("value", 0.5f);
+                                                lane.points.push_back(pt);
+                                            }
+                                            if (!lane.points.empty())
+                                                d.automationLanes.push_back(std::move(lane));
                                         }
                                     }
                                     aClip.data = d;
@@ -1858,10 +2096,7 @@ void MainComponent::syncProjectToUI()
         trackNode.setProperty("instrument_type", trackInstruments[t], nullptr);
 
         if (auto* inst = audioTracks[t]->activeInstrument.load(std::memory_order_acquire)) {
-            if (trackInstruments[t] == "Oscillator" || trackInstruments[t] == "DrumRack") {
-                auto state = inst->saveState();
-                trackNode.addChild(state, -1, nullptr);
-            } else if (trackInstruments[t] == "Simpler") {
+            if (trackInstruments[t] == "Simpler") {
                 if (auto* simpler = dynamic_cast<SimplerProcessor*>(inst)) {
                     if (simpler->loadedFile.existsAsFile()) {
                         juce::ValueTree samplerNode("Sampler");
@@ -1869,6 +2104,9 @@ void MainComponent::syncProjectToUI()
                         trackNode.addChild(samplerNode, -1, nullptr);
                     }
                 }
+            } else {
+                auto state = inst->saveState();
+                trackNode.addChild(state, -1, nullptr);
             }
         }
 
@@ -1927,6 +2165,25 @@ void MainComponent::syncProjectToUI()
                     }
                     clipNode.addChild(drNode, -1, nullptr);
                 }
+
+                // Automation lanes
+                if (!clip.automationLanes.empty()) {
+                    juce::ValueTree lanesNode("AutomationLanes");
+                    for (const auto& lane : clip.automationLanes) {
+                        if (lane.points.empty()) continue;
+                        juce::ValueTree laneNode("Lane");
+                        laneNode.setProperty("parameterId", lane.parameterId, nullptr);
+                        for (const auto& pt : lane.points) {
+                            juce::ValueTree ptNode("Point");
+                            ptNode.setProperty("pos",   pt.positionBeats, nullptr);
+                            ptNode.setProperty("value", pt.value,         nullptr);
+                            laneNode.addChild(ptNode, -1, nullptr);
+                        }
+                        lanesNode.addChild(laneNode, -1, nullptr);
+                    }
+                    if (lanesNode.getNumChildren() > 0)
+                        clipNode.addChild(lanesNode, -1, nullptr);
+                }
             }
         }
         if (clipsNode.getNumChildren() > 0)
@@ -1983,6 +2240,25 @@ void MainComponent::syncProjectToUI()
                     }
                 }
                 innerClipNode.addChild(drNode, -1, nullptr);
+            }
+
+            // Automation lanes (arrangement clip)
+            if (!aClip.data.automationLanes.empty()) {
+                juce::ValueTree lanesNode("AutomationLanes");
+                for (const auto& lane : aClip.data.automationLanes) {
+                    if (lane.points.empty()) continue;
+                    juce::ValueTree laneNode("Lane");
+                    laneNode.setProperty("parameterId", lane.parameterId, nullptr);
+                    for (const auto& pt : lane.points) {
+                        juce::ValueTree ptNode("Point");
+                        ptNode.setProperty("pos",   pt.positionBeats, nullptr);
+                        ptNode.setProperty("value", pt.value,         nullptr);
+                        laneNode.addChild(ptNode, -1, nullptr);
+                    }
+                    lanesNode.addChild(laneNode, -1, nullptr);
+                }
+                if (lanesNode.getNumChildren() > 0)
+                    innerClipNode.addChild(lanesNode, -1, nullptr);
             }
             aClipNode.addChild(innerClipNode, -1, nullptr);
             arrangementNode.addChild(aClipNode, -1, nullptr);
@@ -2200,6 +2476,23 @@ void MainComponent::showDeviceEditorForTrack(int trackIdx) {
             deviceView.addEditor(std::move(wrapper));
         }
     }
+
+    std::unordered_map<juce::String, DeviceView::AutomationParamInfo> autoInfo;
+    if (trackIdx >= 0 && trackIdx < (int)audioTracks.size() && selectedSceneIndex >= 0 && selectedSceneIndex < NUM_SCENES) {
+        auto& clip = clipGrid[trackIdx][selectedSceneIndex];
+        auto* track = audioTracks[trackIdx].get();
+        for (const auto& lane : clip.automationLanes) {
+            if (lane.points.empty()) continue;
+            float minV = lane.points[0].value, maxV = lane.points[0].value;
+            for (const auto& pt : lane.points) {
+                minV = std::min(minV, pt.value);
+                maxV = std::max(maxV, pt.value);
+            }
+            // minV/maxV are already normalized [0,1] — they are the raw normalised values stored in points
+            autoInfo[lane.parameterId] = { true, minV, maxV };
+        }
+    }
+    deviceView.updateAutomationIndicators(autoInfo);
 }
 
 void MainComponent::updateDrumRackPatternEditor() {

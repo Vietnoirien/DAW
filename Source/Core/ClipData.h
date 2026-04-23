@@ -1,6 +1,7 @@
 #pragma once
 #include <JuceHeader.h>
 #include <vector>
+#include <list>
 #include <cstdint>
 
 // ─── Global DAW Layout Constants ──────────────────────────────────────────────
@@ -17,6 +18,23 @@ struct MidiNote {
     double startBeat;    // beat offset from pattern start
     double lengthBeats;  // note duration in beats
     float  velocity;     // 0.0–1.0
+};
+
+// ─── Automation Models ────────────────────────────────────────────────────────
+struct AutomationPoint {
+    double positionBeats; // relative to clip or arrangement start
+    float  value;
+};
+
+struct AutomationLane {
+    juce::String parameterId; // e.g. "Osc A/octave"
+    std::vector<AutomationPoint> points;
+};
+
+class AutomationRegistry {
+public:
+    virtual ~AutomationRegistry() = default;
+    virtual void registerParameter(const juce::String& id, std::atomic<float>* ptr, float minVal = 0.0f, float maxVal = 1.0f) = 0;
 };
 
 // ─── Clip Data (UI-thread owned) ─────────────────────────────────────────────
@@ -45,6 +63,9 @@ struct ClipData
     std::vector<MidiNote> midiNotes;
     double        patternLengthBars = 1.0; // 1, 2, or 4
     juce::String  patternMode    = "euclidean"; // "euclidean" | "pianoroll" | "drumrack"
+    
+    // Clip-level parameter automation
+    std::list<AutomationLane> automationLanes;
 };
 
 // ─── Arrangement Placement ────────────────────────────────────────────────
@@ -54,6 +75,9 @@ struct ArrangementClip {
     double      startBar     = 0.0;  // 1-based bar position on the timeline
     double      lengthBars   = 1.0;  // duration in bars
     ClipData    data;                // full clip data (name, colour, notes, etc.)
+    
+    // Arrangement-level parameter automation (overrides clip automation if present)
+    std::list<AutomationLane> automationLanes;
 };
 
 // ─── Thread-Safe Arrangement Timeline ─────────────────────────────────────

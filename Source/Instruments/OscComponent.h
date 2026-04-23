@@ -1,337 +1,224 @@
 #pragma once
 #include <JuceHeader.h>
 #include "OscProcessor.h"
+#include "../UI/LiBeLookAndFeel.h"
 
-class OscLookAndFeel : public juce::LookAndFeel_V4 {
+// ─── OscOscPanel — single oscillator column ──────────────────────────────────
+class OscOscPanel : public juce::Component {
 public:
-    OscLookAndFeel() {
-        setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xff00d0ff));
-        setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xff252540));
-        setColour(juce::Slider::thumbColourId, juce::Colours::white);
-    }
-    
-    void drawRotarySlider(juce::Graphics& g, int x, int y, int width, int height, float sliderPos,
-                          const float rotaryStartAngle, const float rotaryEndAngle, juce::Slider& slider) override {
-        auto radius = (float) juce::jmin(width / 2, height / 2) - 4.0f;
-        auto centreX = (float) x + (float) width  * 0.5f;
-        auto centreY = (float) y + (float) height * 0.5f;
-        auto rx = centreX - radius;
-        auto ry = centreY - radius;
-        auto rw = radius * 2.0f;
-        auto angle = rotaryStartAngle + sliderPos * (rotaryEndAngle - rotaryStartAngle);
-        
-        g.setColour(findColour(juce::Slider::rotarySliderOutlineColourId));
-        g.fillEllipse(rx, ry, rw, rw);
-        
-        g.setColour(juce::Colour(0xff121220));
-        g.fillEllipse(rx + 2.0f, ry + 2.0f, rw - 4.0f, rw - 4.0f);
-        
-        juce::Path p;
-        auto pointerLength = radius * 0.8f;
-        auto pointerThickness = 3.0f;
-        p.addRectangle(-pointerThickness * 0.5f, -radius, pointerThickness, pointerLength);
-        p.applyTransform(juce::AffineTransform::rotation(angle).translated(centreX, centreY));
-        
-        g.setColour(findColour(juce::Slider::rotarySliderFillColourId));
-        g.fillPath(p);
-    }
-};
-
-class OscPanel : public juce::Component {
-public:
-    OscPanel(const juce::String& name, OscParams::Osc& params) : oscName(name), oscParams(params) {
-        addAndMakeVisible(enabledToggle);
-        enabledToggle.setButtonText(name);
-        enabledToggle.setToggleState(params.enabled.load(), juce::dontSendNotification);
-        enabledToggle.onClick = [this] { oscParams.enabled.store(enabledToggle.getToggleState()); };
-        
-        addAndMakeVisible(waveformCombo);
-        waveformCombo.addItem("Sine", 1);
-        waveformCombo.addItem("Tri", 2);
-        waveformCombo.addItem("Saw", 3);
-        waveformCombo.addItem("Square", 4);
-        waveformCombo.addItem("WT", 5);
-        waveformCombo.setSelectedId(params.waveform.load() + 1, juce::dontSendNotification);
-        waveformCombo.onChange = [this] { oscParams.waveform.store(waveformCombo.getSelectedId() - 1); };
-        
-        setupSlider(octaveKnob, params.octave.load(), -2.0, 2.0, 1.0);
-        setupSlider(coarseKnob, params.coarse.load(), -24.0, 24.0, 1.0);
-        setupSlider(unisonKnob, params.unisonVoices.load(), 1, 8, 1);
-        setupSlider(detuneKnob, params.unisonDetune.load(), 0.0, 1.0, 0.01);
-        setupSlider(levelKnob, params.level.load(), 0.0, 1.0, 0.01);
-        
-        octaveKnob.onValueChange = [this] { oscParams.octave.store(octaveKnob.getValue()); };
-        coarseKnob.onValueChange = [this] { oscParams.coarse.store(coarseKnob.getValue()); };
-        unisonKnob.onValueChange = [this] { oscParams.unisonVoices.store((int)unisonKnob.getValue()); };
-        detuneKnob.onValueChange = [this] { oscParams.unisonDetune.store(detuneKnob.getValue()); };
-        levelKnob.onValueChange = [this] { oscParams.level.store(levelKnob.getValue()); };
-    }
-    
-    void paint(juce::Graphics& g) override {
-        g.fillAll(juce::Colour(0xff151525));
-        g.setColour(juce::Colour(0xff252540));
-        g.drawRect(getLocalBounds(), 1);
-        
-        g.setColour(juce::Colours::grey);
-        g.setFont(10.0f);
-        g.drawText("Oct", octaveKnob.getX(), octaveKnob.getBottom(), octaveKnob.getWidth(), 12, juce::Justification::centred);
-        g.drawText("Crs", coarseKnob.getX(), coarseKnob.getBottom(), coarseKnob.getWidth(), 12, juce::Justification::centred);
-        g.drawText("Unis", unisonKnob.getX(), unisonKnob.getBottom(), unisonKnob.getWidth(), 12, juce::Justification::centred);
-        g.drawText("Det", detuneKnob.getX(), detuneKnob.getBottom(), detuneKnob.getWidth(), 12, juce::Justification::centred);
-        g.drawText("Level", levelKnob.getX(), levelKnob.getBottom(), levelKnob.getWidth(), 12, juce::Justification::centred);
-    }
-    
-    void resized() override {
-        auto b = getLocalBounds().reduced(5);
-        auto topRow = b.removeFromTop(24);
-        enabledToggle.setBounds(topRow.removeFromLeft(60));
-        waveformCombo.setBounds(topRow.removeFromLeft(80));
-        
-        b.removeFromTop(10);
-        int w = 36;
-        int spacing = 8;
-        octaveKnob.setBounds(b.removeFromLeft(w).withHeight(w)); b.removeFromLeft(spacing);
-        coarseKnob.setBounds(b.removeFromLeft(w).withHeight(w)); b.removeFromLeft(spacing);
-        unisonKnob.setBounds(b.removeFromLeft(w).withHeight(w)); b.removeFromLeft(spacing);
-        detuneKnob.setBounds(b.removeFromLeft(w).withHeight(w)); b.removeFromLeft(spacing);
-        levelKnob.setBounds(b.removeFromLeft(w).withHeight(w));
-    }
-    
-private:
-    void setupSlider(juce::Slider& s, double val, double min, double max, double inc) {
-        addAndMakeVisible(s);
-        s.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-        s.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
-        s.setRange(min, max, inc);
-        s.setValue(val, juce::dontSendNotification);
-        s.setDoubleClickReturnValue(true, val);
-    }
-
-    juce::String oscName;
-    OscParams::Osc& oscParams;
-    juce::ToggleButton enabledToggle;
-    juce::ComboBox waveformCombo;
-    juce::Slider octaveKnob, coarseKnob, unisonKnob, detuneKnob, levelKnob;
-};
-
-class FilterPanel : public juce::Component {
-public:
-    FilterPanel(OscParams::Filter& params) : filterParams(params) {
-        addAndMakeVisible(enabledToggle);
-        enabledToggle.setButtonText("Filter");
-        enabledToggle.setToggleState(params.enabled.load(), juce::dontSendNotification);
-        enabledToggle.onClick = [this] { filterParams.enabled.store(enabledToggle.getToggleState()); };
-        
-        addAndMakeVisible(typeCombo);
-        typeCombo.addItem("LP", 1);
-        typeCombo.addItem("HP", 2);
-        typeCombo.addItem("BP", 3);
-        typeCombo.setSelectedId(params.type.load() + 1, juce::dontSendNotification);
-        typeCombo.onChange = [this] { filterParams.type.store(typeCombo.getSelectedId() - 1); };
-
-        auto setup = [&](juce::Slider& s, double v, double min, double max) {
-            addAndMakeVisible(s);
-            s.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-            s.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
-            s.setRange(min, max);
-            s.setValue(v, juce::dontSendNotification);
-            s.setDoubleClickReturnValue(true, v);
-        };
-        
-        setup(cutoffKnob, params.cutoff.load(), 20.0, 20000.0);
-        cutoffKnob.setSkewFactorFromMidPoint(1000.0);
-        setup(resKnob, params.resonance.load(), 0.1, 10.0);
-        setup(envAmtKnob, params.envAmount.load(), -1.0, 1.0);
-        
-        cutoffKnob.onValueChange = [this] { filterParams.cutoff.store(cutoffKnob.getValue()); };
-        resKnob.onValueChange = [this] { filterParams.resonance.store(resKnob.getValue()); };
-        envAmtKnob.onValueChange = [this] { filterParams.envAmount.store(envAmtKnob.getValue()); };
-    }
-    
-    void paint(juce::Graphics& g) override {
-        g.fillAll(juce::Colour(0xff151525));
-        g.setColour(juce::Colour(0xff252540));
-        g.drawRect(getLocalBounds(), 1);
-        
-        g.setColour(juce::Colours::grey);
-        g.setFont(10.0f);
-        g.drawText("Cutoff", cutoffKnob.getX(), cutoffKnob.getBottom(), cutoffKnob.getWidth(), 12, juce::Justification::centred);
-        g.drawText("Res", resKnob.getX(), resKnob.getBottom(), resKnob.getWidth(), 12, juce::Justification::centred);
-        g.drawText("Env", envAmtKnob.getX(), envAmtKnob.getBottom(), envAmtKnob.getWidth(), 12, juce::Justification::centred);
-    }
-    
-    void resized() override {
-        auto b = getLocalBounds().reduced(5);
-        auto topRow = b.removeFromTop(24);
-        enabledToggle.setBounds(topRow.removeFromLeft(60));
-        typeCombo.setBounds(topRow.removeFromLeft(60));
-        
-        b.removeFromTop(10);
-        int w = 40; int spacing = 15;
-        cutoffKnob.setBounds(b.removeFromLeft(w).withHeight(w)); b.removeFromLeft(spacing);
-        resKnob.setBounds(b.removeFromLeft(w).withHeight(w)); b.removeFromLeft(spacing);
-        envAmtKnob.setBounds(b.removeFromLeft(w).withHeight(w));
-    }
-private:
-    OscParams::Filter& filterParams;
-    juce::ToggleButton enabledToggle;
-    juce::ComboBox typeCombo;
-    juce::Slider cutoffKnob, resKnob, envAmtKnob;
-};
-
-class EnvPanel : public juce::Component {
-public:
-    EnvPanel(const juce::String& name, OscParams::ADSRNode& params) : envName(name), envParams(params) {
-        auto setup = [&](juce::Slider& s, double v, double min, double max) {
-            addAndMakeVisible(s);
-            s.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-            s.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
-            s.setRange(min, max);
-            s.setValue(v, juce::dontSendNotification);
-            s.setDoubleClickReturnValue(true, v);
-        };
-        setup(attKnob, params.attack.load(), 0.001, 5.0);
-        setup(decKnob, params.decay.load(), 0.001, 5.0);
-        setup(susKnob, params.sustain.load(), 0.0, 1.0);
-        setup(relKnob, params.release.load(), 0.001, 5.0);
-        
-        attKnob.setSkewFactorFromMidPoint(0.5);
-        decKnob.setSkewFactorFromMidPoint(0.5);
-        relKnob.setSkewFactorFromMidPoint(0.5);
-        
-        attKnob.onValueChange = [this] { envParams.attack.store(attKnob.getValue()); };
-        decKnob.onValueChange = [this] { envParams.decay.store(decKnob.getValue()); };
-        susKnob.onValueChange = [this] { envParams.sustain.store(susKnob.getValue()); };
-        relKnob.onValueChange = [this] { envParams.release.store(relKnob.getValue()); };
-    }
-    
-    void paint(juce::Graphics& g) override {
-        g.fillAll(juce::Colour(0xff151525));
-        g.setColour(juce::Colour(0xff252540));
-        g.drawRect(getLocalBounds(), 1);
-        
-        g.setColour(juce::Colours::white);
-        g.setFont(12.0f);
-        g.drawText(envName, 5, 5, 100, 15, juce::Justification::centredLeft);
-        
-        g.setColour(juce::Colours::grey);
-        g.setFont(10.0f);
-        g.drawText("A", attKnob.getX(), attKnob.getBottom(), attKnob.getWidth(), 12, juce::Justification::centred);
-        g.drawText("D", decKnob.getX(), decKnob.getBottom(), decKnob.getWidth(), 12, juce::Justification::centred);
-        g.drawText("S", susKnob.getX(), susKnob.getBottom(), susKnob.getWidth(), 12, juce::Justification::centred);
-        g.drawText("R", relKnob.getX(), relKnob.getBottom(), relKnob.getWidth(), 12, juce::Justification::centred);
-    }
-    
-    void resized() override {
-        auto b = getLocalBounds().reduced(5);
-        b.removeFromTop(20);
-        int w = 36; int spacing = 10;
-        attKnob.setBounds(b.removeFromLeft(w).withHeight(w)); b.removeFromLeft(spacing);
-        decKnob.setBounds(b.removeFromLeft(w).withHeight(w)); b.removeFromLeft(spacing);
-        susKnob.setBounds(b.removeFromLeft(w).withHeight(w)); b.removeFromLeft(spacing);
-        relKnob.setBounds(b.removeFromLeft(w).withHeight(w));
-    }
-private:
-    juce::String envName;
-    OscParams::ADSRNode& envParams;
-    juce::Slider attKnob, decKnob, susKnob, relKnob;
-};
-
-class OscContentComponent : public juce::Component {
-public:
-    OscContentComponent(OscProcessor* proc) : processor(proc),
-        oscA("OSC A", proc->params.oscA),
-        oscB("OSC B", proc->params.oscB),
-        oscC("OSC C", proc->params.oscC),
-        filter(proc->params.filter),
-        ampEnv("Amp Env", proc->params.ampEnv),
-        filtEnv("Filter Env", proc->params.filterEnv)
+    OscOscPanel(const juce::String& name, OscParams::Osc& p, juce::Colour col, LiBeLookAndFeel& laf)
+        : oscParams(p), accent(col)
     {
-        addAndMakeVisible(oscA);
-        addAndMakeVisible(oscB);
-        addAndMakeVisible(oscC);
-        addAndMakeVisible(filter);
-        addAndMakeVisible(ampEnv);
-        addAndMakeVisible(filtEnv);
+        setLookAndFeel(&laf);
+        addAndMakeVisible(enabledBtn);
+        enabledBtn.setButtonText(name);
+        enabledBtn.setToggleState(p.enabled.load(), juce::dontSendNotification);
+        enabledBtn.onClick = [this] { oscParams.enabled.store(enabledBtn.getToggleState()); };
+
+        addAndMakeVisible(waveCombo);
+        waveCombo.addItem("Sine",1); waveCombo.addItem("Tri",2);
+        waveCombo.addItem("Saw",3);  waveCombo.addItem("Square",4); waveCombo.addItem("WT",5);
+        waveCombo.setSelectedId(p.waveform.load()+1, juce::dontSendNotification);
+        waveCombo.onChange = [this] { oscParams.waveform.store(waveCombo.getSelectedId()-1); };
+
+        juce::String pre = "Oscillator/" + name + "/";
+        auto sk = [&](LiBeKnob& k, const char* lbl, double v, double mn, double mx, double dv, const char* pid) {
+            k.setup(lbl, v, mn, mx, dv, pre + pid, col); addAndMakeVisible(k);
+        };
+        sk(kOct, "Oct",    p.octave.load(),       -2, 2,   0,   "Octave");
+        sk(kCrs, "Crs",    p.coarse.load(),        -24, 24, 0,   "Coarse");
+        sk(kDet, "Detune", p.unisonDetune.load(),  0,  1,  0.1, "Detune");
+        sk(kLvl, "Level",  p.level.load(),         0,  1,  0.8, "Level");
+
+        kOct.slider.onValueChange = [this] { oscParams.octave.store      ((float)kOct.slider.getValue()); };
+        kCrs.slider.onValueChange = [this] { oscParams.coarse.store      ((float)kCrs.slider.getValue()); };
+        kDet.slider.onValueChange = [this] { oscParams.unisonDetune.store((float)kDet.slider.getValue()); };
+        kLvl.slider.onValueChange = [this] { oscParams.level.store       ((float)kLvl.slider.getValue()); };
     }
+    ~OscOscPanel() override { setLookAndFeel(nullptr); }
 
     void paint(juce::Graphics& g) override {
-        g.fillAll(juce::Colour(0xff0d0d1a));
+        g.fillAll(juce::Colour(0xff08080F));
+        g.setColour(accent.withAlpha(0.3f)); g.drawRect(getLocalBounds(), 1);
+        g.setColour(accent.withAlpha(0.75f)); g.fillRect(0, 0, 3, getHeight());
     }
 
     void resized() override {
-        int x = 5;
-        int y = 5;
-        int colWidth = 0;
-        int maxH = getLocalBounds().getHeight();
-        
-        struct Item { juce::Component* c; int w; int h; };
-        Item items[] = {
-            { &oscA, 240, 100 },
-            { &oscB, 240, 100 },
-            { &oscC, 240, 100 },
-            { &filter, 200, 100 },
-            { &ampEnv, 200, 100 },
-            { &filtEnv, 200, 100 }
-        };
-        
-        for (auto& item : items) {
-            if (y + item.h > maxH && y > 5) {
-                x += colWidth + 5;
-                y = 5;
-                colWidth = 0;
-            }
-            item.c->setBounds(x, y, item.w, item.h);
-            colWidth = std::max(colWidth, item.w);
-            y += item.h + 5;
+        auto b = getLocalBounds().withTrimmedLeft(4).reduced(2);
+        enabledBtn.setBounds(b.removeFromTop(18));
+        b.removeFromTop(1);
+        waveCombo.setBounds(b.removeFromTop(17));
+        b.removeFromTop(2);
+        int x = b.getX(), y = b.getY();
+        for (auto* k : std::initializer_list<LiBeKnob*>{ &kOct, &kCrs, &kDet, &kLvl }) {
+            k->setBounds(x, y, kOscKW, kOscKH); x += kOscKW + 3;
         }
     }
 
+    static int preferredWidth()  { return 4 + 4*(kOscKW+3) + 4; }
+    static int preferredHeight() { return 2 + 18 + 1 + 17 + 2 + kOscKH + 3; }
+
+    static constexpr int kOscKW = 40, kOscKH = 46;
+
 private:
-    OscProcessor* processor;
-    OscPanel oscA, oscB, oscC;
-    FilterPanel filter;
-    EnvPanel ampEnv, filtEnv;
+    OscParams::Osc& oscParams; juce::Colour accent;
+    juce::ToggleButton enabledBtn; juce::ComboBox waveCombo;
+    LiBeKnob kOct, kCrs, kDet, kLvl;
 };
 
+// ─── OscEnvPanel — ADSR strip ────────────────────────────────────────────────
+class OscEnvPanel : public juce::Component {
+public:
+    OscEnvPanel(const juce::String& name, OscParams::ADSRNode& p, juce::Colour col, LiBeLookAndFeel& laf)
+        : envParams(p), title(name), accent(col)
+    {
+        setLookAndFeel(&laf);
+        juce::String pre = "Oscillator/" + name + "/";
+        auto sk = [&](LiBeKnob& k, const char* lbl, double v, double mn, double mx, const char* pid) {
+            k.setup(lbl, v, mn, mx, v, pre + pid, col); addAndMakeVisible(k);
+        };
+        sk(kA, "A", p.attack.load(),  0.001, 5.0, "Attack");
+        sk(kD, "D", p.decay.load(),   0.001, 5.0, "Decay");
+        sk(kS, "S", p.sustain.load(), 0.0,   1.0, "Sustain");
+        sk(kR, "R", p.release.load(), 0.001, 5.0, "Release");
+        kA.slider.setSkewFactorFromMidPoint(0.5); kD.slider.setSkewFactorFromMidPoint(0.5);
+        kR.slider.setSkewFactorFromMidPoint(0.5);
+        kA.slider.onValueChange = [this] { envParams.attack.store ((float)kA.slider.getValue()); };
+        kD.slider.onValueChange = [this] { envParams.decay.store  ((float)kD.slider.getValue()); };
+        kS.slider.onValueChange = [this] { envParams.sustain.store((float)kS.slider.getValue()); };
+        kR.slider.onValueChange = [this] { envParams.release.store((float)kR.slider.getValue()); };
+    }
+    ~OscEnvPanel() override { setLookAndFeel(nullptr); }
+
+    void paint(juce::Graphics& g) override {
+        g.fillAll(juce::Colour(0xff08080F));
+        g.setColour(accent.withAlpha(0.3f)); g.drawRect(getLocalBounds(), 1);
+        g.setColour(accent.withAlpha(0.75f)); g.fillRect(0, 0, 3, getHeight());
+        g.setColour(accent.withAlpha(0.7f));
+        g.setFont(juce::FontOptions(9.0f, juce::Font::bold));
+        g.drawText(title.toUpperCase(), 6, 3, getWidth()-8, 12, juce::Justification::centredLeft);
+    }
+
+    void resized() override {
+        auto b = getLocalBounds().withTrimmedLeft(4).reduced(2).withTrimmedTop(16);
+        int x = b.getX(), y = b.getY();
+        for (auto* k : std::initializer_list<LiBeKnob*>{ &kA, &kD, &kS, &kR }) {
+            k->setBounds(x, y, LiBeKnob::kW, LiBeKnob::kH); x += LiBeKnob::kW + 3;
+        }
+    }
+
+    static int preferredWidth()  { return 4 + 4*(LiBeKnob::kW+3) + 4; }
+    static int preferredHeight() { return 16 + LiBeKnob::kH + 4; }
+
+private:
+    OscParams::ADSRNode& envParams; juce::String title; juce::Colour accent;
+    LiBeKnob kA, kD, kS, kR;
+};
+
+// ─── OscComponent ─────────────────────────────────────────────────────────────
+// Layout (320px tall):
+//  ┌────────────────────────────────────────────────────────────────────────────┐
+//  │  OSCILLATOR SYNTH  |  3 OSCILLATORS                            [title]    │
+//  ├──────────────────────┬─────────────────────────────────────────────────────┤
+//  │  OSC A  OSC B  OSC C │  AMP ENV  [A][D][S][R]                            │
+//  │  [Oct][Crs][Det][Lvl]│  FILTER ENV [A][D][S][R]                          │
+//  │  [waveform combo   ] │  FILTER [en][LP] [Cut][Res][Env]                  │
+//  └──────────────────────┴─────────────────────────────────────────────────────┘
 class OscComponent : public juce::Component {
 public:
-    OscComponent(OscProcessor* proc) : content(proc) {
+    explicit OscComponent(OscProcessor* proc)
+        : processor(proc), laf(juce::Colour(0xff00D0FF)),
+          oscA("OSC A", proc->params.oscA, juce::Colour(0xff00D0FF), laf),
+          oscB("OSC B", proc->params.oscB, juce::Colour(0xffFF8800), laf),
+          oscC("OSC C", proc->params.oscC, juce::Colour(0xffCC44FF), laf),
+          ampEnv("Amp Env",    proc->params.ampEnv,    juce::Colour(0xff00D0FF), laf),
+          filtEnv("Filter Env", proc->params.filterEnv, juce::Colour(0xff00D0FF), laf)
+    {
         setLookAndFeel(&laf);
-        addAndMakeVisible(viewport);
-        viewport.setViewedComponent(&content, false);
-        viewport.setScrollBarsShown(false, true, false, false);
-        setSize(500, 200);
+        addAndMakeVisible(oscA); addAndMakeVisible(oscB); addAndMakeVisible(oscC);
+        addAndMakeVisible(ampEnv); addAndMakeVisible(filtEnv);
+
+        auto& fp = proc->params.filter;
+        auto sk = [&](LiBeKnob& k, const char* lbl, double v, double mn, double mx, double dv, const char* pid) {
+            k.setup(lbl, v, mn, mx, dv, pid, juce::Colour(0xff00D0FF)); addAndMakeVisible(k);
+        };
+        sk(kCut, "Cutoff", fp.cutoff.load(),    20.0, 20000.0, 2000.0, "Oscillator/Filter/Cutoff");
+        sk(kRes, "Res",    fp.resonance.load(),  0.1,  10.0,   0.707,  "Oscillator/Filter/Resonance");
+        sk(kEnv, "Env",    fp.envAmount.load(), -1.0,  1.0,    0.0,    "Oscillator/Filter/Env Amount");
+        kCut.slider.setSkewFactorFromMidPoint(1000.0);
+        kCut.slider.onValueChange = [this] { processor->params.filter.cutoff.store   ((float)kCut.slider.getValue()); };
+        kRes.slider.onValueChange = [this] { processor->params.filter.resonance.store((float)kRes.slider.getValue()); };
+        kEnv.slider.onValueChange = [this] { processor->params.filter.envAmount.store((float)kEnv.slider.getValue()); };
+
+        addAndMakeVisible(filterEnabled);
+        filterEnabled.setButtonText("Filter");
+        filterEnabled.setToggleState(fp.enabled.load(), juce::dontSendNotification);
+        filterEnabled.onClick = [this] { processor->params.filter.enabled.store(filterEnabled.getToggleState()); };
+
+        addAndMakeVisible(filterTypeCombo);
+        filterTypeCombo.addItem("LP",1); filterTypeCombo.addItem("HP",2); filterTypeCombo.addItem("BP",3);
+        filterTypeCombo.setSelectedId(fp.type.load()+1, juce::dontSendNotification);
+        filterTypeCombo.onChange = [this] { processor->params.filter.type.store(filterTypeCombo.getSelectedId()-1); };
+
+        setSize(760, 320);
     }
-    
-    ~OscComponent() override {
-        setLookAndFeel(nullptr);
-    }
+    ~OscComponent() override { setLookAndFeel(nullptr); }
 
     void paint(juce::Graphics& g) override {
-        g.fillAll(juce::Colour(0xff0d0d1a));
+        g.fillAll(juce::Colour(0xff07070E));
+        g.setColour(juce::Colour(0xff0A1020)); g.fillRect(0, 0, getWidth(), kTH);
+        g.setColour(juce::Colour(0xff00D0FF)); g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
+        g.drawText("OSCILLATOR SYNTH  |  3 OSCILLATORS", 12, 0, getWidth()-12, kTH, juce::Justification::centredLeft);
+        g.setColour(juce::Colour(0xff202030));
+        g.drawHorizontalLine(kTH, 0.0f, (float)getWidth());
+        g.drawVerticalLine(kLeftW, (float)kTH, (float)getHeight());
+
+        int rx = kLeftW + 10;
+        auto sl = [&](const char* t, int x, int y) {
+            g.setColour(juce::Colour(0xff00D0FF).withAlpha(0.65f));
+            g.setFont(juce::FontOptions(9.0f, juce::Font::bold));
+            g.drawText(t, x, y, 160, 12, juce::Justification::centredLeft);
+        };
+        sl("AMP ENV",    rx, ampEnv.getY()  - 13);
+        sl("FILTER ENV", rx, filtEnv.getY() - 13);
+        sl("FILTER",     rx, filterEnabled.getY() - 13);
     }
 
     void resized() override {
-        viewport.setBounds(getLocalBounds());
-        int h = std::max(120, getLocalBounds().getHeight() - viewport.getScrollBarThickness());
-        
-        int x = 5, y = 5, colW = 0;
-        int maxH = h;
-        struct Item { int w; int h; };
-        Item items[] = { {240,100}, {240,100}, {240,100}, {200,100}, {200,100}, {200,100} };
-        
-        for (auto& i : items) {
-            if (y + i.h > maxH && y > 5) { x += colW + 5; y = 5; colW = 0; }
-            colW = std::max(colW, i.w);
-            y += i.h + 5;
+        auto b = getLocalBounds().withTrimmedTop(kTH);
+        auto left = b.removeFromLeft(kLeftW).reduced(4, 3);
+        const int oscH = OscOscPanel::preferredHeight();
+        oscA.setBounds(left.removeFromTop(oscH)); left.removeFromTop(3);
+        oscB.setBounds(left.removeFromTop(oscH)); left.removeFromTop(3);
+        oscC.setBounds(left.removeFromTop(oscH));
+
+        auto right = b.reduced(8, 3);
+        right.removeFromTop(14);
+        ampEnv.setBounds(right.removeFromTop(OscEnvPanel::preferredHeight()));
+        right.removeFromTop(14);
+        filtEnv.setBounds(right.removeFromTop(OscEnvPanel::preferredHeight()));
+        right.removeFromTop(14);
+        auto fr = right.removeFromTop(20);
+        filterEnabled.setBounds(fr.removeFromLeft(52)); fr.removeFromLeft(3);
+        filterTypeCombo.setBounds(fr.removeFromLeft(48));
+        right.removeFromTop(3);
+        int x = right.getX(), y = right.getY();
+        for (auto* k : std::initializer_list<LiBeKnob*>{ &kCut, &kRes, &kEnv }) {
+            k->setBounds(x, y, LiBeKnob::kW, LiBeKnob::kH); x += LiBeKnob::kW + 4;
         }
-        
-        content.setSize(x + colW + 5, h);
     }
 
 private:
-    OscLookAndFeel laf;
-    OscContentComponent content;
-    juce::Viewport viewport;
+    static constexpr int kTH = 30, kLeftW = 300;
+    OscProcessor* processor;
+    LiBeLookAndFeel laf;
+    OscOscPanel oscA, oscB, oscC;
+    OscEnvPanel ampEnv, filtEnv;
+    LiBeKnob kCut, kRes, kEnv;
+    juce::ToggleButton filterEnabled;
+    juce::ComboBox filterTypeCombo;
 };
+
+inline std::unique_ptr<juce::Component> OscProcessor::createEditor() {
+    return std::make_unique<OscComponent>(this);
+}

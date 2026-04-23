@@ -7,6 +7,7 @@ public:
         juce::String name;
         std::atomic<float>* value;
         float min, max;
+        juce::String id;
     };
 
     GenericEffectEditor(juce::String title, std::vector<Param> parameters) 
@@ -20,6 +21,7 @@ public:
             slider->onValueChange = [slider, p]() {
                 p.value->store((float)slider->getValue(), std::memory_order_relaxed);
             };
+            if (p.id.isNotEmpty()) slider->getProperties().set("parameterId", p.id);
             addAndMakeVisible(slider);
             sliders.add(slider);
         }
@@ -38,6 +40,13 @@ public:
         g.setFont(juce::Font(juce::FontOptions(10.0f)));
         for (int i = 0; i < params.size(); ++i) {
             g.drawText(params[i].name, 10 + i * 60, 100, 60, 20, juce::Justification::centred);
+        }
+
+        for (auto* slider : sliders) {
+            if (slider->getProperties().contains("isAutomated") && (bool)slider->getProperties()["isAutomated"]) {
+                g.setColour(juce::Colours::orange);
+                g.drawEllipse(slider->getBounds().toFloat().reduced(2.0f), 2.0f);
+            }
         }
     }
 
@@ -107,11 +116,20 @@ void ReverbEffect::loadState(const juce::ValueTree& tree) {
     if (tree.hasProperty("width")) width.store(tree.getProperty("width"), std::memory_order_relaxed);
 }
 
+void ReverbEffect::registerAutomationParameters(AutomationRegistry* registry) {
+    if (!registry) return;
+    registry->registerParameter("Reverb/Size", &roomSize);
+    registry->registerParameter("Reverb/Damping", &damping);
+    registry->registerParameter("Reverb/Wet Level", &wetLevel);
+    registry->registerParameter("Reverb/Dry Level", &dryLevel);
+    registry->registerParameter("Reverb/Width", &width);
+}
+
 std::unique_ptr<juce::Component> ReverbEffect::createEditor() {
     return std::make_unique<GenericEffectEditor>("Reverb", std::vector<GenericEffectEditor::Param>{
-        {"Size", &roomSize, 0.0f, 1.0f},
-        {"Damp", &damping, 0.0f, 1.0f},
-        {"Mix", &wetLevel, 0.0f, 1.0f}
+        {"Size", &roomSize, 0.0f, 1.0f, "Reverb/Size"},
+        {"Damp", &damping, 0.0f, 1.0f, "Reverb/Damping"},
+        {"Mix", &wetLevel, 0.0f, 1.0f, "Reverb/Wet Level"}
     });
 }
 
@@ -170,11 +188,18 @@ void DelayEffect::loadState(const juce::ValueTree& tree) {
     if (tree.hasProperty("mix")) mix.store(tree.getProperty("mix"), std::memory_order_relaxed);
 }
 
+void DelayEffect::registerAutomationParameters(AutomationRegistry* registry) {
+    if (!registry) return;
+    registry->registerParameter("Delay/Time",     &delayTimeMs, 10.0f, 1000.0f);
+    registry->registerParameter("Delay/Feedback", &feedback,     0.0f,    0.95f);
+    registry->registerParameter("Delay/Mix",      &mix,          0.0f,    1.0f);
+}
+
 std::unique_ptr<juce::Component> DelayEffect::createEditor() {
     return std::make_unique<GenericEffectEditor>("Delay", std::vector<GenericEffectEditor::Param>{
-        {"Time ms", &delayTimeMs, 10.0f, 1000.0f},
-        {"Fdbk", &feedback, 0.0f, 0.95f},
-        {"Mix", &mix, 0.0f, 1.0f}
+        {"Time ms", &delayTimeMs, 10.0f, 1000.0f, "Delay/Time"},
+        {"Fdbk", &feedback, 0.0f, 0.95f, "Delay/Feedback"},
+        {"Mix", &mix, 0.0f, 1.0f, "Delay/Mix"}
     });
 }
 
@@ -223,12 +248,21 @@ void ChorusEffect::loadState(const juce::ValueTree& tree) {
     if (tree.hasProperty("mix")) mix.store(tree.getProperty("mix"), std::memory_order_relaxed);
 }
 
+void ChorusEffect::registerAutomationParameters(AutomationRegistry* registry) {
+    if (!registry) return;
+    registry->registerParameter("Chorus/Rate",     &rate,        0.0f,   99.0f);
+    registry->registerParameter("Chorus/Depth",    &depth,       0.0f,    1.0f);
+    registry->registerParameter("Chorus/Delay",    &centreDelay, 1.0f,  100.0f);
+    registry->registerParameter("Chorus/Feedback", &feedback,   -1.0f,    1.0f);
+    registry->registerParameter("Chorus/Mix",      &mix,         0.0f,    1.0f);
+}
+
 std::unique_ptr<juce::Component> ChorusEffect::createEditor() {
     return std::make_unique<GenericEffectEditor>("Chorus", std::vector<GenericEffectEditor::Param>{
-        {"Rate", &rate, 0.0f, 99.0f},
-        {"Depth", &depth, 0.0f, 1.0f},
-        {"Delay", &centreDelay, 1.0f, 100.0f},
-        {"Mix", &mix, 0.0f, 1.0f}
+        {"Rate", &rate, 0.0f, 99.0f, "Chorus/Rate"},
+        {"Depth", &depth, 0.0f, 1.0f, "Chorus/Depth"},
+        {"Delay", &centreDelay, 1.0f, 100.0f, "Chorus/Delay"},
+        {"Mix", &mix, 0.0f, 1.0f, "Chorus/Mix"}
     });
 }
 
@@ -270,10 +304,16 @@ void FilterEffect::loadState(const juce::ValueTree& tree) {
     if (tree.hasProperty("resonance")) resonance.store(tree.getProperty("resonance"), std::memory_order_relaxed);
 }
 
+void FilterEffect::registerAutomationParameters(AutomationRegistry* registry) {
+    if (!registry) return;
+    registry->registerParameter("Filter/Cutoff",    &cutoff,    20.0f, 20000.0f);
+    registry->registerParameter("Filter/Resonance", &resonance,  0.1f,    10.0f);
+}
+
 std::unique_ptr<juce::Component> FilterEffect::createEditor() {
     return std::make_unique<GenericEffectEditor>("Filter", std::vector<GenericEffectEditor::Param>{
-        {"Cutoff", &cutoff, 20.0f, 20000.0f},
-        {"Res", &resonance, 0.1f, 10.0f}
+        {"Cutoff", &cutoff, 20.0f, 20000.0f, "Filter/Cutoff"},
+        {"Res", &resonance, 0.1f, 10.0f, "Filter/Resonance"}
     });
 }
 
@@ -324,12 +364,20 @@ void CompressorEffect::loadState(const juce::ValueTree& tree) {
     if (tree.hasProperty("release")) release.store(tree.getProperty("release"), std::memory_order_relaxed);
 }
 
+void CompressorEffect::registerAutomationParameters(AutomationRegistry* registry) {
+    if (!registry) return;
+    registry->registerParameter("Compressor/Threshold", &threshold, -60.0f,    0.0f);
+    registry->registerParameter("Compressor/Ratio",     &ratio,       1.0f,   20.0f);
+    registry->registerParameter("Compressor/Attack",    &attack,      0.1f,  100.0f);
+    registry->registerParameter("Compressor/Release",   &release,    10.0f, 1000.0f);
+}
+
 std::unique_ptr<juce::Component> CompressorEffect::createEditor() {
     return std::make_unique<GenericEffectEditor>("Compressor", std::vector<GenericEffectEditor::Param>{
-        {"Thresh", &threshold, -60.0f, 0.0f},
-        {"Ratio", &ratio, 1.0f, 20.0f},
-        {"Attack", &attack, 0.1f, 100.0f},
-        {"Release", &release, 10.0f, 1000.0f}
+        {"Thresh", &threshold, -60.0f, 0.0f, "Compressor/Threshold"},
+        {"Ratio", &ratio, 1.0f, 20.0f, "Compressor/Ratio"},
+        {"Attack", &attack, 0.1f, 100.0f, "Compressor/Attack"},
+        {"Release", &release, 10.0f, 1000.0f, "Compressor/Release"}
     });
 }
 
@@ -372,10 +420,16 @@ void LimiterEffect::loadState(const juce::ValueTree& tree) {
     if (tree.hasProperty("release")) release.store(tree.getProperty("release"), std::memory_order_relaxed);
 }
 
+void LimiterEffect::registerAutomationParameters(AutomationRegistry* registry) {
+    if (!registry) return;
+    registry->registerParameter("Limiter/Threshold", &threshold, -40.0f,    0.0f);
+    registry->registerParameter("Limiter/Release",   &release,   10.0f, 1000.0f);
+}
+
 std::unique_ptr<juce::Component> LimiterEffect::createEditor() {
     return std::make_unique<GenericEffectEditor>("Limiter", std::vector<GenericEffectEditor::Param>{
-        {"Thresh", &threshold, -40.0f, 0.0f},
-        {"Release", &release, 10.0f, 1000.0f}
+        {"Thresh", &threshold, -40.0f, 0.0f, "Limiter/Threshold"},
+        {"Release", &release, 10.0f, 1000.0f, "Limiter/Release"}
     });
 }
 
@@ -424,13 +478,22 @@ void PhaserEffect::loadState(const juce::ValueTree& tree) {
     if (tree.hasProperty("mix")) mix.store(tree.getProperty("mix"), std::memory_order_relaxed);
 }
 
+void PhaserEffect::registerAutomationParameters(AutomationRegistry* registry) {
+    if (!registry) return;
+    registry->registerParameter("Phaser/Rate",      &rate,       0.01f,  10.0f);
+    registry->registerParameter("Phaser/Depth",     &depth,       0.0f,   1.0f);
+    registry->registerParameter("Phaser/Frequency", &centreFreq, 50.0f, 5000.0f);
+    registry->registerParameter("Phaser/Feedback",  &feedback,   -1.0f,   1.0f);
+    registry->registerParameter("Phaser/Mix",       &mix,         0.0f,   1.0f);
+}
+
 std::unique_ptr<juce::Component> PhaserEffect::createEditor() {
     return std::make_unique<GenericEffectEditor>("Phaser", std::vector<GenericEffectEditor::Param>{
-        {"Rate", &rate, 0.01f, 10.0f},
-        {"Depth", &depth, 0.0f, 1.0f},
-        {"Freq", &centreFreq, 50.0f, 5000.0f},
-        {"Fdbk", &feedback, -1.0f, 1.0f},
-        {"Mix", &mix, 0.0f, 1.0f}
+        {"Rate", &rate, 0.01f, 10.0f, "Phaser/Rate"},
+        {"Depth", &depth, 0.0f, 1.0f, "Phaser/Depth"},
+        {"Freq", &centreFreq, 50.0f, 5000.0f, "Phaser/Frequency"},
+        {"Fdbk", &feedback, -1.0f, 1.0f, "Phaser/Feedback"},
+        {"Mix", &mix, 0.0f, 1.0f, "Phaser/Mix"}
     });
 }
 
@@ -490,10 +553,16 @@ void SaturationEffect::loadState(const juce::ValueTree& tree) {
     if (tree.hasProperty("mix")) mix.store(tree.getProperty("mix"), std::memory_order_relaxed);
 }
 
+void SaturationEffect::registerAutomationParameters(AutomationRegistry* registry) {
+    if (!registry) return;
+    registry->registerParameter("Saturation/Drive", &drive, 1.0f, 20.0f);
+    registry->registerParameter("Saturation/Mix",   &mix,   0.0f,  1.0f);
+}
+
 std::unique_ptr<juce::Component> SaturationEffect::createEditor() {
     return std::make_unique<GenericEffectEditor>("Saturation", std::vector<GenericEffectEditor::Param>{
-        {"Drive", &drive, 1.0f, 20.0f},
-        {"Mix", &mix, 0.0f, 1.0f}
+        {"Drive", &drive, 1.0f, 20.0f, "Saturation/Drive"},
+        {"Mix", &mix, 0.0f, 1.0f, "Saturation/Mix"}
     });
 }
 
@@ -507,17 +576,17 @@ public:
     {
         spectrumData.fill(-100.0f);
 
-        setupSlider("F1 Hz", &pEffect->freq1, 20.0f, 500.0f, slidersF[0]);
-        setupSlider("G1", &pEffect->gain1, 0.1f, 10.0f, slidersG[0]);
-        setupSlider("Q1", &pEffect->q1, 0.1f, 10.0f, slidersQ[0]);
+        setupSlider("F1 Hz", &pEffect->freq1, 20.0f, 500.0f, slidersF[0], "EQ/Band 1/Freq");
+        setupSlider("G1", &pEffect->gain1, 0.1f, 10.0f, slidersG[0], "EQ/Band 1/Gain");
+        setupSlider("Q1", &pEffect->q1, 0.1f, 10.0f, slidersQ[0], "EQ/Band 1/Q");
 
-        setupSlider("F2 Hz", &pEffect->freq2, 500.0f, 5000.0f, slidersF[1]);
-        setupSlider("G2", &pEffect->gain2, 0.1f, 10.0f, slidersG[1]);
-        setupSlider("Q2", &pEffect->q2, 0.1f, 10.0f, slidersQ[1]);
+        setupSlider("F2 Hz", &pEffect->freq2, 500.0f, 5000.0f, slidersF[1], "EQ/Band 2/Freq");
+        setupSlider("G2", &pEffect->gain2, 0.1f, 10.0f, slidersG[1], "EQ/Band 2/Gain");
+        setupSlider("Q2", &pEffect->q2, 0.1f, 10.0f, slidersQ[1], "EQ/Band 2/Q");
 
-        setupSlider("F3 Hz", &pEffect->freq3, 5000.0f, 20000.0f, slidersF[2]);
-        setupSlider("G3", &pEffect->gain3, 0.1f, 10.0f, slidersG[2]);
-        setupSlider("Q3", &pEffect->q3, 0.1f, 10.0f, slidersQ[2]);
+        setupSlider("F3 Hz", &pEffect->freq3, 5000.0f, 20000.0f, slidersF[2], "EQ/Band 3/Freq");
+        setupSlider("G3", &pEffect->gain3, 0.1f, 10.0f, slidersG[2], "EQ/Band 3/Gain");
+        setupSlider("Q3", &pEffect->q3, 0.1f, 10.0f, slidersQ[2], "EQ/Band 3/Q");
 
         setSize(500, 300);
         startTimerHz(30);
@@ -624,6 +693,16 @@ public:
             g.drawText("Freq " + juce::String(b+1), bx, 270, 40, 20, juce::Justification::centred);
             g.drawText("Gain " + juce::String(b+1), bx + 50, 270, 40, 20, juce::Justification::centred);
             g.drawText("Q " + juce::String(b+1), bx + 100, 270, 40, 20, juce::Justification::centred);
+
+            auto drawInd = [&](juce::Slider* s) {
+                if (s->getProperties().contains("isAutomated") && (bool)s->getProperties()["isAutomated"]) {
+                    g.setColour(juce::Colours::orange);
+                    g.drawEllipse(s->getBounds().toFloat().reduced(2.0f), 2.0f);
+                }
+            };
+            drawInd(slidersF[b].get());
+            drawInd(slidersG[b].get());
+            drawInd(slidersQ[b].get());
         }
     }
 
@@ -637,12 +716,13 @@ public:
     }
 
 private:
-    void setupSlider(juce::String name, std::atomic<float>* value, float min, float max, std::unique_ptr<juce::Slider>& ptr) {
+    void setupSlider(juce::String name, std::atomic<float>* value, float min, float max, std::unique_ptr<juce::Slider>& ptr, juce::String paramId) {
         ptr = std::make_unique<juce::Slider>(juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox);
         ptr->setRange(min, max);
         if (name.startsWith("F")) ptr->setSkewFactorFromMidPoint(std::sqrt(min * max));
         ptr->setValue(value->load());
         ptr->setDoubleClickReturnValue(true, value->load());
+        ptr->getProperties().set("parameterId", paramId);
         ptr->onValueChange = [ptr = ptr.get(), value, this]() {
             value->store((float)ptr->getValue(), std::memory_order_relaxed);
             repaint();
@@ -733,6 +813,22 @@ void ParametricEQEffect::loadState(const juce::ValueTree& tree) {
     if (tree.hasProperty("freq3")) freq3.store(tree.getProperty("freq3"), std::memory_order_relaxed);
     if (tree.hasProperty("gain3")) gain3.store(tree.getProperty("gain3"), std::memory_order_relaxed);
     if (tree.hasProperty("q3")) q3.store(tree.getProperty("q3"), std::memory_order_relaxed);
+}
+
+void ParametricEQEffect::registerAutomationParameters(AutomationRegistry* registry) {
+    if (!registry) return;
+    // Ranges match ParametricEQEditor slider ranges exactly
+    registry->registerParameter("EQ/Band 1/Freq",  &freq1,   20.0f,    500.0f);
+    registry->registerParameter("EQ/Band 1/Gain",  &gain1,    0.1f,     10.0f);
+    registry->registerParameter("EQ/Band 1/Q",     &q1,       0.1f,     10.0f);
+
+    registry->registerParameter("EQ/Band 2/Freq",  &freq2,  500.0f,   5000.0f);
+    registry->registerParameter("EQ/Band 2/Gain",  &gain2,    0.1f,     10.0f);
+    registry->registerParameter("EQ/Band 2/Q",     &q2,       0.1f,     10.0f);
+
+    registry->registerParameter("EQ/Band 3/Freq",  &freq3, 5000.0f,  20000.0f);
+    registry->registerParameter("EQ/Band 3/Gain",  &gain3,    0.1f,     10.0f);
+    registry->registerParameter("EQ/Band 3/Q",     &q3,       0.1f,     10.0f);
 }
 
 std::unique_ptr<juce::Component> ParametricEQEffect::createEditor() {
