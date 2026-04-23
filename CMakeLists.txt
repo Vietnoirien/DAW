@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(LinuxDAW VERSION 0.1.0)
+project(LiBeDAW VERSION 0.1.0)
 
 include(FetchContent)
 
@@ -11,13 +11,13 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(juce)
 
 # Create the executable
-juce_add_gui_app(LinuxDAW
-    PRODUCT_NAME "LinuxDAW"
+juce_add_gui_app(LiBeDAW
+    PRODUCT_NAME "LiBeDAW"
     VERSION ${PROJECT_VERSION})
 
-juce_generate_juce_header(LinuxDAW)
+juce_generate_juce_header(LiBeDAW)
 
-target_sources(LinuxDAW PRIVATE
+target_sources(LiBeDAW PRIVATE
     Source/Core/Main.cpp
     Source/Core/MainComponent.cpp
     Source/Core/MainComponent.h
@@ -29,22 +29,22 @@ target_sources(LinuxDAW PRIVATE
     Source/Instruments/KarplusStrongProcessor.cpp
     Source/Effects/BuiltInEffects.cpp)
 
-target_include_directories(LinuxDAW PRIVATE
+target_include_directories(LiBeDAW PRIVATE
     Source/Core
     Source/UI
     Source/Sequencing
     Source/Instruments
     Source/Effects)
 
-target_compile_features(LinuxDAW PRIVATE cxx_std_20)
+target_compile_features(LiBeDAW PRIVATE cxx_std_20)
 
-target_compile_definitions(LinuxDAW PRIVATE
+target_compile_definitions(LiBeDAW PRIVATE
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_PLUGINHOST_VST3=1
     JUCE_PLUGINHOST_LV2=1)
 
-target_link_libraries(LinuxDAW PRIVATE
+target_link_libraries(LiBeDAW PRIVATE
     juce::juce_core
     juce::juce_data_structures
     juce::juce_events

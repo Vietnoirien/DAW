@@ -45,3 +45,17 @@ struct ClipData
     double        patternLengthBars = 1.0; // 1, 2, or 4
     juce::String  patternMode    = "euclidean"; // "euclidean" | "pianoroll" | "drumrack"
 };
+
+// ─── Arrangement Placement ────────────────────────────────────────────────
+struct ArrangementClip {
+    int         trackIndex   = -1;
+    int         sourceScene  = -1;   // which clipGrid row this came from (-1 = custom)
+    double      startBar     = 0.0;  // 1-based bar position on the timeline
+    double      lengthBars   = 1.0;  // duration in bars
+    ClipData    data;                // full clip data (name, colour, notes, etc.)
+};
+
+// ─── Thread-Safe Arrangement Timeline ─────────────────────────────────────
+struct SharedArrangement {
+    std::vector<ArrangementClip> tracks[MAX_TRACKS];
+};

@@ -58,8 +58,75 @@ void RenderThread::run()
                 std::memory_order_acquire);
 
             // ── 3. Process pattern sequencing (MIDI events -> midiBuffer) ──
-            for (int t = 0; t < nTracks; ++t)
+            while (auto oldArr = owner.arrangementGarbageQueue.pop()) {
+                delete *oldArr;
+            }
+
+            bool isArrMode = owner.renderIsArrangementMode.load(std::memory_order_acquire);
+            auto* currArrangement = owner.renderArrangement.load(std::memory_order_acquire);
+
+            for (int t = 0; t < nTracks; ++t) {
+                // Always process to drain queue, but we will overwrite midiBuffer if in Arrangement mode
                 owner.audioTracks[t].processPatternCommands(blockStart, bs, owner.transportClock);
+                
+                if (isArrMode && currArrangement) {
+                    owner.audioTracks[t].midiBuffer.clear(); // Override Session View notes
+                    
+                    if (!owner.transportClock.getIsPlaying()) {
+                        owner.audioTracks[t].midiBuffer.addEvent(juce::MidiMessage::allNotesOff(1), 0);
+                        continue;
+                    }
+
+                    int64_t offset = owner.renderTransportOffset.load(std::memory_order_acquire);
+                    int64_t transportSample = blockStart - offset;
+                    if (transportSample < 0) transportSample = 0;
+
+                    double currentBeat = (static_cast<double>(transportSample) / owner.transportClock.getSamplesPerBeat());
+                    double endBeat = currentBeat + (static_cast<double>(bs) / owner.transportClock.getSamplesPerBeat());
+
+                    for (const auto& clip : currArrangement->tracks[t]) {
+                        double clipStartBeat = (clip.startBar - 1.0) * 4.0;
+                        double clipEndBeat = clipStartBeat + (clip.lengthBars * 4.0);
+
+                        // If clip overlaps this block
+                        if (clipEndBeat > currentBeat && clipStartBeat < endBeat) {
+                            double patternLengthBeats = clip.data.patternLengthBars > 0.0 ? clip.data.patternLengthBars * 4.0 : 4.0;
+                            
+                            for (const auto& note : clip.data.midiNotes) {
+                                long kStart = std::max(0L, static_cast<long>(std::floor((currentBeat - clipStartBeat - note.startBeat - note.lengthBeats) / patternLengthBeats)));
+                                long kEnd = static_cast<long>(std::ceil((endBeat - clipStartBeat - note.startBeat) / patternLengthBeats));
+                                
+                                for (long k = kStart; k <= kEnd; ++k) {
+                                    double noteAbsStart = clipStartBeat + k * patternLengthBeats + note.startBeat;
+                                    double noteAbsEnd = noteAbsStart + note.lengthBeats;
+                                    
+                                    // Ensure the note doesn't play if it starts after the clip ends (clip has been trimmed)
+                                    if (noteAbsStart >= clipEndBeat) continue;
+                                    
+                                    // If note is cut off by the end of the clip, trim noteAbsEnd
+                                    if (noteAbsEnd > clipEndBeat) noteAbsEnd = clipEndBeat;
+                                    
+                                    // Note On
+                                    if (noteAbsStart >= currentBeat && noteAbsStart < endBeat) {
+                                        int sampleOffset = static_cast<int>((noteAbsStart - currentBeat) * owner.transportClock.getSamplesPerBeat());
+                                        sampleOffset = juce::jlimit(0, bs - 1, sampleOffset);
+                                        owner.audioTracks[t].midiBuffer.addEvent(
+                                            juce::MidiMessage::noteOn(1, note.note, note.velocity), sampleOffset);
+                                    }
+                                    
+                                    // Note Off
+                                    if (noteAbsEnd >= currentBeat && noteAbsEnd < endBeat) {
+                                        int sampleOffset = static_cast<int>((noteAbsEnd - currentBeat) * owner.transportClock.getSamplesPerBeat());
+                                        sampleOffset = juce::jlimit(0, bs - 1, sampleOffset);
+                                        owner.audioTracks[t].midiBuffer.addEvent(
+                                            juce::MidiMessage::noteOff(1, note.note, 0.0f), sampleOffset);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             // ── 4. Per-track render + gain + sum into master mix ───────────
             // renderScratch is the MASTER MIX accumulator.
@@ -197,6 +264,8 @@ MainComponent::MainComponent()
     addAndMakeVisible(topBar.get());
     addAndMakeVisible(browser);
     addAndMakeVisible(sessionView);
+    addAndMakeVisible(arrangementView);
+    arrangementView.setVisible(false);
     addAndMakeVisible(deviceView);
     addAndMakeVisible(patternEditor);
 
@@ -220,10 +289,19 @@ MainComponent::MainComponent()
     };
 
     // ── Transport ─────────────────────────────────────────────────────────────
-    topBar->playBtn.onClick = [this] { transportClock.play(); };
+    topBar->playBtn.onClick = [this] {
+        if (currentView == DAWView::Arrangement)
+            renderIsArrangementMode.store(true, std::memory_order_release);
+        
+        if (!transportClock.getIsPlaying()) {
+            renderTransportOffset.store(appBuffer.renderBlockPosition.load(std::memory_order_acquire), std::memory_order_release);
+        }
+        transportClock.play();
+    };
 
     topBar->stopBtn.onClick = [this] {
         transportClock.stop();
+        renderTransportOffset.store(appBuffer.renderBlockPosition.load(std::memory_order_acquire), std::memory_order_release);
         int nTracks = numActiveTracks.load(std::memory_order_relaxed);
         for (int t = 0; t < nTracks; ++t)
             audioTracks[t].commandQueue.push({ TrackCommand::Type::StopPattern, nullptr, 0 });
@@ -234,6 +312,18 @@ MainComponent::MainComponent()
                     sessionView.setClipData(t, s, clipGrid[t][s]);
                 }
         sessionView.setSceneActive(-1, false);
+    };
+
+    // ── View Toggle ───────────────────────────────────────────────────────────
+    topBar->onSwitchToSession = [this] {
+        switchToView(DAWView::Session);
+        topBar->sessionViewBtn.setToggleState(true, juce::dontSendNotification);
+        topBar->arrangeViewBtn.setToggleState(false, juce::dontSendNotification);
+    };
+    topBar->onSwitchToArrangement = [this] {
+        switchToView(DAWView::Arrangement);
+        topBar->arrangeViewBtn.setToggleState(true, juce::dontSendNotification);
+        topBar->sessionViewBtn.setToggleState(false, juce::dontSendNotification);
     };
 
     // ── Plugin Loading ────────────────────────────────────────────────────────
@@ -448,6 +538,7 @@ MainComponent::MainComponent()
 
         if (!transportClock.getIsPlaying()) {
             transportClock.stop(); // to ensure playhead zero
+            renderTransportOffset.store(appBuffer.renderBlockPosition.load(std::memory_order_acquire), std::memory_order_release);
             transportClock.play();
         }
 
@@ -509,6 +600,27 @@ MainComponent::MainComponent()
         }
     };
 
+    sessionView.onDuplicateClip = [this](int t, int s) {
+        if (t < 0 || t >= MAX_TRACKS) return;
+        auto& sourceClip = clipGrid[t][s];
+        if (!sourceClip.hasClip) return;
+        
+        int nextEmpty = -1;
+        for (int ns = s + 1; ns < NUM_SCENES; ++ns) {
+            if (!clipGrid[t][ns].hasClip) {
+                nextEmpty = ns;
+                break;
+            }
+        }
+        
+        if (nextEmpty != -1) {
+            ClipData copy = sourceClip;
+            copy.isPlaying = false; 
+            clipGrid[t][nextEmpty] = copy;
+            sessionView.setClipData(t, nextEmpty, copy);
+        }
+    };
+
     sessionView.onDeleteTrack = [this](int trackIndex) {
         int nTracks = numActiveTracks.load(std::memory_order_acquire);
         if (trackIndex < 0 || trackIndex >= nTracks) return;
@@ -552,6 +664,7 @@ MainComponent::MainComponent()
 
         if (!transportClock.getIsPlaying()) {
             transportClock.stop(); // zero playhead
+            renderTransportOffset.store(appBuffer.renderBlockPosition.load(std::memory_order_acquire), std::memory_order_release);
             transportClock.play();
         }
 
@@ -724,9 +837,78 @@ MainComponent::MainComponent()
         juce::ignoreUnused(t, name);
     };
 
+    sessionView.onSceneLabelClicked = [this] {
+        if (topBar)
+        {
+            if (topBar->onSwitchToArrangement)
+                topBar->onSwitchToArrangement();
+        }
+    };
+
     sessionView.onSetTrackColour = [this](int t, juce::Colour c) {
         // The TrackHeader already updated its own trackColour and repainted.
         juce::ignoreUnused(t, c);
+    };
+
+    arrangementView.onClipPlaced = [this](int trackIdx, double startBar, const ClipData& newClip) {
+        if (trackIdx >= 0 && trackIdx < MAX_TRACKS) {
+            ArrangementClip ac;
+            ac.trackIndex = trackIdx;
+            ac.startBar = startBar;
+            ac.lengthBars = newClip.patternLengthBars > 0.0 ? newClip.patternLengthBars : 1.0;
+            ac.data = newClip;
+            
+            if (ac.data.patternMode == "euclidean") {
+                regenerateEuclideanMidi(ac.data);
+            } else if (ac.data.patternMode == "drumrack") {
+                regenerateDrumRackMidi(ac.data);
+            }
+            // pianoroll clips already carry midiNotes from the piano roll editor
+            
+            arrangementTracks[trackIdx].push_back(ac);
+            syncArrangementFromSession();
+        }
+    };
+    
+    arrangementView.onClipDeleted = [this](ArrangementClip* clip) {
+        if (clip && clip->trackIndex >= 0 && clip->trackIndex < MAX_TRACKS) {
+            auto& trackClips = arrangementTracks[clip->trackIndex];
+            trackClips.erase(std::remove_if(trackClips.begin(), trackClips.end(),
+                [clip](const ArrangementClip& c) { return &c == clip; }), trackClips.end());
+            syncArrangementFromSession();
+        }
+    };
+
+    arrangementView.onClipMoved = [this](ArrangementClip* clip) {
+        // If trackIdx changed we need to move it to a different vector.
+        // For Phase 2 we assume it just moves within the same track or we handle it here:
+        if (clip) {
+            // Check if track index changed
+            bool found = false;
+            auto& oldTrackClips = arrangementTracks[clip->trackIndex];
+            for (auto it = oldTrackClips.begin(); it != oldTrackClips.end(); ++it) {
+                if (&(*it) == clip) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                // Track index changed during drag! We must move the clip.
+                // It's tricky to find where it was because clip->trackIndex is ALREADY the new one.
+                // Let's find it everywhere and move it.
+                ArrangementClip copy = *clip;
+                for (int t = 0; t < MAX_TRACKS; ++t) {
+                    auto& tc = arrangementTracks[t];
+                    auto it = std::remove_if(tc.begin(), tc.end(), [clip](const ArrangementClip& c) { return &c == clip; });
+                    if (it != tc.end()) {
+                        tc.erase(it, tc.end());
+                        break;
+                    }
+                }
+                arrangementTracks[copy.trackIndex].push_back(copy);
+            }
+            syncArrangementFromSession();
+        }
     };
 
     // ── Audio Device ──────────────────────────────────────────────────
@@ -740,6 +922,7 @@ MainComponent::MainComponent()
         deviceManager.setMidiInputDeviceEnabled(dev.identifier, true);
     deviceManager.addMidiInputDeviceCallback("", this);
 
+    setWantsKeyboardFocus(true);
     setSize(1200, 800);
     startTimerHz(30);
 }
@@ -874,7 +1057,87 @@ void MainComponent::resized()
         patternEditor.setVisible(false);
     }
 
-    sessionView.setBounds(bounds);
+    if (currentView == DAWView::Session)
+    {
+        sessionView.setVisible(true);
+        arrangementView.setVisible(false);
+        sessionView.setBounds(bounds);
+    }
+    else
+    {
+        sessionView.setVisible(false);
+        arrangementView.setVisible(true);
+        arrangementView.setBounds(bounds);
+    }
+}
+
+bool MainComponent::keyPressed (const juce::KeyPress& key)
+{
+    if (key == juce::KeyPress::tabKey)
+    {
+        if (currentView == DAWView::Session)
+        {
+            if (topBar && topBar->onSwitchToArrangement) topBar->onSwitchToArrangement();
+        }
+        else
+        {
+            if (topBar && topBar->onSwitchToSession) topBar->onSwitchToSession();
+        }
+        return true;
+    }
+    return false;
+}
+
+void MainComponent::switchToView(DAWView v)
+{
+    bool viewChanged = (currentView != v);
+    currentView = v;
+    renderIsArrangementMode.store(v == DAWView::Arrangement, std::memory_order_release);
+    if (v == DAWView::Arrangement)
+        syncArrangementFromSession(); // Always re-sync when entering Arrangement
+    if (viewChanged)
+        resized();
+}
+
+void MainComponent::syncArrangementFromSession()
+{
+    std::vector<ArrangementView::TrackState> tStates;
+    int nTracks = numActiveTracks.load(std::memory_order_relaxed);
+    
+    for (int t = 0; t < nTracks; ++t) {
+        ArrangementView::TrackState state;
+        state.name = "Track " + juce::String(t + 1);
+        
+        // Grab track name and color from SessionView's columns if available
+        if (t < sessionView.gridContent.columns.size()) {
+            if (auto* col = sessionView.gridContent.columns[t]) {
+                state.name = col->header.trackName;
+                state.colour = col->header.trackColour;
+            }
+        }
+        
+        // Gather clips present on this track
+        for (int s = 0; s < NUM_SCENES; ++s) {
+            if (clipGrid[t][s].hasClip) {
+                state.availableClips.push_back(clipGrid[t][s]);
+            }
+        }
+        
+        tStates.push_back(state);
+    }
+    
+    arrangementView.setTracksAndClips(tStates, arrangementTracks);
+
+    // ── Update Audio Engine lock-free timeline ─────────────────────────────
+    auto* newArrangement = new SharedArrangement();
+    for (int t = 0; t < MAX_TRACKS; ++t) {
+        newArrangement->tracks[t] = arrangementTracks[t];
+    }
+    
+    auto* oldArrangement = renderArrangement.exchange(newArrangement, std::memory_order_acq_rel);
+    if (oldArrangement) {
+        arrangementGarbageQueue.push(oldArrangement);
+    }
 }
 
 
@@ -987,6 +1250,16 @@ void MainComponent::timerCallback()
     // ── Targeted repaint: only top bar (shows transport clock) ────────────────
     if (topBar != nullptr)
         topBar->repaint();
+
+    // ── Update ArrangementView playhead ───────────────────────────────────────
+    if (currentView == DAWView::Arrangement) {
+        double currentBar = 1.0;
+        if (spb > 0.0) {
+            double currentBeats = static_cast<double>(playhead) / spb;
+            currentBar = 1.0 + (currentBeats / 4.0); // Assuming 4/4 time for now
+        }
+        arrangementView.setPlayheadBar(currentBar);
+    }
 }
 
 void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source,
@@ -1036,7 +1309,7 @@ void MainComponent::loadDeviceSettings()
 
 bool MainComponent::ensureWorkspaceDirectory()
 {
-    juce::File appDataDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("LinuxDAW");
+    juce::File appDataDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("LiBeDAW");
     if (!appDataDir.exists()) appDataDir.createDirectory();
     
     juce::File wfFile = appDataDir.getChildFile("workspace_pointer.txt");
@@ -1065,11 +1338,11 @@ void MainComponent::initialiseWorkspace()
                 if (result != juce::File{}) {
                     workspaceDirectory = result;
                 } else {
-                    workspaceDirectory = juce::File::getSpecialLocation(juce::File::userHomeDirectory).getChildFile("LinuxDAW_Projects");
+                    workspaceDirectory = juce::File::getSpecialLocation(juce::File::userHomeDirectory).getChildFile("LiBeDAW_Projects");
                 }
                 
                 workspaceDirectory.createDirectory();
-                juce::File appDataDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("LinuxDAW");
+                juce::File appDataDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("LiBeDAW");
                 appDataDir.createDirectory();
                 appDataDir.getChildFile("workspace_pointer.txt").replaceWithText(workspaceDirectory.getFullPathName());
                 
@@ -1088,10 +1361,10 @@ void MainComponent::finishInitialisation()
     workspaceDirectory.getChildFile("Projects").createDirectory();
     workspaceDirectory.getChildFile("Samples").createDirectory();
 
-    juce::File settingsFile = workspaceDirectory.getChildFile("Settings").getChildFile("LinuxDAW.settings");
+    juce::File settingsFile = workspaceDirectory.getChildFile("Settings").getChildFile("LiBeDAW.settings");
     
     juce::PropertiesFile::Options opts;
-    opts.applicationName = "LinuxDAW";
+    opts.applicationName = "LiBeDAW";
     opts.filenameSuffix  = "settings";
     userSettings = std::make_unique<juce::PropertiesFile>(settingsFile, opts);
 
@@ -1114,7 +1387,7 @@ void MainComponent::configureProjectMenu()
     };
 
     topBar->onOpenProject = [this] {
-        projectChooser = std::make_unique<juce::FileChooser>("Open Project...", workspaceDirectory.getChildFile("Projects"), "*.vtn");
+        projectChooser = std::make_unique<juce::FileChooser>("Open Project...", workspaceDirectory.getChildFile("Projects"), "*.LBD");
         projectChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
             [this](const juce::FileChooser& fc) {
                 auto result = fc.getResult();
@@ -1140,13 +1413,13 @@ void MainComponent::configureProjectMenu()
     };
 
     topBar->onSaveProjectAs = [this] {
-        projectChooser = std::make_unique<juce::FileChooser>("Save Project As...", workspaceDirectory.getChildFile("Projects"), "*.vtn");
+        projectChooser = std::make_unique<juce::FileChooser>("Save Project As...", workspaceDirectory.getChildFile("Projects"), "*.LBD");
         projectChooser->launchAsync(juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles,
             [this](const juce::FileChooser& fc) {
                 auto result = fc.getResult();
                 if (result != juce::File{}) {
-                    if (!result.hasFileExtension(".vtn")) {
-                        result = result.withFileExtension(".vtn");
+                    if (!result.hasFileExtension(".LBD")) {
+                        result = result.withFileExtension(".LBD");
                     }
                     currentProjectFile = result;
                     syncProjectToUI();
@@ -1361,7 +1634,13 @@ void MainComponent::syncUIToProject()
                                     }
                                     
                                     clipGrid[tIdx][sIdx] = d;
-                                    sessionView.setClipData(tIdx, sIdx, d);
+                                    // Bake MIDI so clips are arrangement-ready after project load
+                                    if (clipGrid[tIdx][sIdx].patternMode == "drumrack") {
+                                        regenerateDrumRackMidi(clipGrid[tIdx][sIdx]);
+                                    } else if (clipGrid[tIdx][sIdx].patternMode == "euclidean") {
+                                        regenerateEuclideanMidi(clipGrid[tIdx][sIdx]);
+                                    }
+                                    sessionView.setClipData(tIdx, sIdx, clipGrid[tIdx][sIdx]);
                                 }
                             }
                         }
@@ -1600,6 +1879,28 @@ void MainComponent::regenerateDrumRackMidi(ClipData& clip) {
                 n.velocity = 1.0f;
                 clip.midiNotes.push_back(n);
             }
+        }
+    }
+}
+
+void MainComponent::regenerateEuclideanMidi(ClipData& clip) {
+    clip.midiNotes.clear();
+    std::vector<uint8_t> map = clip.hitMap;
+    if (map.empty() && clip.euclideanPulses > 0) {
+        map.assign(clip.euclideanSteps, 0);
+        for (int i = 0; i < clip.euclideanSteps; ++i) {
+            map[i] = ((i * clip.euclideanPulses) % clip.euclideanSteps < clip.euclideanPulses) ? 1 : 0;
+        }
+    }
+    
+    for (int i = 0; i < clip.euclideanSteps; ++i) {
+        if (map[i] != 0) {
+            MidiNote n;
+            n.note = 60; // Middle C for euclidean synth playback
+            n.startBeat = (double)i * 0.25; // Assuming 16th notes
+            n.lengthBeats = 0.25;
+            n.velocity = 1.0f;
+            clip.midiNotes.push_back(n);
         }
     }
 }

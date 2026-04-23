@@ -1,10 +1,10 @@
 #include <JuceHeader.h>
 #include "MainComponent.h"
 
-class LinuxDAWApplication  : public juce::JUCEApplication
+class LiBeDAWApplication  : public juce::JUCEApplication
 {
 public:
-    LinuxDAWApplication() {}
+    LiBeDAWApplication() {}
 
     const juce::String getApplicationName() override       { return ProjectInfo::projectName; }
     const juce::String getApplicationVersion() override    { return ProjectInfo::versionString; }
@@ -64,4 +64,4 @@ private:
 };
 
 // This macro generates the main() routine that launches the app.
-START_JUCE_APPLICATION (LinuxDAWApplication)
+START_JUCE_APPLICATION (LiBeDAWApplication)

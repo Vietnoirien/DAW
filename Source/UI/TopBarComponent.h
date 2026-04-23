@@ -13,6 +13,23 @@ public:
         addAndMakeVisible(loadPluginBtn);
         addAndMakeVisible(settingsBtn);
         addAndMakeVisible(projectBtn);
+        addAndMakeVisible(sessionViewBtn);
+        addAndMakeVisible(arrangeViewBtn);
+
+        sessionViewBtn.setClickingTogglesState(true);
+        arrangeViewBtn.setClickingTogglesState(true);
+        sessionViewBtn.setRadioGroupId(1);
+        arrangeViewBtn.setRadioGroupId(1);
+        sessionViewBtn.setToggleState(true, juce::dontSendNotification);
+
+        sessionViewBtn.onClick = [this] {
+            if (sessionViewBtn.getToggleState() && onSwitchToSession)
+                onSwitchToSession();
+        };
+        arrangeViewBtn.onClick = [this] {
+            if (arrangeViewBtn.getToggleState() && onSwitchToArrangement)
+                onSwitchToArrangement();
+        };
 
         bpmSlider.setSliderStyle(juce::Slider::LinearBar);
         bpmSlider.setRange(20.0, 300.0, 1.0);
@@ -48,6 +65,10 @@ public:
     std::function<void()> onSaveProject;
     std::function<void()> onSaveProjectAs;
 
+    // View callbacks
+    std::function<void()> onSwitchToSession;
+    std::function<void()> onSwitchToArrangement;
+
     // Called by MainComponent after the settings dialog closes.
     // Assign a lambda here to persist the device state.
     std::function<void()> onSettingsClosed;
@@ -73,6 +94,16 @@ public:
         fb.items.add(juce::FlexItem(playBtn).withWidth(80).withHeight(30).withMargin(margin));
         fb.items.add(juce::FlexItem(stopBtn).withWidth(80).withHeight(30).withMargin(margin));
         fb.items.add(juce::FlexItem(bpmSlider).withWidth(100).withHeight(30).withMargin(margin));
+        
+        // Add some space before view buttons
+        juce::FlexBox viewFb;
+        viewFb.alignContent = juce::FlexBox::AlignContent::center;
+        viewFb.alignItems   = juce::FlexBox::AlignItems::center;
+        viewFb.items.add(juce::FlexItem(sessionViewBtn).withWidth(70).withHeight(30));
+        viewFb.items.add(juce::FlexItem(arrangeViewBtn).withWidth(70).withHeight(30));
+        
+        fb.items.add(juce::FlexItem(viewFb).withWidth(140).withHeight(30).withMargin(margin));
+        
         fb.items.add(juce::FlexItem(loadPluginBtn).withWidth(120).withHeight(30).withMargin(margin));
         fb.items.add(juce::FlexItem(settingsBtn).withWidth(110).withHeight(30).withMargin(margin));
 
@@ -84,6 +115,8 @@ public:
     juce::TextButton loadPluginBtn{"Load Plugin..."};
     juce::TextButton settingsBtn  {"\u2699 Settings"};
     juce::TextButton projectBtn   {"Project \u25BC"};
+    juce::TextButton sessionViewBtn{"SESSION"};
+    juce::TextButton arrangeViewBtn{"ARRANGE"};
     juce::Slider     bpmSlider;
 
 private:

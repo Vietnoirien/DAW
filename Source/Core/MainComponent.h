@@ -14,6 +14,7 @@
 #include "SessionView.h"
 #include "PatternEditor.h"
 #include "DeviceView.h"
+#include "ArrangementView.h"
 #include "ProjectManager.h"
 #include "../Instruments/InstrumentFactory.h"
 #include "../Instruments/DrumRackComponent.h"
@@ -224,6 +225,7 @@ public:
     // UI Helpers
     void showDeviceEditorForTrack(int trackIdx);
     void regenerateDrumRackMidi(ClipData& clip);
+    void regenerateEuclideanMidi(ClipData& clip);
     void loadAudioFileIntoDrumPad(int trackIdx, int padIndex, const juce::File& file);
     void updateDrumRackPatternEditor();
     
@@ -233,6 +235,7 @@ public:
 
     void paint   (juce::Graphics& g) override;
     void resized () override;
+    bool keyPressed (const juce::KeyPress& key) override;
 
     void handleIncomingMidiMessage (juce::MidiInput* source,
                                     const juce::MidiMessage& message) override;
@@ -282,8 +285,22 @@ private:
     std::unique_ptr<TopBarComponent> topBar;
     BrowserComponent browser;
     SessionView      sessionView;
+    ArrangementView  arrangementView;
     DeviceView       deviceView;
     PatternEditor    patternEditor;
+
+    enum class DAWView { Session, Arrangement };
+    DAWView currentView { DAWView::Session };
+    std::vector<ArrangementClip> arrangementTracks[MAX_TRACKS]; // UI-thread only
+
+    // ── Arrangement Engine (Thread-Safe) ─────────────────────────────────────
+    std::atomic<SharedArrangement*> renderArrangement {nullptr};
+    LockFreeQueue<SharedArrangement*, 16> arrangementGarbageQueue;
+    std::atomic<bool> renderIsArrangementMode {false};
+    std::atomic<int64_t> renderTransportOffset {0};
+
+    void switchToView(DAWView v);
+    void syncArrangementFromSession();
 
     // ── Level Meters ─────────────────────────────────────────────────────────
     float masterLevelDisplay = 0.0f;

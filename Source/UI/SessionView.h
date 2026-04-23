@@ -28,6 +28,7 @@ public:
     std::function<void()> onCreateClip;
     std::function<void()> onSelectClip;
     std::function<void()> onDeleteClip;
+    std::function<void()> onDuplicateClip;
     std::function<void(const juce::String&)> onRenameClip;
     std::function<void(juce::Colour)>        onSetClipColour;
 
@@ -139,6 +140,7 @@ public:
             {
                 juce::PopupMenu m;
                 m.addItem (1, "Rename Pattern");
+                m.addItem (3, "Duplicate Pattern");
                 m.addItem (2, "Delete Pattern");
                 addColourSubmenu (m, onSetClipColour);
                 m.showMenuAsync (juce::PopupMenu::Options(), [this](int result) {
@@ -157,6 +159,7 @@ public:
                             delete box;
                         }), true);
                     }
+                    else if (result == 3 && onDuplicateClip) onDuplicateClip();
                     else if (result == 2 && onDeleteClip) onDeleteClip();
                     else if (result >= 200)
                     {
@@ -351,6 +354,7 @@ public:
     std::function<void(int scene)> onSelectClipAt;
     std::function<void(int scene)> onLaunchClipAt;
     std::function<void(int scene)> onDeleteClipAt;
+    std::function<void(int scene)> onDuplicateClipAt;
     std::function<void()>          onSelectTrack;
     std::function<void()>          onDeleteTrack;
     std::function<void(float)>     onVolumeChanged;
@@ -378,6 +382,7 @@ public:
             slot->onSelectClip    = [this, s] { if (onSelectClipAt)    onSelectClipAt (s); };
             slot->onLaunchClip    = [this, s] { if (onLaunchClipAt)    onLaunchClipAt (s); };
             slot->onDeleteClip    = [this, s] { if (onDeleteClipAt)    onDeleteClipAt (s); };
+            slot->onDuplicateClip = [this, s] { if (onDuplicateClipAt) onDuplicateClipAt (s); };
             slot->onRenameClip    = [this, s] (const juce::String& n) { if (onRenameClipAt)    onRenameClipAt    (s, n); };
             slot->onSetClipColour = [this, s] (juce::Colour c)         { if (onSetClipColourAt) onSetClipColourAt (s, c); };
             addAndMakeVisible (slot);
@@ -713,6 +718,7 @@ public:
     std::function<void(int track, int scene)>                          onSelectClip;
     std::function<void(int track, int scene)>                          onLaunchClip;
     std::function<void(int track, int scene)>                          onDeleteClip;
+    std::function<void(int track, int scene)>                          onDuplicateClip;
     std::function<void(int trackIndex)>                                onSelectTrack;
     std::function<void(int trackIndex)>                                onDeleteTrack;
     std::function<void(int trackIndex, const juce::String& type)>      onInstrumentDropped;
@@ -735,6 +741,7 @@ public:
         col->onSelectClipAt = [this, idx] (int s) { if (onSelectClip) onSelectClip (idx, s); };
         col->onLaunchClipAt = [this, idx] (int s) { if (onLaunchClip) onLaunchClip (idx, s); };
         col->onDeleteClipAt = [this, idx] (int s) { if (onDeleteClip) onDeleteClip (idx, s); };
+        col->onDuplicateClipAt = [this, idx] (int s) { if (onDuplicateClip) onDuplicateClip (idx, s); };
         col->onSelectTrack  = [this, idx] () { if (onSelectTrack) onSelectTrack (idx); };
         col->onDeleteTrack  = [this, idx] () { if (onDeleteTrack) onDeleteTrack (idx); };
         col->onVolumeChanged = [this, idx] (float g) { if (onTrackVolumeChanged) onTrackVolumeChanged (idx, g); };
@@ -800,6 +807,7 @@ public:
                 columns[i]->onCreateClipAt = [this, i] (int s) { if (onCreateClip) onCreateClip (i, s); };
                 columns[i]->onSelectClipAt = [this, i] (int s) { if (onSelectClip) onSelectClip (i, s); };
                 columns[i]->onDeleteClipAt = [this, i] (int s) { if (onDeleteClip) onDeleteClip (i, s); };
+                columns[i]->onDuplicateClipAt = [this, i] (int s) { if (onDuplicateClip) onDuplicateClip (i, s); };
                 columns[i]->onSelectTrack  = [this, i] () { if (onSelectTrack) onSelectTrack (i); };
                 columns[i]->onDeleteTrack  = [this, i] () { if (onDeleteTrack) onDeleteTrack (i); };
                 columns[i]->onRenameTrack    = [this, i] (const juce::String& n) { if (onRenameTrack)    onRenameTrack    (i, n); };
@@ -817,6 +825,7 @@ public:
                     sl->onSelectClip = [this, i, s = sl->sceneIndex] { if (onSelectClip) onSelectClip (i, s); };
                     sl->onLaunchClip = [this, i, s = sl->sceneIndex] { if (onLaunchClip) onLaunchClip (i, s); };
                     sl->onDeleteClip = [this, i, s = sl->sceneIndex] { if (onDeleteClip) onDeleteClip (i, s); };
+                    sl->onDuplicateClip = [this, i, s = sl->sceneIndex] { if (onDuplicateClip) onDuplicateClip (i, s); };
                 }
             }
             resized();
@@ -893,6 +902,7 @@ public:
     std::function<void(int track, int scene)> onSelectClip;
     std::function<void(int track, int scene)> onLaunchClip;
     std::function<void(int track, int scene)> onDeleteClip;
+    std::function<void(int track, int scene)> onDuplicateClip;
     std::function<void(int track)>             onSelectTrack;
     std::function<void(int track)>             onDeleteTrack;
     std::function<void(int sceneIndex)>        onLaunchScene;
@@ -908,6 +918,7 @@ public:
     std::function<void(int track, int scene, juce::Colour)>        onSetClipColour;
     std::function<void(int trackIndex, const juce::String&)>       onRenameTrack;
     std::function<void(int trackIndex, juce::Colour)>              onSetTrackColour;
+    std::function<void()>                                          onSceneLabelClicked;
 
     SessionView()
     {
@@ -916,6 +927,7 @@ public:
         gridContent.onSelectClip = [this] (int t, int s) { if (onSelectClip)         onSelectClip (t, s); };
         gridContent.onLaunchClip = [this] (int t, int s) { if (onLaunchClip)         onLaunchClip (t, s); };
         gridContent.onDeleteClip = [this] (int t, int s) { if (onDeleteClip)         onDeleteClip (t, s); };
+        gridContent.onDuplicateClip = [this] (int t, int s) { if (onDuplicateClip)   onDuplicateClip(t, s); };
         gridContent.onSelectTrack = [this] (int t)       { if (onSelectTrack)        onSelectTrack(t); };
         gridContent.onDeleteTrack = [this] (int t)       { if (onDeleteTrack)        onDeleteTrack(t); };
         gridContent.onInstrumentDropped = [this] (int t, const juce::String& tp)
@@ -1063,6 +1075,17 @@ public:
         // Header separator
         g.setColour (juce::Colour (0xff252540));
         g.drawHorizontalLine (SV_HEADER_H, 0.0f, (float)getWidth());
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        // Check if click was in the SCENE label area
+        auto sceneLabelBounds = juce::Rectangle<int>(getWidth() - SV_SCENE_W, 0, SV_SCENE_W, SV_HEADER_H);
+        if (sceneLabelBounds.contains(e.getPosition()))
+        {
+            if (onSceneLabelClicked)
+                onSceneLabelClicked();
+        }
     }
 
     // ── DragAndDropTarget (on SessionView so Viewport doesn't block delivery) ─
