@@ -389,8 +389,12 @@ private:
     // ── Arrangement Engine (Thread-Safe) ─────────────────────────────────────
     std::atomic<SharedArrangement*> renderArrangement {nullptr};
     LockFreeQueue<SharedArrangement*, 16> arrangementGarbageQueue;
-    std::atomic<bool> renderIsArrangementMode {false};
+    std::atomic<bool>    renderIsArrangementMode {false};
     std::atomic<int64_t> renderTransportOffset {0};
+
+    // Pending seek: when >= 0 the render thread will consume this once and
+    // re-anchor itself.  Written on the message thread, read on render thread.
+    std::atomic<int64_t> pendingSeekSample {-1};
     
     std::atomic<bool> isExporting {false};
 

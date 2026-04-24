@@ -25,11 +25,32 @@ public:
         playheadPosition.store(0, std::memory_order_release);
     }
 
+    // Seek to an absolute sample position. Safe to call from the message thread.
+    // The render thread must re-anchor its transport offset after this call.
+    void seekTo(int64_t sample) {
+        playheadPosition.store(sample, std::memory_order_release);
+    }
+
     void advanceBy(int numSamples) {
         if (isPlaying.load(std::memory_order_acquire)) {
             playheadPosition.fetch_add(numSamples, std::memory_order_acq_rel);
         }
     }
+
+    // ── Loop region ───────────────────────────────────────────────────────────
+    void setLoop(int64_t startSample, int64_t endSample) {
+        loopStartSample.store(startSample, std::memory_order_relaxed);
+        loopEndSample.store  (endSample,   std::memory_order_relaxed);
+        loopEnabled.store    (true,         std::memory_order_release);
+    }
+
+    void clearLoop() {
+        loopEnabled.store(false, std::memory_order_release);
+    }
+
+    bool getLoopEnabled()      const { return loopEnabled.load(std::memory_order_acquire); }
+    int64_t getLoopStart()     const { return loopStartSample.load(std::memory_order_relaxed); }
+    int64_t getLoopEnd()       const { return loopEndSample.load(std::memory_order_relaxed); }
 
     bool getIsPlaying() const { return isPlaying.load(std::memory_order_acquire); }
     int64_t getPlayheadPosition() const { return playheadPosition.load(std::memory_order_acquire); }
@@ -63,9 +84,13 @@ private:
         }
     }
 
-    std::atomic<bool> isPlaying {false};
+    std::atomic<bool>    isPlaying {false};
     std::atomic<int64_t> playheadPosition {0}; // Absolute sample position since play start
-    std::atomic<double> bpm {120.0};
-    std::atomic<double> samplesPerBeat {0.0};
+    std::atomic<double>  bpm {120.0};
+    std::atomic<double>  samplesPerBeat {0.0};
     double sampleRate {44100.0};
+
+    std::atomic<bool>    loopEnabled     {false};
+    std::atomic<int64_t> loopStartSample {0};
+    std::atomic<int64_t> loopEndSample   {0};
 };

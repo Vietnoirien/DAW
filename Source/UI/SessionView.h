@@ -58,10 +58,24 @@ public:
             g.drawText (data.name, b.reduced (24, 0).toNearestInt(), juce::Justification::centredLeft);
 
             float tx = b.getX() + 12.0f, ty = b.getCentreY();
-            juce::Path tri;
-            tri.addTriangle (tx - 5.0f, ty - 5.0f, tx - 5.0f, ty + 5.0f, tx + 4.0f, ty);
-            g.setColour (data.isPlaying ? juce::Colours::limegreen : juce::Colours::white.withAlpha (0.5f));
-            g.fillPath (tri);
+            if (data.isPlaying)
+            {
+                // Pause icon: two vertical bars
+                g.setColour (juce::Colours::limegreen);
+                float bw = 3.0f, bh = 10.0f, gap = 3.0f;
+                float lx = tx - gap * 0.5f - bw;
+                float rx = tx + gap * 0.5f;
+                g.fillRect (lx, ty - bh * 0.5f, bw, bh);
+                g.fillRect (rx, ty - bh * 0.5f, bw, bh);
+            }
+            else
+            {
+                // Play triangle
+                juce::Path tri;
+                tri.addTriangle (tx - 5.0f, ty - 5.0f, tx - 5.0f, ty + 5.0f, tx + 4.0f, ty);
+                g.setColour (juce::Colours::white.withAlpha (0.5f));
+                g.fillPath (tri);
+            }
 
             if (data.isPlaying && playheadPhase >= 0.0f) {
                 float pieSize = 14.0f;
@@ -97,6 +111,7 @@ public:
     void mouseExit  (const juce::MouseEvent&) override { isHovered = false; repaint(); }
 
     std::function<void()> onLaunchClip;
+    std::function<void()> onPauseClip;
 
     // ── Colour palette shared across all clip / track menus ──────────────────
     static void addColourSubmenu (juce::PopupMenu& parent,
@@ -176,7 +191,11 @@ public:
         }
         else {
             if (e.x < 24) {
-                if (onLaunchClip) onLaunchClip();
+                if (data.isPlaying) {
+                    if (onPauseClip) onPauseClip();
+                } else {
+                    if (onLaunchClip) onLaunchClip();
+                }
             } else {
                 if (onSelectClip) onSelectClip();
             }
@@ -353,6 +372,7 @@ public:
     std::function<void(int scene)> onCreateClipAt;
     std::function<void(int scene)> onSelectClipAt;
     std::function<void(int scene)> onLaunchClipAt;
+    std::function<void(int scene)> onPauseClipAt;
     std::function<void(int scene)> onDeleteClipAt;
     std::function<void(int scene)> onDuplicateClipAt;
     std::function<void()>          onSelectTrack;
@@ -381,6 +401,7 @@ public:
             slot->onCreateClip    = [this, s] { if (onCreateClipAt)    onCreateClipAt (s); };
             slot->onSelectClip    = [this, s] { if (onSelectClipAt)    onSelectClipAt (s); };
             slot->onLaunchClip    = [this, s] { if (onLaunchClipAt)    onLaunchClipAt (s); };
+            slot->onPauseClip     = [this, s] { if (onPauseClipAt)     onPauseClipAt  (s); };
             slot->onDeleteClip    = [this, s] { if (onDeleteClipAt)    onDeleteClipAt (s); };
             slot->onDuplicateClip = [this, s] { if (onDuplicateClipAt) onDuplicateClipAt (s); };
             slot->onRenameClip    = [this, s] (const juce::String& n) { if (onRenameClipAt)    onRenameClipAt    (s, n); };
@@ -717,6 +738,7 @@ public:
     std::function<void(int track, int scene)>                          onCreateClip;
     std::function<void(int track, int scene)>                          onSelectClip;
     std::function<void(int track, int scene)>                          onLaunchClip;
+    std::function<void(int track, int scene)>                          onPauseClip;
     std::function<void(int track, int scene)>                          onDeleteClip;
     std::function<void(int track, int scene)>                          onDuplicateClip;
     std::function<void(int trackIndex)>                                onSelectTrack;
@@ -740,6 +762,7 @@ public:
         col->onCreateClipAt = [this, idx] (int s) { if (onCreateClip) onCreateClip (idx, s); };
         col->onSelectClipAt = [this, idx] (int s) { if (onSelectClip) onSelectClip (idx, s); };
         col->onLaunchClipAt = [this, idx] (int s) { if (onLaunchClip) onLaunchClip (idx, s); };
+        col->onPauseClipAt  = [this, idx] (int s) { if (onPauseClip)  onPauseClip  (idx, s); };
         col->onDeleteClipAt = [this, idx] (int s) { if (onDeleteClip) onDeleteClip (idx, s); };
         col->onDuplicateClipAt = [this, idx] (int s) { if (onDuplicateClip) onDuplicateClip (idx, s); };
         col->onSelectTrack  = [this, idx] () { if (onSelectTrack) onSelectTrack (idx); };
@@ -807,6 +830,7 @@ public:
                 columns[i]->onCreateClipAt = [this, i] (int s) { if (onCreateClip) onCreateClip (i, s); };
                 columns[i]->onSelectClipAt = [this, i] (int s) { if (onSelectClip) onSelectClip (i, s); };
                 columns[i]->onDeleteClipAt = [this, i] (int s) { if (onDeleteClip) onDeleteClip (i, s); };
+                columns[i]->onPauseClipAt  = [this, i] (int s) { if (onPauseClip)  onPauseClip  (i, s); };
                 columns[i]->onDuplicateClipAt = [this, i] (int s) { if (onDuplicateClip) onDuplicateClip (i, s); };
                 columns[i]->onSelectTrack  = [this, i] () { if (onSelectTrack) onSelectTrack (i); };
                 columns[i]->onDeleteTrack  = [this, i] () { if (onDeleteTrack) onDeleteTrack (i); };
@@ -824,6 +848,7 @@ public:
                     sl->onCreateClip = [this, i, s = sl->sceneIndex] { if (onCreateClip) onCreateClip (i, s); };
                     sl->onSelectClip = [this, i, s = sl->sceneIndex] { if (onSelectClip) onSelectClip (i, s); };
                     sl->onLaunchClip = [this, i, s = sl->sceneIndex] { if (onLaunchClip) onLaunchClip (i, s); };
+                    sl->onPauseClip  = [this, i, s = sl->sceneIndex] { if (onPauseClip)  onPauseClip  (i, s); };
                     sl->onDeleteClip = [this, i, s = sl->sceneIndex] { if (onDeleteClip) onDeleteClip (i, s); };
                     sl->onDuplicateClip = [this, i, s = sl->sceneIndex] { if (onDuplicateClip) onDuplicateClip (i, s); };
                 }
@@ -901,6 +926,7 @@ public:
     std::function<void(int track, int scene)> onCreateClip;
     std::function<void(int track, int scene)> onSelectClip;
     std::function<void(int track, int scene)> onLaunchClip;
+    std::function<void(int track, int scene)> onPauseClip;
     std::function<void(int track, int scene)> onDeleteClip;
     std::function<void(int track, int scene)> onDuplicateClip;
     std::function<void(int track)>             onSelectTrack;
@@ -926,6 +952,7 @@ public:
         gridContent.onCreateClip = [this] (int t, int s) { if (onCreateClip)         onCreateClip (t, s); };
         gridContent.onSelectClip = [this] (int t, int s) { if (onSelectClip)         onSelectClip (t, s); };
         gridContent.onLaunchClip = [this] (int t, int s) { if (onLaunchClip)         onLaunchClip (t, s); };
+        gridContent.onPauseClip  = [this] (int t, int s) { if (onPauseClip)          onPauseClip  (t, s); };
         gridContent.onDeleteClip = [this] (int t, int s) { if (onDeleteClip)         onDeleteClip (t, s); };
         gridContent.onDuplicateClip = [this] (int t, int s) { if (onDuplicateClip)   onDuplicateClip(t, s); };
         gridContent.onSelectTrack = [this] (int t)       { if (onSelectTrack)        onSelectTrack(t); };

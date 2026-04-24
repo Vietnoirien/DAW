@@ -380,6 +380,27 @@ public:
         content.repaint(); // Or specific area
     }
 
+    // ── Loop region API ───────────────────────────────────────────────────────
+    // Called by MainComponent to sync loop state (e.g. after project load or
+    // after the transport engine processed a loop wrap).
+    void setLoopRegion(double inBar, double outBar, bool active) {
+        content.loopInBar   = inBar;
+        content.loopOutBar  = outBar;
+        content.loopActive  = active;
+        content.repaint();
+    }
+
+    void clearLoopRegion() {
+        content.loopActive  = false;
+        content.loopInBar   = 1.0;
+        content.loopOutBar  = 1.0;
+        content.repaint();
+    }
+
+    bool getLoopActive()   const { return content.loopActive; }
+    double getLoopInBar()  const { return content.loopInBar; }
+    double getLoopOutBar() const { return content.loopOutBar; }
+
     // ── Arrangement Automation Overlay API ────────────────────────────────────
     // Show automation for 'paramId' on 'trackIndex'. trackClips must remain
     // valid for as long as the overlay is visible (owned by arrangementTracks).
@@ -531,6 +552,31 @@ private:
                 g.drawVerticalLine(x, ARR_HEADER_H, (float)getHeight());
             }
 
+            // Draw loop region bracket in ruler
+            if (loopActive && loopInBar < loopOutBar) {
+                int lx0 = barToPixel(loopInBar);
+                int lx1 = barToPixel(loopOutBar);
+                // Filled tint
+                g.setColour(juce::Colour(0xffffa500).withAlpha(0.22f));
+                g.fillRect(lx0, 0, lx1 - lx0, ARR_HEADER_H);
+                // Extend tint into track area
+                g.setColour(juce::Colour(0xffffa500).withAlpha(0.06f));
+                g.fillRect(lx0, ARR_HEADER_H, lx1 - lx0, getHeight() - ARR_HEADER_H);
+                // In/Out marker lines
+                g.setColour(juce::Colour(0xffffa500).withAlpha(0.9f));
+                g.drawVerticalLine(lx0, 0.0f, (float)ARR_HEADER_H);
+                g.drawVerticalLine(lx1, 0.0f, (float)ARR_HEADER_H);
+                // Bracket caps
+                g.fillRect(lx0, 0, 2, ARR_HEADER_H);
+                g.fillRect(lx1 - 1, 0, 2, ARR_HEADER_H);
+                // Label
+                g.setColour(juce::Colour(0xffffa500));
+                g.setFont(juce::Font(juce::FontOptions(9.0f)).boldened());
+                int labelW = lx1 - lx0 - 4;
+                if (labelW > 18)
+                    g.drawText("LOOP", lx0 + 4, 2, labelW, 12, juce::Justification::centredLeft);
+            }
+
             // Draw playhead
             if (playheadBar >= 1.0) {
                 int px = barToPixel(playheadBar);
@@ -583,7 +629,46 @@ private:
         }
 
         void mouseDown(const juce::MouseEvent& e) override {
-            if (e.y < ARR_HEADER_H) return;
+            // ── Ruler click / drag ──────────────────────────────────────────────
+            if (e.y < ARR_HEADER_H && e.x > ARR_TRACK_W) {
+                if (e.mods.isRightButtonDown()) {
+                    // Right-click: context menu to manage loop
+                    juce::PopupMenu m;
+                    m.addItem(1, loopActive ? "Disable Loop" : "Enable Loop");
+                    m.addItem(2, "Clear Loop");
+                    m.showMenuAsync(juce::PopupMenu::Options(), [this](int result) {
+                        if (result == 1) {
+                            loopActive = !loopActive;
+                            if (auto* parent = findParentComponentOfClass<ArrangementView>())
+                                if (parent->onLoopChanged)
+                                    parent->onLoopChanged(loopActive ? loopInBar : -1.0,
+                                                          loopActive ? loopOutBar : -1.0);
+                            repaint();
+                        } else if (result == 2) {
+                            loopActive = false;
+                            loopInBar  = 1.0;
+                            loopOutBar = 1.0;
+                            if (auto* parent = findParentComponentOfClass<ArrangementView>())
+                                if (parent->onLoopChanged) parent->onLoopChanged(-1.0, -1.0);
+                            repaint();
+                        }
+                    });
+                    return;
+                }
+                // Left-click or left-drag start
+                double clickedBar = pixelToBar(e.x);
+                clickedBar = std::max(1.0, clickedBar);
+                rulerDragStart = clickedBar;
+                // Snap to nearest bar for cleaner UX
+                // (hold Shift for sub-bar precision)
+                if (!e.mods.isShiftDown())
+                    clickedBar = std::round(clickedBar);
+                rulerDragInProgress = true;
+                // Fire seek immediately so clicking alone also repositions playhead
+                if (auto* parent = findParentComponentOfClass<ArrangementView>())
+                    if (parent->onPlayheadScrubbed) parent->onPlayheadScrubbed(clickedBar);
+                return;
+            }
 
             int trackIdx = yToTrackIndex(e.y);
             // -1 = ruler / below tracks, -2 = inside automation lane (overlay handles it)
@@ -647,6 +732,30 @@ private:
                     }
                 });
             }
+        }
+
+        void mouseDrag(const juce::MouseEvent& e) override {
+            if (!rulerDragInProgress) return;
+            double dragBar = pixelToBar(e.x);
+            dragBar = std::max(1.0, dragBar);
+            if (!e.mods.isShiftDown())
+                dragBar = std::round(dragBar);
+
+            double threshold = 0.5; // half-bar drag threshold before switching to loop mode
+            if (std::abs(dragBar - rulerDragStart) >= threshold) {
+                // Dragging — set loop region
+                loopInBar  = std::min(rulerDragStart, dragBar);
+                loopOutBar = std::max(rulerDragStart, dragBar);
+                if (loopInBar < 1.0) loopInBar = 1.0;
+                loopActive = true;
+                repaint();
+                if (auto* parent = findParentComponentOfClass<ArrangementView>())
+                    if (parent->onLoopChanged) parent->onLoopChanged(loopInBar, loopOutBar);
+            }
+        }
+
+        void mouseUp(const juce::MouseEvent&) override {
+            rulerDragInProgress = false;
         }
 
         void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override {
@@ -733,6 +842,13 @@ private:
         double pixelsPerBar = 80.0;
         std::vector<TrackState> trackStates;
         juce::OwnedArray<ArrClipBlock> clipBlocks;
+
+        // ── Loop region (UI state, mirrored to/from MainComponent) ────────────
+        double loopInBar        = 1.0;
+        double loopOutBar       = 5.0;
+        bool   loopActive       = false;
+        double rulerDragStart   = 1.0;
+        bool   rulerDragInProgress = false;
     };
 
     juce::Viewport     gridViewport;

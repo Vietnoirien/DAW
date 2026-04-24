@@ -49,12 +49,14 @@ struct ClipData
     // Pattern parameters stored for display and relaunching
     int           euclideanSteps  = 16;
     int           euclideanPulses = 4;
+    int           euclideanBars   = 1;   // 1, 2, or 4 bars duration
     std::vector<uint8_t> hitMap;   // custom per-step override (empty = use generate())
 
     // Drum Rack per-pad euclidean patterns
     struct PadPattern {
         int steps = 16;
         int pulses = 0;
+        int bars   = 1;   // 1, 2, or 4 bars
         std::vector<uint8_t> hitMap;
     };
     PadPattern drumPatterns[16];

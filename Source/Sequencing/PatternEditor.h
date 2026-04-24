@@ -176,6 +176,16 @@ public:
         setupSlider(stepsSlider, 1, 64, 16, "Steps");
         setupSlider(pulsesSlider, 0, 64, 4, "Pulses");
 
+        barsSelector.addItem("1 Bar",  1);
+        barsSelector.addItem("2 Bars", 2);
+        barsSelector.addItem("4 Bars", 4);
+        barsSelector.setSelectedId(1);
+        barsSelector.onChange = [this]() {
+            int bars = barsSelector.getSelectedId(); // 1, 2, or 4
+            if (onEuclideanBarsChanged) onEuclideanBarsChanged(bars);
+        };
+        addAndMakeVisible(barsSelector);
+
         modeSelector.addItem("Piano Roll", 1);
         modeSelector.addItem("Euclidean", 2);
         modeSelector.addItem("Automation", 3);
@@ -197,11 +207,18 @@ public:
     void resized() override {
         auto bounds = getLocalBounds();
         auto controls = bounds.removeFromLeft(120);
-        
-        modeSelector.setBounds(controls.removeFromTop(30).reduced(2));
-        auditionToggle.setBounds(controls.removeFromTop(30).reduced(2));
-        stepsSlider.setBounds(controls.removeFromTop(80).reduced(2));
-        pulsesSlider.setBounds(controls.removeFromTop(80).reduced(2));
+
+        // Mode selector always at top
+        modeSelector.setBounds(controls.removeFromTop(28).reduced(2));
+        // Audition toggle (piano roll only)
+        auditionToggle.setBounds(controls.removeFromTop(24).reduced(2));
+
+        // Sliders – compact height to leave room for bars selector
+        stepsSlider.setBounds(controls.removeFromTop(65).reduced(2));
+        pulsesSlider.setBounds(controls.removeFromTop(65).reduced(2));
+
+        // Bars selector
+        barsSelector.setBounds(controls.removeFromTop(28).reduced(2));
 
         euclideanViewer.setBounds(bounds);
         pianoRollViewer.setBounds(bounds);
@@ -231,6 +248,7 @@ public:
         
         stepsSlider.setVisible(isEuc);
         pulsesSlider.setVisible(isEuc);
+        barsSelector.setVisible(isEuc);
         auditionToggle.setVisible(modeId == 1);
     }
 
@@ -249,6 +267,11 @@ public:
         pulsesSlider.setValue (clip.euclideanPulses, juce::dontSendNotification);
         euclideanViewer.setParams (clip.euclideanPulses, clip.euclideanSteps);
 
+        // Restore bars selector (match stored value: 1, 2, or 4)
+        int bars = clip.euclideanBars;
+        if (bars != 1 && bars != 2 && bars != 4) bars = 1;
+        barsSelector.setSelectedId(bars, juce::dontSendNotification);
+
         if (!clip.hitMap.empty() && (int) clip.hitMap.size() == clip.euclideanSteps)
         {
             euclideanViewer.activeSteps = clip.hitMap;
@@ -266,7 +289,7 @@ public:
         updateMode();
     }
 
-    void loadDrumPadData(int steps, int pulses, const std::vector<uint8_t>& hitMap) {
+    void loadDrumPadData(int steps, int pulses, const std::vector<uint8_t>& hitMap, int bars = 1) {
         stepsSlider.setValue(steps, juce::dontSendNotification);
         pulsesSlider.setValue(pulses, juce::dontSendNotification);
         euclideanViewer.setParams(pulses, steps);
@@ -276,12 +299,15 @@ public:
             euclideanViewer.setParams(pulses, steps); // resets hitMap internally
         }
         euclideanViewer.repaint();
+        if (bars != 1 && bars != 2 && bars != 4) bars = 1;
+        barsSelector.setSelectedId(bars, juce::dontSendNotification);
         modeSelector.setSelectedId(2, juce::dontSendNotification);
         updateMode();
     }
 
     std::function<void(int pulses, int steps)> onEuclideanChanged;
     std::function<void(const std::vector<uint8_t>&)> onEuclideanHitMapChanged;
+    std::function<void(int bars)> onEuclideanBarsChanged;
     std::function<void(const std::vector<MidiNote>&)> onMidiNotesChanged;
     std::function<void(const juce::String&)> onModeChanged;
     std::function<void(int, int)> onAuditionNoteOn;
@@ -305,6 +331,7 @@ private:
     AutomationEditorViewer automationViewer;
     juce::Slider stepsSlider;
     juce::Slider pulsesSlider;
+    juce::ComboBox barsSelector;
     juce::ComboBox modeSelector;
     juce::ToggleButton auditionToggle;
 };

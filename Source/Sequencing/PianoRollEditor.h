@@ -432,6 +432,9 @@ private:
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  PianoRollViewer – assembles ruler + keyboard + editor inside a Viewport
+//  The keyboard is FIXED (outside the viewport) so it stays visible while
+//  scrolling horizontally. Vertical scroll is propagated by listening to
+//  the viewport's vertical scrollbar.
 // ─────────────────────────────────────────────────────────────────────────────
 class PianoRollViewer : public juce::Component,
                         private juce::ScrollBar::Listener
@@ -451,11 +454,13 @@ public:
         addAndMakeVisible(ruler);
         ruler.beatWidth = beatWidth;
 
-        // Scrollable area contains keyboard + editor side by side
+        // Fixed keyboard – rendered with the current vertical scroll offset
+        addAndMakeVisible(keyboardOverlay);
+
+        // Scrollable viewport (only contains the editor grid – NO keyboard)
         addAndMakeVisible(viewport);
-        container.addAndMakeVisible(keyboard);
-        container.addAndMakeVisible(editor);
-        viewport.setViewedComponent(&container, false);
+        viewport.setViewedComponent(&editor, false);
+        viewport.setScrollBarsShown(true, true);
 
         editor.beatWidth  = beatWidth;
         editor.noteHeight = noteHeight;
@@ -471,20 +476,23 @@ public:
             if (onAuditionNoteOff) onAuditionNoteOff(note);
         };
 
-        keyboard.onNoteOn = [this](int note, int vel) {
+        keyboardOverlay.onNoteOn = [this](int note, int vel) {
             if (onAuditionNoteOn) onAuditionNoteOn(note, vel);
         };
-        keyboard.onNoteOff = [this](int note) {
+        keyboardOverlay.onNoteOff = [this](int note) {
             if (onAuditionNoteOff) onAuditionNoteOff(note);
         };
 
-        // Listen to horizontal scrollbar to sync ruler
+        // Sync ruler to horizontal scroll
         viewport.getHorizontalScrollBar().addListener(this);
+        // Sync keyboard overlay to vertical scroll
+        viewport.getVerticalScrollBar().addListener(this);
     }
 
     ~PianoRollViewer() override
     {
         viewport.getHorizontalScrollBar().removeListener(this);
+        viewport.getVerticalScrollBar().removeListener(this);
     }
 
     void setNotes(const std::vector<MidiNote>& notes)
@@ -499,40 +507,144 @@ public:
         // ── Ruler: top strip, right of keyboard ──────────────────────────
         ruler.setBounds(keyboardWidth, 0, bounds.getWidth() - keyboardWidth, rulerHeight);
 
-        // ── Viewport: below ruler ─────────────────────────────────────────
-        viewport.setBounds(0, rulerHeight, bounds.getWidth(), bounds.getHeight() - rulerHeight);
+        // ── Fixed keyboard overlay: left column, below ruler ─────────────
+        keyboardOverlay.setBounds(0, rulerHeight,
+                                  keyboardWidth, bounds.getHeight() - rulerHeight);
+        keyboardOverlay.setScrollOffset(currentScrollY);
+
+        // ── Viewport: occupies the remaining area to the right ────────────
+        viewport.setBounds(keyboardWidth, rulerHeight,
+                           bounds.getWidth() - keyboardWidth,
+                           bounds.getHeight() - rulerHeight);
 
         int totalHeight = numNotes  * noteHeight;
-        int totalWidth  = keyboardWidth + (int)(numBars * beatsPerBar * beatWidth);
+        int totalWidth  = (int)(numBars * beatsPerBar * beatWidth);
 
-        container.setBounds(0, 0, totalWidth, totalHeight);
-        keyboard.setBounds(0, 0, keyboardWidth, totalHeight);
-        editor.setBounds(keyboardWidth, 0, totalWidth - keyboardWidth, totalHeight);
+        editor.setBounds(0, 0, totalWidth, totalHeight);
 
         // Default scroll to C4 area
         if (!hasScrolled)
         {
             int c4Y = (127 - 60) * noteHeight;
-            viewport.setViewPosition(0, c4Y - viewport.getHeight() / 2);
+            int startY = juce::jmax(0, c4Y - viewport.getHeight() / 2);
+            viewport.setViewPosition(0, startY);
+            currentScrollY = startY;
+            keyboardOverlay.setScrollOffset(currentScrollY);
             hasScrolled = true;
         }
     }
 
     std::function<void(const std::vector<MidiNote>&)> onNotesChanged;
     std::function<void(int, int)> onAuditionNoteOn;
-    std::function<void(int)> onAuditionNoteOff;
+    std::function<void(int)>      onAuditionNoteOff;
 
 private:
     void scrollBarMoved(juce::ScrollBar* sb, double) override
     {
         if (sb == &viewport.getHorizontalScrollBar())
             ruler.setScrollX((int)sb->getCurrentRangeStart());
+
+        if (sb == &viewport.getVerticalScrollBar())
+        {
+            currentScrollY = (int)sb->getCurrentRangeStart();
+            keyboardOverlay.setScrollOffset(currentScrollY);
+        }
     }
 
+    // ── Keyboard overlay component ───────────────────────────────────────────
+    // Paints piano keys directly, offset by scrollY. JUCE clips paint() to
+    // the component's own bounds, so this never overdraws outside the left panel.
+    struct KeyboardOverlay : public juce::Component
+    {
+        KeyboardOverlay() { setOpaque(true); }
+
+        void setScrollOffset(int y)
+        {
+            if (scrollY != y) { scrollY = y; repaint(); }
+        }
+
+        void paint(juce::Graphics& g) override
+        {
+            const int w = getWidth();
+            const int h = getHeight();
+            g.fillAll(juce::Colour(0xff1a1a24));
+
+            const int firstNote = scrollY / noteHeight;
+            const int lastNote  = juce::jmin(127, (scrollY + h) / noteHeight + 1);
+
+            for (int i = firstNote; i <= lastNote; ++i)
+            {
+                const int y            = i * noteHeight - scrollY;
+                const int noteInOctave = (127 - i) % 12;
+                const int octave       = (127 - i) / 12 - 2;
+                const bool isBlack     = (noteInOctave == 1 || noteInOctave == 3 ||
+                                          noteInOctave == 6 || noteInOctave == 8 ||
+                                          noteInOctave == 10);
+
+                if (isBlack)
+                {
+                    g.setColour(juce::Colour(0xff111118));
+                    g.fillRect(0, y, w * 2 / 3, noteHeight);
+                    g.setColour(juce::Colour(0xff2a2a38));
+                    g.fillRect(w * 2 / 3, y, w / 3, noteHeight);
+                }
+                else
+                {
+                    g.setColour(juce::Colour(0xfff0f0f8));
+                    g.fillRect(0, y, w, noteHeight);
+                    g.setColour(juce::Colour(0xff888899));
+                    g.drawLine(0.f, float(y + noteHeight), float(w), float(y + noteHeight), 0.5f);
+
+                    if (noteInOctave == 0)
+                    {
+                        g.setColour(juce::Colour(0xff333355));
+                        g.setFont(juce::Font(juce::FontOptions(10.f, juce::Font::bold)));
+                        g.drawText("C" + juce::String(octave), 2, y, w - 4, noteHeight,
+                                   juce::Justification::centredLeft);
+                    }
+                }
+            }
+
+            // Right border
+            g.setColour(juce::Colour(0xff3a3a55));
+            g.drawLine(float(w) - 1.f, 0.f, float(w) - 1.f, float(h), 1.5f);
+        }
+
+        void mouseDown(const juce::MouseEvent& e) override
+        {
+            currentNote = juce::jlimit(0, 127, 127 - (((int)e.position.y + scrollY) / noteHeight));
+            if (onNoteOn) onNoteOn(currentNote, 100);
+        }
+
+        void mouseDrag(const juce::MouseEvent& e) override
+        {
+            int note = juce::jlimit(0, 127, 127 - (((int)e.position.y + scrollY) / noteHeight));
+            if (note != currentNote)
+            {
+                if (currentNote != -1 && onNoteOff) onNoteOff(currentNote);
+                currentNote = note;
+                if (onNoteOn) onNoteOn(currentNote, 100);
+            }
+        }
+
+        void mouseUp(const juce::MouseEvent&) override
+        {
+            if (currentNote != -1 && onNoteOff) { onNoteOff(currentNote); currentNote = -1; }
+        }
+
+        std::function<void(int, int)> onNoteOn;
+        std::function<void(int)>      onNoteOff;
+
+    private:
+        int scrollY     = 0;
+        int currentNote = -1;
+        static constexpr int noteHeight = 16;
+    };
+
     juce::Viewport       viewport;
-    juce::Component      container;
-    PianoRollKeyboard    keyboard;
     PianoRollEditor      editor;
     PianoRollRuler       ruler;
-    bool                 hasScrolled = false;
+    KeyboardOverlay      keyboardOverlay;
+    int                  currentScrollY = 0;
+    bool                 hasScrolled    = false;
 };

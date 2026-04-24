@@ -336,7 +336,7 @@ public:
         {
             g.setColour (juce::Colours::grey);
             g.setFont (juce::Font (juce::FontOptions (12.0f)));
-            g.drawText (juce::String::fromUTF8 ("No plugins found.\nClick \xe2\x80\x9cAdd Folder\xe2\x80\xa6\xe2\x80\x9d to add a plugin directory."),
+            g.drawText (juce::String::fromUTF8 (u8"No plugins found.\nClick \u201cAdd Folder\u2026\u201d to add a plugin directory."),
                         getLocalBounds().reduced (12).withTrimmedTop (40),
                         juce::Justification::centredTop, true);
         }

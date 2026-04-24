@@ -301,6 +301,52 @@ void RenderThread::run()
             owner.masterTrack.rmsLevel.store(
                 std::sqrt(sumRmsMaster / (bs * nCh)), std::memory_order_relaxed);
 
+            // ── Pending seek (message thread → render thread) ─────────────
+            // If the user clicked the ruler (or called seekTo via any other
+            // path), pendingSeekSample will be >= 0.  We consume it exactly
+            // once here, re-anchor the transport offset and flush all notes.
+            {
+                int64_t seekTarget = owner.pendingSeekSample.exchange(-1, std::memory_order_acq_rel);
+                if (seekTarget >= 0) {
+                    // Re-anchor: offset = blockStart_AFTER_advance - seekTarget
+                    // We use (blockStart + bs) because renderBlockPosition will be
+                    // incremented below.  This way the NEXT block's transportSample = 0.
+                    owner.renderTransportOffset.store(
+                        (blockStart + bs) - seekTarget, std::memory_order_release);
+                    // Flush all held notes
+                    for (int t = 0; t < (int)owner.audioTracks.size(); ++t)
+                        owner.audioTracks[t]->midiBuffer.addEvent(
+                            juce::MidiMessage::allNotesOff(1), bs - 1);
+                }
+            }
+
+            // ── Loop-wrap (Arrangement mode only) ────────────────────────
+            if (isArrMode && owner.transportClock.getIsPlaying()
+                && owner.transportClock.getLoopEnabled())
+            {
+                double spb = owner.transportClock.getSamplesPerBeat();
+                if (spb > 0.0) {
+                    int64_t offset = owner.renderTransportOffset.load(std::memory_order_acquire);
+                    // Transport position at the END of this block
+                    double transportEndSample = static_cast<double>((blockStart + bs) - offset);
+                    double loopEndSmp  = static_cast<double>(owner.transportClock.getLoopEnd());
+                    double loopStrtSmp = static_cast<double>(owner.transportClock.getLoopStart());
+
+                    if (transportEndSample >= loopEndSmp && loopEndSmp > loopStrtSmp) {
+                        // Wrap: set playhead back to loop start for the next block
+                        int64_t seekTarget = owner.transportClock.getLoopStart();
+                        owner.transportClock.seekTo(seekTarget);
+                        // Re-anchor offset: next block's blockStart will be (blockStart + bs)
+                        owner.renderTransportOffset.store(
+                            (blockStart + bs) - seekTarget, std::memory_order_release);
+                        // Flush notes at end of this block
+                        for (int t = 0; t < (int)owner.audioTracks.size(); ++t)
+                            owner.audioTracks[t]->midiBuffer.addEvent(
+                                juce::MidiMessage::allNotesOff(1), bs - 1);
+                    }
+                }
+            }
+
             // ── 7. Advance render position counter ────────────────────────
             owner.appBuffer.renderBlockPosition.fetch_add(bs, std::memory_order_release);
 
@@ -309,6 +355,7 @@ void RenderThread::run()
         }
     }
 }
+
 
 // ════════════════════════════════════════════════════════════════════════════
 //  MainComponent
@@ -332,8 +379,8 @@ MainComponent::MainComponent()
 
 
     formatManager.registerBasicFormats();
-    pluginFormatManager.addFormat (new juce::VST3PluginFormat());
-    pluginFormatManager.addFormat (new juce::LV2PluginFormat());
+    pluginFormatManager.addFormat (std::make_unique<juce::VST3PluginFormat>());
+    pluginFormatManager.addFormat (std::make_unique<juce::LV2PluginFormat>());
 
 
     topBar = std::make_unique<TopBarComponent>(transportClock, deviceManager);
@@ -576,7 +623,7 @@ MainComponent::MainComponent()
     // Restore saved plugin search paths from userSettings, then add the default
     // Vital installer path so it shows up immediately on first launch.
     {
-        juce::File vitalDefault ("/home/vietnoirien/T\xc3\xa9l\xc3\xa9chargements/VitalInstaller/lib");
+        juce::File vitalDefault (u8"/home/vietnoirien/Téléchargements/VitalInstaller/lib");
         if (vitalDefault.isDirectory())
             browser.addPluginSearchPath (vitalDefault);
     }
@@ -599,7 +646,6 @@ MainComponent::MainComponent()
     };
 
 
-    // ── Pattern Editor ────────────────────────────────────────────────────────
     patternEditor.onEuclideanChanged = [this](int k, int n) {
         if (selectedTrackIndex < 0) return;
         if (selectedSceneIndex < 0) return;
@@ -630,8 +676,47 @@ MainComponent::MainComponent()
             if (clip.isPlaying) {
                 double scheduleTime = transportClock.getIsPlaying() ? transportClock.getNextBarPosition() : 0.0;
                 auto* p = euclideanPool.rentPattern();
+                p->setBars(clip.euclideanBars);
                 p->generate(k, n);
                 clip.hitMap.assign(p->getHitMap().begin(), p->getHitMap().end());
+                audioTracks[selectedTrackIndex]->commandQueue.push(
+                    { TrackCommand::Type::PlayPattern, p, scheduleTime });
+            }
+        }
+    };
+
+    patternEditor.onEuclideanBarsChanged = [this](int bars) {
+        if (selectedTrackIndex < 0) return;
+        if (selectedSceneIndex < 0) return;
+
+        auto& clip = clipGrid[selectedTrackIndex][selectedSceneIndex];
+
+        if (trackInstruments[selectedTrackIndex] == "DrumRack") {
+            auto& pad = clip.drumPatterns[selectedDrumPadIndex];
+            pad.bars = bars;
+            // DrumRack uses MidiPattern – update the pattern length in bars
+            clip.patternLengthBars = bars;
+            if (clip.isPlaying) {
+                double scheduleTime = transportClock.getIsPlaying() ? transportClock.getNextBarPosition() : 0.0;
+                auto* p = midiPool.rentPattern();
+                p->setNotes(clip.midiNotes, clip.patternLengthBars);
+                audioTracks[selectedTrackIndex]->commandQueue.push(
+                    { TrackCommand::Type::PlayPattern, p, scheduleTime });
+            }
+        } else {
+            clip.euclideanBars = bars;
+
+            if (clip.isPlaying) {
+                double scheduleTime = transportClock.getIsPlaying() ? transportClock.getNextBarPosition() : 0.0;
+                auto* p = euclideanPool.rentPattern();
+                p->setBars(bars);
+                if (!clip.hitMap.empty())
+                    p->setHitMap(clip.hitMap);
+                else {
+                    p->generate(clip.euclideanPulses, clip.euclideanSteps);
+                    clip.hitMap.assign(p->getHitMap().begin(), p->getHitMap().end());
+                }
+                p->automationLanes = clip.automationLanes;
                 audioTracks[selectedTrackIndex]->commandQueue.push(
                     { TrackCommand::Type::PlayPattern, p, scheduleTime });
             }
@@ -663,6 +748,7 @@ MainComponent::MainComponent()
             if (clip.isPlaying) {
                 double scheduleTime = transportClock.getIsPlaying() ? transportClock.getNextBarPosition() : 0.0;
                 auto* p = euclideanPool.rentPattern();
+                p->setBars(clip.euclideanBars);
                 p->setHitMap(map);
                 audioTracks[selectedTrackIndex]->commandQueue.push(
                     { TrackCommand::Type::PlayPattern, p, scheduleTime });
@@ -740,6 +826,7 @@ MainComponent::MainComponent()
                 p = mp;
             } else {
                 auto* ep = euclideanPool.rentPattern();
+                ep->setBars(clip.euclideanBars);
                 ep->setHitMap(clip.hitMap);
                 p = ep;
             }
@@ -874,6 +961,7 @@ MainComponent::MainComponent()
             p = mp;
         } else {
             auto* ep = euclideanPool.rentPattern();
+            ep->setBars(clip.euclideanBars);
             if (!clip.hitMap.empty()) {
                 ep->setHitMap(clip.hitMap);
             } else {
@@ -898,6 +986,26 @@ MainComponent::MainComponent()
             { TrackCommand::Type::PlayPattern, p, scheduleTime });
         clip.isPlaying = true;
         sessionView.setClipData(t, s, clip);
+    };
+
+    sessionView.onPauseClip = [this](int t, int s) {
+        if (t < 0 || t >= (int)audioTracks.size()) return;
+        auto& clip = clipGrid[t][s];
+        if (!clip.isPlaying) return;
+
+        audioTracks[t]->commandQueue.push({ TrackCommand::Type::StopPattern, nullptr, 0 });
+        clip.isPlaying = false;
+        sessionView.setClipData(t, s, clip);
+
+        // If no other clip is playing on any track, stop the transport clock
+        bool anyPlaying = false;
+        int nTracks = numActiveTracks.load(std::memory_order_relaxed);
+        for (int ti = 0; ti < nTracks && !anyPlaying; ++ti)
+            for (int si = 0; si < NUM_SCENES && !anyPlaying; ++si)
+                if (clipGrid[ti][si].isPlaying) anyPlaying = true;
+
+        if (!anyPlaying)
+            transportClock.stop();
     };
 
     sessionView.onSelectTrack = [this](int t) {
@@ -1011,6 +1119,7 @@ MainComponent::MainComponent()
                     p = mp;
                 } else {
                     auto* ep = euclideanPool.rentPattern();
+                    ep->setBars(clip.euclideanBars);
                     if (!clip.hitMap.empty()) {
                         ep->setHitMap(clip.hitMap);
                     } else {
@@ -1295,6 +1404,41 @@ MainComponent::MainComponent()
     // a new SharedArrangement so the render thread evaluates the updated lanes.
     arrangementView.automationOverlay.onAutomationChanged = [this]() {
         syncArrangementFromSession();
+    };
+
+    // ── Timeline seek: left-click on the ruler ────────────────────────────────
+    // The render thread will re-anchor its renderTransportOffset via pendingSeekSample.
+    arrangementView.onPlayheadScrubbed = [this](double bar) {
+        double spb = transportClock.getSamplesPerBeat();
+        if (spb <= 0.0) return;
+        // Convert bar (1-based) → sample
+        int64_t seekSample = static_cast<int64_t>((bar - 1.0) * 4.0 * spb);
+        if (seekSample < 0) seekSample = 0;
+        // Update the global transport position (read by timerCallback for UI)
+        transportClock.seekTo(seekSample);
+        // Tell the render thread to re-anchor on the next block
+        pendingSeekSample.store(seekSample, std::memory_order_release);
+        // Flush any currently held notes (message-thread side, for Session mode)
+        const int n = numActiveTracks.load(std::memory_order_relaxed);
+        for (int t = 0; t < n; ++t)
+            audioTracks[t]->commandQueue.push({ TrackCommand::Type::FlushNotes, nullptr, -1.0 });
+    };
+
+    // ── Loop region: drag on the ruler ────────────────────────────────────────
+    // loopIn/loopOut == -1 means the loop was cleared/disabled.
+    arrangementView.onLoopChanged = [this](double loopIn, double loopOut) {
+        if (loopIn < 0.0 || loopOut < 0.0 || loopIn >= loopOut) {
+            transportClock.clearLoop();
+        } else {
+            double spb = transportClock.getSamplesPerBeat();
+            if (spb > 0.0) {
+                int64_t startSmp = static_cast<int64_t>((loopIn  - 1.0) * 4.0 * spb);
+                int64_t endSmp   = static_cast<int64_t>((loopOut - 1.0) * 4.0 * spb);
+                if (startSmp < 0) startSmp = 0;
+                if (endSmp <= startSmp) endSmp = startSmp + 1;
+                transportClock.setLoop(startSmp, endSmp);
+            }
+        }
     };
 
     // ── Audio Device ──────────────────────────────────────────────────
@@ -1734,7 +1878,7 @@ void MainComponent::loadDeviceSettings()
     }
     // Always ensure the downloaded Vital path is in the list
     {
-        juce::File vitalDefault ("/home/vietnoirien/T\xc3\xa9l\xc3\xa9chargements/VitalInstaller/lib");
+        juce::File vitalDefault (u8"/home/vietnoirien/Téléchargements/VitalInstaller/lib");
         if (vitalDefault.isDirectory())
             browser.addPluginSearchPath (vitalDefault);
     }
@@ -2041,6 +2185,7 @@ void MainComponent::syncUIToProject()
                                         : juce::Colour ((juce::uint32)(juce::int64)clipArgbProp);
                                     d.euclideanSteps  = clipNode.getProperty("euclideanSteps",  16);
                                     d.euclideanPulses = clipNode.getProperty("euclideanPulses", 4);
+                                    d.euclideanBars   = clipNode.getProperty("euclideanBars",   1);
                                     // Restore custom hitMap from hex string if present.
                                     juce::String hex = clipNode.getProperty("hitMap", "");
                                     if (hex.isNotEmpty() && hex.length() % 2 == 0) {
@@ -2142,6 +2287,7 @@ void MainComponent::syncUIToProject()
                                     d.colour = clipArgbProp.isVoid() ? juce::Colour (0xff2d89ef) : juce::Colour ((juce::uint32)(juce::int64)clipArgbProp);
                                     d.euclideanSteps  = clipNode.getProperty("euclideanSteps",  16);
                                     d.euclideanPulses = clipNode.getProperty("euclideanPulses", 4);
+                                    d.euclideanBars   = clipNode.getProperty("euclideanBars",   1);
                                     juce::String hex = clipNode.getProperty("hitMap", "");
                                     if (hex.isNotEmpty() && hex.length() % 2 == 0) {
                                         d.hitMap.clear();
@@ -2304,6 +2450,7 @@ void MainComponent::syncProjectToUI()
                 clipNode.setProperty("colour", (juce::int64)clip.colour.getARGB(), nullptr);
                 clipNode.setProperty("euclideanSteps",  clip.euclideanSteps,  nullptr);
                 clipNode.setProperty("euclideanPulses", clip.euclideanPulses, nullptr);
+                clipNode.setProperty("euclideanBars",   clip.euclideanBars,   nullptr);
                 // Serialize hitMap as a hex string so custom patterns survive save/load.
                 if (!clip.hitMap.empty()) {
                     juce::String hex;
@@ -2384,6 +2531,7 @@ void MainComponent::syncProjectToUI()
             innerClipNode.setProperty("colour", (juce::int64)aClip.data.colour.getARGB(), nullptr);
             innerClipNode.setProperty("euclideanSteps", aClip.data.euclideanSteps, nullptr);
             innerClipNode.setProperty("euclideanPulses", aClip.data.euclideanPulses, nullptr);
+            innerClipNode.setProperty("euclideanBars", aClip.data.euclideanBars, nullptr);
             if (!aClip.data.hitMap.empty()) {
                 juce::String hex;
                 for (uint8_t b : aClip.data.hitMap) hex += juce::String::toHexString(b).paddedLeft('0', 2);
@@ -2821,7 +2969,13 @@ void MainComponent::exportProject(const juce::File& outputFile, const juce::Stri
     }
     
     juce::WavAudioFormat wavFormat;
-    std::unique_ptr<juce::AudioFormatWriter> writer(wavFormat.createWriterFor(outStream.get(), currentSampleRate, 2, 16, {}, 0));
+    const auto writerOpts = juce::AudioFormatWriterOptions{}
+                                .withSampleRate        (currentSampleRate)
+                                .withNumChannels       (2)
+                                .withBitsPerSample     (16)
+                                .withQualityOptionIndex(0);
+    auto ownedStream = std::unique_ptr<juce::OutputStream>(outStream.release());
+    std::unique_ptr<juce::AudioFormatWriter> writer(wavFormat.createWriterFor(ownedStream, writerOpts));
     if (!writer) {
         isExporting.store(false, std::memory_order_release);
         juce::MessageManager::callAsync([]() {
@@ -2829,7 +2983,7 @@ void MainComponent::exportProject(const juce::File& outputFile, const juce::Stri
         });
         return;
     }
-    outStream.release(); // Writer takes ownership
+    // ownedStream ownership transferred to writer above
     
     // 3. Reset internal ring buffer and transport
     transportClock.stop();

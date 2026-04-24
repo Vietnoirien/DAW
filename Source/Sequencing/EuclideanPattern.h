@@ -10,6 +10,11 @@ public:
         hitMap.reserve(64); // Support up to 64 steps without reallocation
     }
 
+    // Number of bars this pattern spans (1, 2, or 4)
+    // The step duration is scaled so all steps fit within `bars` bars.
+    void setBars(int b) { numBars = std::max(1, b); }
+    int  getBars() const { return numBars; }
+
     // Bjorklund's algorithm equivalent using Bresenham line approach
     // k = pulses (hits), n = steps 
     void generate(int k, int n) {
@@ -40,9 +45,10 @@ public:
         double spb = transport.getSamplesPerBeat();
         if (spb <= 0.0) return;
 
-        double stepDurationSamples = spb / 4.0;
+        // Scale step duration so `numBars` bars are covered by all steps
         int n = static_cast<int>(hitMap.size());
-        double patternLengthSamples = stepDurationSamples * n;
+        double patternLengthSamples = spb * 4.0 * numBars; // bars × beats/bar × samples/beat
+        double stepDurationSamples  = patternLengthSamples / n;
 
         // Ensure phase is strictly positive relative to the start sample
         if (static_cast<double>(blockStartSample + numSamples) <= patternStartSample) return;
@@ -97,9 +103,10 @@ public:
     }
 
     double getLengthBeats() const override {
-        return static_cast<double>(hitMap.size()) / 4.0;
+        return static_cast<double>(numBars) * 4.0;
     }
 
 private:
     std::vector<uint8_t> hitMap; // uint8_t is thread safer and faster than vector<bool>
+    int numBars { 1 };
 };

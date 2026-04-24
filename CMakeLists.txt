@@ -66,3 +66,14 @@ target_link_libraries(LiBeDAW PRIVATE
     juce::juce_audio_processors
     juce::juce_audio_utils
     juce::juce_dsp)
+
+# ── Post-build: create a symlink at LiBeDAW_artefacts/LiBeDAW ─────────────────
+# JUCE places the binary under LiBeDAW_artefacts/<Config>/LiBeDAW (e.g. Debug/
+# or Release/).  The symlink at the parent level keeps `./build/LiBeDAW_artefacts/LiBeDAW`
+# working regardless of the chosen build type, matching what the README documents.
+add_custom_command(TARGET LiBeDAW POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E create_symlink
+        $<CONFIG>/LiBeDAW
+        ${CMAKE_CURRENT_BINARY_DIR}/LiBeDAW_artefacts/LiBeDAW
+    COMMENT "Creating LiBeDAW_artefacts/LiBeDAW symlink → $<CONFIG>/LiBeDAW"
+)

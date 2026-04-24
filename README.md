@@ -127,12 +127,25 @@ cmake --build build -j$(nproc)
 
 > **JUCE**: fetched automatically via CMake `FetchContent` (JUCE **8.0.12**).
 
-The binary will be at `build/LiBeDAW_artefacts/LiBeDAW`.
+JUCE places the binary inside a configuration subfolder:
+
+| Build type | Binary path |
+|---|---|
+| Release (recommended) | `build/LiBeDAW_artefacts/Release/LiBeDAW` |
+| Debug | `build/LiBeDAW_artefacts/Debug/LiBeDAW` |
+
+A convenience **symlink** is created automatically at `build/LiBeDAW_artefacts/LiBeDAW` pointing to whichever configuration was last built, so the run command below always works.
 
 ### Run
 
 ```bash
 ./build/LiBeDAW_artefacts/LiBeDAW
+```
+
+Or run the configuration binary directly:
+
+```bash
+./build/LiBeDAW_artefacts/Release/LiBeDAW
 ```
 
 ---
@@ -157,6 +170,8 @@ The binary will be at `build/LiBeDAW_artefacts/LiBeDAW`.
 
 - [x] Arrangement View
 - [x] VST3 plugin rack in Device View (Plugins browser tab, per-track, show/hide editor)
+- [x] Piano Roll — keyboard stays fixed when scrolling horizontally; vertical scroll syncs
+- [x] Euclidean Sequencer — configurable pattern duration (1 / 2 / 4 bars)
 - [ ] CLAP plugin hosting (pending JUCE 9 native support)
 - [ ] Piano-roll quantization & velocity editing
 - [ ] MIDI controller mapping
