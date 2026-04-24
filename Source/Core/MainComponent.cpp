@@ -66,7 +66,9 @@ void RenderThread::run()
             auto* currArrangement = owner.renderArrangement.load(std::memory_order_acquire);
 
             auto evaluateAutomation = [](const std::list<AutomationLane>& lanes, double localBeat, Track* track) {
-                if (lanes.empty() || track->automationRegistry.empty()) return;
+                if (lanes.empty()) return;
+                juce::SpinLock::ScopedTryLockType sl(track->automationLock);
+                if (!sl.isLocked() || track->automationRegistry.empty()) return;
                 for (const auto& lane : lanes) {
                     if (lane.points.empty()) continue;
                     auto it = track->automationRegistry.find(lane.parameterId);
@@ -213,6 +215,19 @@ void RenderThread::run()
                     }
                 }
 
+                // ── Safe instrument GC ────────────────────────────────────────
+                // We drain the queue HERE (after processBlock) so the render
+                // thread is guaranteed no longer using the old pointer.
+                // Deletion is posted to the MESSAGE thread via callAsync because
+                // AudioPluginInstance destructors may interact with the message
+                // loop (window deletion, VST3 host callbacks, etc.) and would
+                // deadlock or crash if called directly on the render thread.
+                while (auto opt = owner.audioTracks[t]->instrumentGarbageQueue.pop())
+                {
+                    InstrumentProcessor* dead = *opt;
+                    juce::MessageManager::callAsync ([dead] { delete dead; });
+                }
+
                 const float tSendALevel = audible ? owner.audioTracks[t]->sendALevel.load(std::memory_order_relaxed) : 0.0f;
 
                 // Accumulate track (with effective gain) into master mix and send to return A (post-fader)
@@ -317,11 +332,14 @@ MainComponent::MainComponent()
 
 
     formatManager.registerBasicFormats();
-    pluginFormatManager.addDefaultFormats();
+    pluginFormatManager.addFormat (new juce::VST3PluginFormat());
+    pluginFormatManager.addFormat (new juce::LV2PluginFormat());
+
 
     topBar = std::make_unique<TopBarComponent>(transportClock, deviceManager);
     addAndMakeVisible(topBar.get());
     addAndMakeVisible(browser);
+    addAndMakeVisible(browserResizer);
     addAndMakeVisible(sessionView);
     addAndMakeVisible(arrangementView);
     arrangementView.setVisible(false);
@@ -395,6 +413,7 @@ MainComponent::MainComponent()
                 float defaultVal = 0.5f;
                 if (arrTrackIdx >= 0 && arrTrackIdx < (int)audioTracks.size()) {
                     if (auto* track = audioTracks[arrTrackIdx].get()) {
+                        juce::SpinLock::ScopedLockType sl(track->automationLock);
                         auto it = track->automationRegistry.find(paramId);
                         if (it != track->automationRegistry.end() && it->second.ptr != nullptr) {
                             float rawVal = it->second.ptr->load(std::memory_order_relaxed);
@@ -432,6 +451,7 @@ MainComponent::MainComponent()
 
                     float defaultVal = 0.5f;
                     if (auto* track = audioTracks[selectedTrackIndex].get()) {
+                        juce::SpinLock::ScopedLockType sl(track->automationLock);
                         auto it = track->automationRegistry.find(paramId);
                         if (it != track->automationRegistry.end() && it->second.ptr != nullptr) {
                             float rawVal = it->second.ptr->load(std::memory_order_relaxed);
@@ -447,6 +467,35 @@ MainComponent::MainComponent()
             }
         }
         DBG("Parameter focused for automation: " << paramId);
+
+        // ── Immediately refresh the device-view automation markers ─────────────
+        // Build the indicator map from whatever lanes are now present for the
+        // current context (arrangement clip or session clip).
+        std::unordered_map<juce::String, DeviceView::AutomationParamInfo> autoInfo;
+        auto collectLanes = [&](const std::list<AutomationLane>& lanes) {
+            for (const auto& lane : lanes) {
+                if (lane.points.empty()) continue;
+                float minV = lane.points[0].value, maxV = lane.points[0].value;
+                for (const auto& pt : lane.points) {
+                    minV = std::min(minV, pt.value);
+                    maxV = std::max(maxV, pt.value);
+                }
+                autoInfo[lane.parameterId] = { true, minV, maxV };
+            }
+        };
+
+        if (currentView == DAWView::Arrangement) {
+            if (selectedArrangementClip != nullptr)
+                collectLanes(selectedArrangementClip->automationLanes);
+        } else {
+            if (selectedTrackIndex >= 0 && selectedSceneIndex >= 0
+                && selectedSceneIndex < NUM_SCENES
+                && selectedTrackIndex < (int)clipGrid.size())
+            {
+                collectLanes(clipGrid[selectedTrackIndex][selectedSceneIndex].automationLanes);
+            }
+        }
+        deviceView.updateAutomationIndicators(autoInfo);
     };
 
     // ── Transport ─────────────────────────────────────────────────────────────
@@ -523,51 +572,32 @@ MainComponent::MainComponent()
             });
     };
 
-    // ── Plugin Loading ────────────────────────────────────────────────────────
-    topBar->loadPluginBtn.onClick = [this] {
-        myChooser = std::make_unique<juce::FileChooser>("Select a VST3 or LV2 Plugin...",
-            juce::File::getSpecialLocation(juce::File::userHomeDirectory), "*.vst3;*.lv2");
-        myChooser->launchAsync(
-            juce::FileBrowserComponent::openMode |
-            juce::FileBrowserComponent::canSelectFiles |
-            juce::FileBrowserComponent::canSelectDirectories,
-            [this](const juce::FileChooser& fc) {
-                auto file = fc.getResult();
-                if (file == juce::File{}) return;
+    // ── Plugin Browser (Plugins tab in BrowserComponent) ──────────────────────
+    // Restore saved plugin search paths from userSettings, then add the default
+    // Vital installer path so it shows up immediately on first launch.
+    {
+        juce::File vitalDefault ("/home/vietnoirien/T\xc3\xa9l\xc3\xa9chargements/VitalInstaller/lib");
+        if (vitalDefault.isDirectory())
+            browser.addPluginSearchPath (vitalDefault);
+    }
 
-                juce::String errorMessage;
-                for (auto* format : pluginFormatManager.getFormats()) {
-                    if (!format->fileMightContainThisPluginType(file.getFullPathName())) continue;
-                    juce::OwnedArray<juce::PluginDescription> foundPlugins;
-                    format->findAllTypesForFile(foundPlugins, file.getFullPathName());
-                    if (foundPlugins.isEmpty()) continue;
-
-                    auto instance = format->createInstanceFromDescription(
-                        *foundPlugins[0], currentSampleRate, currentBufferSize, errorMessage);
-                    if (instance == nullptr) {
-                        juce::Logger::writeToLog("Plugin load failed: " + errorMessage);
-                        continue;
-                    }
-
-                    instance->prepareToPlay(currentSampleRate, currentBufferSize);
-                    pluginWindow = nullptr;
-
-                    if (instance->hasEditor()) {
-                        pluginWindow = std::make_unique<juce::DocumentWindow>(
-                            "Plugin Editor", juce::Colours::lightgrey,
-                            juce::DocumentWindow::closeButton);
-                        if (auto* editor = instance->createEditorIfNeeded()) {
-                            pluginWindow->setContentOwned(editor, true);
-                            pluginWindow->setResizable(true, false);
-                            pluginWindow->centreWithSize(editor->getWidth(), editor->getHeight());
-                            pluginWindow->setVisible(true);
-                        }
-                    }
-                    pluginLoadQueue.push(instance.release());
-                    break;
-                }
-            });
+    browser.getPluginsPanel().onAddFolder = [this] (const juce::File& dir)
+    {
+        browser.addPluginSearchPath (dir);
+        if (userSettings != nullptr)
+        {
+            userSettings->setValue ("pluginSearchPaths",
+                browser.getPluginSearchPaths().joinIntoString (";"));
+            userSettings->saveIfNeeded();
+        }
+        browser.rescanPlugins (pluginFormatManager);
     };
+
+    browser.getPluginsPanel().onRescan = [this]
+    {
+        browser.rescanPlugins (pluginFormatManager);
+    };
+
 
     // ── Pattern Editor ────────────────────────────────────────────────────────
     patternEditor.onEuclideanChanged = [this](int k, int n) {
@@ -1002,6 +1032,15 @@ MainComponent::MainComponent()
     };
 
     sessionView.onInstrumentDropped = [this](int trackIdx, const juce::String& type) {
+        // ── PluginDrag: drag from Plugins browser tab ──────────────────────
+        // The drag description is "PluginDrag:<absolutePathToPlugin>"
+        if (type.startsWith ("__PluginPath__:"))
+        {
+            juce::String pluginPath = type.substring (15); // strip prefix
+            loadPluginAsTrackInstrument (trackIdx, juce::File (pluginPath));
+            return;
+        }
+
         int nTracks = numActiveTracks.load(std::memory_order_relaxed);
         int targetIdx = -1;
 
@@ -1011,7 +1050,19 @@ MainComponent::MainComponent()
             sessionView.gridContent.columns[targetIdx]->header.hasInstrument = true;
             sessionView.gridContent.columns[targetIdx]->header.instrumentName = type;
             trackInstruments[targetIdx] = type;
-            sessionView.gridContent.columns[targetIdx]->header.repaint();
+            if (auto* current = audioTracks[targetIdx]->activeInstrument.load(std::memory_order_acquire)) {
+                current->closeUI();
+            }
+            
+            // Instantiate modular instrument
+            auto newInst = InstrumentFactory::create(type);
+            if (newInst) {
+                newInst->prepareToPlay(currentSampleRate);
+                if (auto* old = audioTracks[targetIdx]->activeInstrument.exchange(newInst.release(), std::memory_order_acq_rel)) {
+                    audioTracks[targetIdx]->instrumentGarbageQueue.push(old);
+                }
+                audioTracks[targetIdx]->refreshAutomationRegistry();
+            }
         } else {
             // Drop onto drop zone — create new track (no upper limit)
             // Push to all parallel vectors BEFORE incrementing numActiveTracks so
@@ -1026,6 +1077,22 @@ MainComponent::MainComponent()
             sessionView.gridContent.columns[targetIdx]->header.hasInstrument = true;
             sessionView.gridContent.columns[targetIdx]->header.instrumentName = type;
             sessionView.gridContent.columns[targetIdx]->header.repaint();
+            
+            if (auto* current = audioTracks[targetIdx]->activeInstrument.load(std::memory_order_acquire)) {
+                current->closeUI();
+            }
+            
+            // Instantiate modular instrument
+            auto newInst = InstrumentFactory::create(type);
+            if (newInst) {
+                newInst->prepareToPlay(currentSampleRate);
+                audioTracks[targetIdx]->automationRegistry.clear(); // Prevent dangling pointers
+                newInst->registerAutomationParameters(audioTracks[targetIdx].get());
+                if (auto* old = audioTracks[targetIdx]->activeInstrument.exchange(newInst.release(), std::memory_order_acq_rel)) {
+                    audioTracks[targetIdx]->instrumentGarbageQueue.push(old);
+                }
+                audioTracks[targetIdx]->refreshAutomationRegistry();
+            }
         }
 
         // Always select the track and show its device panel immediately,
@@ -1034,16 +1101,6 @@ MainComponent::MainComponent()
         selectedSceneIndex = -1;
         sessionView.setTrackSelected(targetIdx);
         sessionView.setClipSelected(targetIdx, -1);
-
-        // Instantiate modular instrument
-        auto newInst = InstrumentFactory::create(type);
-        if (newInst) {
-            newInst->prepareToPlay(currentSampleRate);
-            newInst->registerAutomationParameters(audioTracks[targetIdx].get());
-            if (auto* old = audioTracks[targetIdx]->activeInstrument.exchange(newInst.release(), std::memory_order_acq_rel)) {
-                audioTracks[targetIdx]->instrumentGarbageQueue.push(old);
-            }
-        }
 
         showDeviceEditorForTrack(targetIdx);
 
@@ -1361,7 +1418,11 @@ void MainComponent::resized()
 {
     auto bounds = getLocalBounds();
     topBar->setBounds(bounds.removeFromTop(40));
-    browser.setBounds(bounds.removeFromLeft(200));
+
+    constexpr int kResizerW = 5;
+    auto browserStrip = bounds.removeFromLeft(browserWidth + kResizerW);
+    browser.setBounds(browserStrip.removeFromLeft(browserWidth));
+    browserResizer.setBounds(browserStrip); // remaining kResizerW px
 
     // ── Dynamic bottom-panel height ───────────────────────────────────────────
     // Read the preferred height from whichever editor is currently loaded.
@@ -1534,6 +1595,9 @@ void MainComponent::timerCallback()
                 effect->processGarbage();
             }
         }
+        // Drain replaced instruments (e.g. PluginInstrumentAdapter with open windows).
+        // NOTE: instrumentGarbageQueue is drained on the RENDER thread (see RenderThread::run)
+        // to avoid use-after-free. Do NOT drain it here.
         while (auto opt = t.effectGarbageQueue.pop()) {
             delete *opt;
         }
@@ -1656,6 +1720,26 @@ void MainComponent::loadDeviceSettings()
     }
 
     setAudioChannels(2, 2, savedState.get());
+
+    // ── Restore plugin search paths & run initial scan ────────────────────────
+    if (userSettings != nullptr)
+    {
+        juce::String savedPaths = userSettings->getValue ("pluginSearchPaths");
+        if (savedPaths.isNotEmpty())
+        {
+            juce::StringArray paths;
+            paths.addTokens (savedPaths, ";", "");
+            browser.setPluginSearchPaths (paths);
+        }
+    }
+    // Always ensure the downloaded Vital path is in the list
+    {
+        juce::File vitalDefault ("/home/vietnoirien/T\xc3\xa9l\xc3\xa9chargements/VitalInstaller/lib");
+        if (vitalDefault.isDirectory())
+            browser.addPluginSearchPath (vitalDefault);
+    }
+    browser.rescanPlugins (pluginFormatManager);
+
     DBG("Device settings loaded successfully.");
 }
 
@@ -2570,6 +2654,7 @@ void MainComponent::showDeviceEditorForTrack(int trackIdx) {
                 if (auto* old = track->effectChain[i].exchange(nullptr, std::memory_order_acq_rel)) {
                     track->effectGarbageQueue.push(old);
                 }
+                track->refreshAutomationRegistry();
                 showDeviceEditorForTrack(trackIdx);
             };
             deviceView.addEditor(std::move(wrapper));
@@ -2602,6 +2687,97 @@ void MainComponent::updateDrumRackPatternEditor() {
             patternEditor.loadDrumPadData(pad.steps, pad.pulses, pad.hitMap);
         }
     }
+}
+
+// ── loadPluginAsTrackInstrument ───────────────────────────────────────────────
+// Loads a VST3/LV2 plugin file and installs it as the InstrumentProcessor on
+// the target track.  If trackIdx is -1 (dropped on the drop zone), a new track
+// is created first.
+void MainComponent::loadPluginAsTrackInstrument (int trackIdx, const juce::File& pluginFile)
+{
+    // ── Scan the plugin file for descriptions ──────────────────────────────
+    juce::String errorMessage;
+    juce::OwnedArray<juce::PluginDescription> foundDescs;
+
+    for (auto* fmt : pluginFormatManager.getFormats())
+    {
+        if (!fmt->fileMightContainThisPluginType (pluginFile.getFullPathName())) continue;
+        fmt->findAllTypesForFile (foundDescs, pluginFile.getFullPathName());
+        if (!foundDescs.isEmpty()) break;
+    }
+
+    if (foundDescs.isEmpty())
+    {
+        DBG ("loadPluginAsTrackInstrument: no plugin found in " + pluginFile.getFullPathName());
+        return;
+    }
+
+    // ── Create the instance ────────────────────────────────────────────────
+    std::unique_ptr<juce::AudioPluginInstance> instance;
+    for (auto* fmt : pluginFormatManager.getFormats())
+    {
+        if (!fmt->fileMightContainThisPluginType (pluginFile.getFullPathName())) continue;
+        instance = fmt->createInstanceFromDescription (*foundDescs[0],
+                                                        currentSampleRate,
+                                                        currentBufferSize,
+                                                        errorMessage);
+        if (instance) break;
+    }
+
+    if (!instance)
+    {
+        DBG ("loadPluginAsTrackInstrument: instantiation failed — " + errorMessage);
+        return;
+    }
+
+    instance->prepareToPlay (currentSampleRate, currentBufferSize);
+
+    // ── Determine / create the target track ───────────────────────────────
+    int nTracks   = numActiveTracks.load (std::memory_order_relaxed);
+    int targetIdx = trackIdx;
+
+    if (targetIdx < 0 || targetIdx >= nTracks)
+    {
+        // Dropped on the drop zone — create a new track
+        juce::String pluginName = foundDescs[0]->name;
+        audioTracks.push_back (std::make_unique<Track>());
+        clipGrid.push_back ({});
+        trackInstruments.push_back ("Plugin:" + pluginName);
+        loadedFiles.push_back (juce::File{});
+        arrangementTracks.push_back ({});
+        targetIdx = numActiveTracks.fetch_add (1, std::memory_order_release);
+        sessionView.addTrack (TrackType::Audio, pluginName);
+        sessionView.gridContent.columns[targetIdx]->header.hasInstrument = true;
+        sessionView.gridContent.columns[targetIdx]->header.instrumentName = pluginName;
+        sessionView.gridContent.columns[targetIdx]->header.repaint();
+    }
+    else
+    {
+        juce::String pluginName = foundDescs[0]->name;
+        trackInstruments[targetIdx] = "Plugin:" + pluginName;
+        sessionView.gridContent.columns[targetIdx]->header.hasInstrument = true;
+        sessionView.gridContent.columns[targetIdx]->header.instrumentName = pluginName;
+        sessionView.gridContent.columns[targetIdx]->header.repaint();
+    }
+
+    if (auto* current = audioTracks[targetIdx]->activeInstrument.load(std::memory_order_acquire)) {
+        current->closeUI();
+    }
+
+    // ── Install as InstrumentProcessor ────────────────────────────────────
+    auto* adapter = new PluginInstrumentAdapter (std::move (instance), foundDescs[0]->name);
+    if (auto* old = audioTracks[targetIdx]->activeInstrument.exchange (
+            adapter, std::memory_order_acq_rel))
+        audioTracks[targetIdx]->instrumentGarbageQueue.push (old);
+    audioTracks[targetIdx]->refreshAutomationRegistry();
+
+    // ── Select track and refresh UI ───────────────────────────────────────
+    selectedTrackIndex = targetIdx;
+    selectedSceneIndex = -1;
+    sessionView.setTrackSelected (targetIdx);
+    sessionView.setClipSelected  (targetIdx, -1);
+    showDeviceEditorForTrack (targetIdx);
+    resized();
 }
 
 void MainComponent::exportProject(const juce::File& outputFile, const juce::String& format)

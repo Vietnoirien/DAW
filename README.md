@@ -29,7 +29,8 @@ LiBeDAW is an Ableton Live–inspired Session View DAW engineered from first pri
 - 📁 **Asset Browser** — Drag-and-drop file browser with persistent folder bookmarks and dynamically generated drag tiles for instruments and effects.
 - 💾 **Project Management** — Full save/load via `juce::ValueTree` serialization (custom `.LBD` project file format).
 - 📤 **Audio Export** — High-quality offline rendering bounce engine supporting WAV, MP3, FLAC, and OGG formats (via FFmpeg integration).
-- 🔌 **Plugin Hosting** — VST3 and LV2 support via JUCE.
+- 🔌 **Plugin Hosting (VST3 / LV2)** — Drag any VST3 or LV2 plugin from the new **Plugins** browser tab directly onto a track to load it as the track's instrument. The plugin editor opens in a floating window toggled by a button in the Device View chain. Plugin search directories are persisted across sessions.
+  > **CLAP hosting** — The `clap-juce-extensions` submodule (providing the CLAP SDK headers) is included for future readiness. Native CLAP *host* support requires JUCE 9; until then, use the VST3 version of your plugins (e.g. `Vital.vst3`).
 - ⚙️ **Audio Device Settings** — Runtime soundcard/buffer/sample-rate configuration.
 - 🕹️ **Global Transport** — Sample-accurate BPM clock driving all sequencers.
 
@@ -96,26 +97,35 @@ Source/
 
 ### Prerequisites
 
-- **OS**: Linux (Debian Sid / Ubuntu 22.04+ recommended)
-- **Compiler**: GCC 12+ or Clang 15+ (C++20 required)
-- **CMake**: 3.20+
-- **Dependencies**: `pkg-config`, `libasound2-dev`, `libfreetype6-dev`, `libfontconfig1-dev`, `libcurl4-openssl-dev`, `libx11-dev`, `libxrandr-dev`, `libxinerama-dev`, `libxcursor-dev`, `libgl1-mesa-dev`, `libglu1-mesa-dev`, `libwebkit2gtk-4.0-dev`, `ffmpeg` (for MP3/FLAC/OGG export)
+- **OS**: Linux (Debian 13 "Trixie" / Ubuntu 24.04+ recommended)
+- **Compiler**: GCC 14+ or Clang 18+ (C++20 required)
+- **CMake**: 3.21+
+- **Git**: required to fetch submodules
+- **Dependencies**: `pkg-config`, `libasound2-dev`, `libfreetype6-dev`, `libfontconfig1-dev`, `libcurl4-openssl-dev`, `libx11-dev`, `libxrandr-dev`, `libxinerama-dev`, `libxcursor-dev`, `libgl1-mesa-dev`, `libglu1-mesa-dev`, `libwebkit2gtk-4.1-dev`, `ffmpeg` (for MP3/FLAC/OGG export)
 
-Install dependencies on Debian/Ubuntu:
+Install dependencies on Debian 13 / Ubuntu 24.04:
 ```bash
-sudo apt install cmake build-essential pkg-config libasound2-dev libfreetype6-dev \
-  libfontconfig1-dev libcurl4-openssl-dev libx11-dev libxrandr-dev libxinerama-dev \
-  libxcursor-dev libgl1-mesa-dev libglu1-mesa-dev libwebkit2gtk-4.0-dev ffmpeg
+sudo apt update
+sudo apt install cmake build-essential git pkg-config \
+  libasound2-dev libfreetype6-dev libfontconfig1-dev \
+  libcurl4-openssl-dev libx11-dev libxrandr-dev libxinerama-dev \
+  libxcursor-dev libgl1-mesa-dev libglu1-mesa-dev \
+  libwebkit2gtk-4.1-dev ffmpeg
 ```
+
+> **Note for Debian 12 (Bookworm)**: replace `libwebkit2gtk-4.1-dev` with `libwebkit2gtk-4.0-dev`.
 
 ### Build
 
 ```bash
 git clone https://github.com/Vietnoirien/DAW.git
 cd DAW
+git submodule update --init --recursive   # pulls clap-juce-extensions
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
+
+> **JUCE**: fetched automatically via CMake `FetchContent` (JUCE **8.0.12**).
 
 The binary will be at `build/LiBeDAW_artefacts/LiBeDAW`.
 
@@ -138,15 +148,17 @@ The binary will be at `build/LiBeDAW_artefacts/LiBeDAW`.
 7. **Launch clips** — Press ▶ on any clip slot to queue it for launch on the next bar.
 8. **Play** — Hit the global Transport Play button. All queued clips launch sample-accurately.
 9. **Export Audio** — Click `Export Audio` in the top bar to render your composition to WAV, MP3, FLAC, or OGG format.
-10. **Save** — `File → Save Project` to serialize the full session as an `.LBD` file.
+10. **Load a VST3 plugin** — Switch to the **Plugins** tab in the browser, click **Add Folder…** to point it at your VST3 directory (e.g. `/usr/lib/vst3` or the Vital installer folder), then drag a plugin tile onto a track. Click **Show / Hide Editor** in the Device View to open its native GUI.
+11. **Save** — `File → Save Project` to serialize the full session as an `.LBD` file.
 
 ---
 
 ## Roadmap
 
 - [x] Arrangement View
+- [x] VST3 plugin rack in Device View (Plugins browser tab, per-track, show/hide editor)
+- [ ] CLAP plugin hosting (pending JUCE 9 native support)
 - [ ] Piano-roll quantization & velocity editing
-- [ ] VST3 plugin rack in Device View
 - [ ] MIDI controller mapping
 - [ ] Audio clip recording
 
@@ -160,4 +172,6 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 ## Acknowledgements
 
-Built with [JUCE 8](https://juce.com/) — the cross-platform C++ audio framework.
+Built with [JUCE 8.0.12](https://juce.com/) — the cross-platform C++ audio framework.
+
+CLAP SDK headers provided by [clap-juce-extensions](https://github.com/free-audio/clap-juce-extensions) (free-audio / clap team).

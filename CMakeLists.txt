@@ -1,16 +1,24 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.21)
 project(LiBeDAW VERSION 0.1.0)
 
 include(FetchContent)
 
-# Fetch JUCE via CMake
+# ── JUCE ─────────────────────────────────────────────────────────────────────
 FetchContent_Declare(
     juce
-    URL https://github.com/juce-framework/JUCE/archive/refs/tags/8.0.0.zip
+    URL https://github.com/juce-framework/JUCE/archive/refs/tags/8.0.12.zip
 )
 FetchContent_MakeAvailable(juce)
 
-# Create the executable
+# ── clap-juce-extensions (submodule at libs/clap-juce-extensions) ─────────────
+# NOTE: This library is included for future CLAP plugin hosting support.
+# JUCE 8 natively supports VST3/LV2 hosting only; CLAP host support is
+# planned for JUCE 9. The submodule provides the CLAP SDK headers and
+# extension infrastructure for when JUCE 9 support lands.
+set(CLAP_JUCE_EXTENSIONS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+add_subdirectory(libs/clap-juce-extensions EXCLUDE_FROM_ALL)
+
+# ── Application target ────────────────────────────────────────────────────────
 juce_add_gui_app(LiBeDAW
     PRODUCT_NAME "LiBeDAW"
     VERSION ${PROJECT_VERSION})
@@ -27,6 +35,7 @@ target_sources(LiBeDAW PRIVATE
     Source/Instruments/FMSynthProcessor.cpp
     Source/Instruments/WavetableSynthProcessor.cpp
     Source/Instruments/KarplusStrongProcessor.cpp
+    Source/Instruments/PluginInstrumentAdapter.cpp
     Source/Effects/BuiltInEffects.cpp)
 
 target_include_directories(LiBeDAW PRIVATE

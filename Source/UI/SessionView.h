@@ -1091,8 +1091,9 @@ public:
     // ── DragAndDropTarget (on SessionView so Viewport doesn't block delivery) ─
     bool isInterestedInDragSource (const SourceDetails& d) override
     {
-        return d.description.toString().startsWith ("InstrumentDrag:") || 
-               d.description.toString().startsWith ("EffectDrag:");
+        return d.description.toString().startsWith ("InstrumentDrag:") ||
+               d.description.toString().startsWith ("EffectDrag:")     ||
+               d.description.toString().startsWith ("PluginDrag:");
     }
 
     void itemDragEnter (const SourceDetails& d) override { updateContentDrag (d.localPosition, true); }
@@ -1113,6 +1114,10 @@ public:
 
         if (d.description.toString().startsWith ("InstrumentDrag:")) {
             if (onInstrumentDropped) onInstrumentDropped (hit, type);
+        } else if (d.description.toString().startsWith ("PluginDrag:")) {
+            // Pass the absolute plugin path — MainComponent detects the prefix.
+            juce::String path = d.description.toString().fromFirstOccurrenceOf ("PluginDrag:", false, false);
+            if (onInstrumentDropped) onInstrumentDropped (hit, "__PluginPath__:" + path);
         } else if (d.description.toString().startsWith ("EffectDrag:")) {
             if (hit == -1) {
                 // Check if it's over Return track

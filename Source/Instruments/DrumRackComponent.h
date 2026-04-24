@@ -11,7 +11,7 @@
 //  ├──────────────────────┬─────────────────────────────────────────────────────┤
 //  │  [4x4 pad grid]      │  [waveform display]                                │
 //  │                      │  ─────────────────────────────────────────────      │
-//  │                      │  PAD CONTROLS                                       │
+//  │                      │  [M][S]  PAD CONTROLS                               │
 //  │                      │  [Gain] [Pan] [Pitch] [Decay]                      │
 //  └──────────────────────┴─────────────────────────────────────────────────────┘
 class DrumRackComponent : public juce::Component,
@@ -23,13 +23,56 @@ public:
     DrumRackComponent(DrumRackProcessor* p) : processor(p), laf(juce::Colour(0xffFF6600)) {
         setLookAndFeel(&laf);
 
-        // 4x4 pad buttons
+        // 4x4 pad buttons — support right-click via a small wrapper
         for (int i = 0; i < 16; ++i) {
-            auto btn = std::make_unique<juce::TextButton>(juce::String(i + 1));
-            btn->onClick = [this, i] { selectPad(i); };
+            auto btn = std::make_unique<PadButton>(juce::String(i + 1));
+            btn->onClick          = [this, i] { selectPad(i); };
+            btn->onRightClick     = [this, i] { showPadContextMenu(i); };
             addAndMakeVisible(*btn);
             padButtons.push_back(std::move(btn));
         }
+
+        // ── Mute button ──
+        muteBtn.setButtonText("M");
+        muteBtn.setClickingTogglesState(true);
+        muteBtn.setColour(juce::TextButton::buttonColourId,   juce::Colour(0xff1A1020));
+        muteBtn.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffCC2255));
+        muteBtn.setColour(juce::TextButton::textColourOffId,  juce::Colour(0xff888899));
+        muteBtn.setColour(juce::TextButton::textColourOnId,   juce::Colours::white);
+        muteBtn.onClick = [this] {
+            if (selectedPad >= 0) {
+                bool nowMuted = muteBtn.getToggleState();
+                processor->settings[selectedPad].muted.store(nowMuted);
+                // Mute cancels solo
+                if (nowMuted) {
+                    processor->settings[selectedPad].soloed.store(false);
+                    soloBtn.setToggleState(false, juce::dontSendNotification);
+                }
+                updatePadColors();
+            }
+        };
+        addAndMakeVisible(muteBtn);
+
+        // ── Solo button ──
+        soloBtn.setButtonText("S");
+        soloBtn.setClickingTogglesState(true);
+        soloBtn.setColour(juce::TextButton::buttonColourId,   juce::Colour(0xff1A1008));
+        soloBtn.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffFF8C00));
+        soloBtn.setColour(juce::TextButton::textColourOffId,  juce::Colour(0xff888899));
+        soloBtn.setColour(juce::TextButton::textColourOnId,   juce::Colours::white);
+        soloBtn.onClick = [this] {
+            if (selectedPad >= 0) {
+                bool nowSoloed = soloBtn.getToggleState();
+                processor->settings[selectedPad].soloed.store(nowSoloed);
+                // Solo unmutes this pad
+                if (nowSoloed) {
+                    processor->settings[selectedPad].muted.store(false);
+                    muteBtn.setToggleState(false, juce::dontSendNotification);
+                }
+                updatePadColors();
+            }
+        };
+        addAndMakeVisible(soloBtn);
 
         // Per-pad knobs
         auto sk = [&](LiBeKnob& k, const char* lbl, double v, double mn, double mx, double dv) {
@@ -68,10 +111,19 @@ public:
         }
         updatePadColors();
 
-        // Right panel: waveform + knobs
+        // Right panel: waveform + controls
         auto right = b.reduced(6, 4);
         waveformBounds = right.removeFromTop(kWaveH);
-        right.removeFromTop(14); // "PAD CONTROLS" label space
+        right.removeFromTop(6); // breathing room
+
+        // Mute / Solo row + label
+        auto msRow = right.removeFromTop(22);
+        muteBtn.setBounds(msRow.removeFromLeft(36));
+        msRow.removeFromLeft(4);
+        soloBtn.setBounds(msRow.removeFromLeft(36));
+
+        right.removeFromTop(8); // gap before knobs
+
         int x = right.getX(), y = right.getY();
         for (auto* k : std::initializer_list<LiBeKnob*>{ &kGain, &kPan, &kPitch, &kDecay }) {
             k->setBounds(x, y, LiBeKnob::kW, LiBeKnob::kH); x += LiBeKnob::kW + 6;
@@ -101,11 +153,11 @@ public:
             g.drawText("Drop Sample Here", waveformBounds, juce::Justification::centred);
         }
 
-        // Section label
+        // "PAD CONTROLS" section label (next to M/S buttons)
         g.setColour(juce::Colour(0xffFF6600).withAlpha(0.65f));
         g.setFont(juce::FontOptions(9.0f, juce::Font::bold));
-        g.drawText("PAD CONTROLS", kPadAreaW + 6, waveformBounds.getBottom() + 2, 160, 12,
-                   juce::Justification::centredLeft);
+        int msY = waveformBounds.getBottom() + 10;
+        g.drawText("PAD CONTROLS", kPadAreaW + 86, msY, 160, 22, juce::Justification::centredLeft);
     }
 
     void timerCallback() override {
@@ -129,6 +181,10 @@ public:
         kPitch.slider.setValue(processor->settings[idx].pitchOffset.load(), juce::dontSendNotification);
         kDecay.slider.setValue(processor->settings[idx].decay.load(),       juce::dontSendNotification);
 
+        // Sync mute/solo toggle states
+        muteBtn.setToggleState(processor->settings[idx].muted.load(),  juce::dontSendNotification);
+        soloBtn.setToggleState(processor->settings[idx].soloed.load(), juce::dontSendNotification);
+
         juce::String ps = "DrumRack/Pad " + juce::String(idx+1) + "/";
         kGain.slider.getProperties().set ("parameterId", ps + "Gain");
         kPan.slider.getProperties().set  ("parameterId", ps + "Pan");
@@ -138,6 +194,58 @@ public:
         updatePadColors();
         if (onPadSelected) onPadSelected(idx);
         repaint();
+    }
+
+    // ─── Right-click context menu ──────────────────────────────────────────────
+    void showPadContextMenu(int padIdx) {
+        selectPad(padIdx);
+
+        juce::PopupMenu menu;
+        menu.setLookAndFeel(&laf);
+
+        bool hasSample = processor->settings[padIdx].loadedFile.existsAsFile();
+        bool isMuted   = processor->settings[padIdx].muted.load();
+        bool isSoloed  = processor->settings[padIdx].soloed.load();
+
+        menu.addSectionHeader("Pad " + juce::String(padIdx + 1));
+        menu.addItem(1, "Remove Sample", hasSample);
+        menu.addSeparator();
+        menu.addItem(2, isMuted  ? "Unmute" : "Mute");
+        menu.addItem(3, isSoloed ? "Unsolo" : "Solo");
+
+        menu.showMenuAsync(juce::PopupMenu::Options{}.withTargetComponent(padButtons[padIdx].get()),
+            [this, padIdx](int result) {
+                switch (result) {
+                    case 1: // Remove sample
+                        processor->removeSample(padIdx);
+                        updatePadColors();
+                        repaint();
+                        break;
+                    case 2: { // Toggle mute
+                        bool nowMuted = !processor->settings[padIdx].muted.load();
+                        processor->settings[padIdx].muted.store(nowMuted);
+                        if (nowMuted) processor->settings[padIdx].soloed.store(false);
+                        if (padIdx == selectedPad) {
+                            muteBtn.setToggleState(nowMuted, juce::dontSendNotification);
+                            soloBtn.setToggleState(false,    juce::dontSendNotification);
+                        }
+                        updatePadColors();
+                        break;
+                    }
+                    case 3: { // Toggle solo
+                        bool nowSoloed = !processor->settings[padIdx].soloed.load();
+                        processor->settings[padIdx].soloed.store(nowSoloed);
+                        if (nowSoloed) processor->settings[padIdx].muted.store(false);
+                        if (padIdx == selectedPad) {
+                            soloBtn.setToggleState(nowSoloed, juce::dontSendNotification);
+                            muteBtn.setToggleState(false,     juce::dontSendNotification);
+                        }
+                        updatePadColors();
+                        break;
+                    }
+                    default: break;
+                }
+            });
     }
 
     // File drag-and-drop
@@ -171,15 +279,51 @@ public:
     std::function<void(int, juce::File)>  onSampleDropped;
 
 private:
+    // ─── PadButton: TextButton that also fires onRightClick ───────────────────
+    // Right-click must be caught in mouseDown (isPopupMenu) because by the time
+    // mouseUp fires the button flag has already been cleared from e.mods.
+    struct PadButton : public juce::TextButton {
+        using juce::TextButton::TextButton;
+        std::function<void()> onRightClick;
+
+        void mouseDown(const juce::MouseEvent& e) override {
+            if (e.mods.isPopupMenu()) {
+                if (onRightClick) onRightClick();
+                return; // don't let TextButton arm its click logic
+            }
+            juce::TextButton::mouseDown(e);
+        }
+
+        void mouseUp(const juce::MouseEvent& e) override {
+            if (!e.mods.isPopupMenu())
+                juce::TextButton::mouseUp(e);
+        }
+    };
+
     static constexpr int kTH = 30, kPadAreaW = 260, kWaveH = 100;
 
     void updatePadColors() {
+        bool hasSolo = processor->anySoloed();
+
         for (int i = 0; i < 16; ++i) {
-            padButtons[i]->setColour(juce::TextButton::buttonColourId,
-                i == selectedPad ? juce::Colour(0xff5A2A00) : juce::Colour(0xff111118));
+            bool isMuted  = processor->settings[i].muted.load();
+            bool isSoloed = processor->settings[i].soloed.load();
+            // A pad is "silenced" if muted, OR if any pad is soloed and this one isn't
+            bool silenced = isMuted || (hasSolo && !isSoloed);
+
+            juce::Colour base = (i == selectedPad) ? juce::Colour(0xff5A2A00)
+                                                    : juce::Colour(0xff111118);
+            if (silenced)  base = base.darker(0.55f);
+            if (isSoloed)  base = base.interpolatedWith(juce::Colour(0xff6B3A00), 0.5f);
+
+            padButtons[i]->setColour(juce::TextButton::buttonColourId,  base);
             padButtons[i]->setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffFF6600));
-            padButtons[i]->setColour(juce::TextButton::textColourOffId,
-                i == selectedPad ? juce::Colour(0xffFF8833) : juce::Colour(0xff666677));
+
+            juce::Colour textCol = silenced  ? juce::Colour(0xff333344)
+                                 : isSoloed  ? juce::Colour(0xffFFAA44)
+                                 : (i == selectedPad) ? juce::Colour(0xffFF8833)
+                                 : juce::Colour(0xff666677);
+            padButtons[i]->setColour(juce::TextButton::textColourOffId, textCol);
         }
     }
 
@@ -187,7 +331,8 @@ private:
     LiBeLookAndFeel laf;
     int selectedPad = 0;
 
-    std::vector<std::unique_ptr<juce::TextButton>> padButtons;
+    std::vector<std::unique_ptr<PadButton>> padButtons;
+    juce::TextButton muteBtn, soloBtn;
     LiBeKnob kGain, kPan, kPitch, kDecay;
 
     juce::AudioFormatManager formatManager;

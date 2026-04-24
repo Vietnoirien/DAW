@@ -65,14 +65,22 @@ public:
             float maxNorm = (float)slider.getProperties()["automationMaxNorm"];
             float aMin = rotaryStartAngle + minNorm * (rotaryEndAngle - rotaryStartAngle);
             float aMax = rotaryStartAngle + maxNorm * (rotaryEndAngle - rotaryStartAngle);
+            float rng  = radius + 5.0f;
 
-            if (aMax > aMin + 0.01f) {
-                float rng = radius + 5.0f;
+            if (aMax > aMin + 0.001f) {
+                // Draw a swept arc showing the automation range
                 juce::Path rangeArc;
                 rangeArc.addCentredArc(cx, cy, rng, rng, 0.0f, aMin, aMax, true);
                 g.setColour(juce::Colour(0xffFF8800).withAlpha(0.85f));
                 g.strokePath(rangeArc, juce::PathStrokeType(3.5f, juce::PathStrokeType::curved,
                                                              juce::PathStrokeType::rounded));
+            } else {
+                // Flat lane or single-point: draw a bright tick at the automation value
+                float aMid = (aMin + aMax) * 0.5f;
+                float tx   = cx + rng * std::sin(aMid);
+                float ty   = cy - rng * std::cos(aMid);
+                g.setColour(juce::Colour(0xffFF8800));
+                g.fillEllipse(tx - 3.0f, ty - 3.0f, 6.0f, 6.0f);
             }
         }
 
@@ -153,11 +161,11 @@ public:
 
     // Called by DeviceView::updateAutomationIndicators
     void setAutomated(bool automated, float minNorm = 0.f, float maxNorm = 1.f) {
-        bool changed = (bool)slider.getProperties()["isAutomated"] != automated;
         slider.getProperties().set("isAutomated",       automated);
         slider.getProperties().set("automationMinNorm", minNorm);
         slider.getProperties().set("automationMaxNorm", maxNorm);
-        if (changed) slider.repaint();
+        // Always repaint so range updates are visible immediately
+        slider.repaint();
     }
 
     // Starts the 30Hz live-tracking timer that reads from paramPtr

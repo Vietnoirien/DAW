@@ -20,6 +20,8 @@ public:
         std::atomic<float> pitchOffset { 0.0f };
         std::atomic<float> decay { 0.5f }; // Seconds
         std::atomic<int> chokeGroup { 0 }; // 0 = none
+        std::atomic<bool> muted { false };
+        std::atomic<bool> soloed { false };
         juce::File loadedFile;
     };
 
@@ -68,6 +70,21 @@ public:
         } else {
             delete buffer;
         }
+    }
+
+    /** Remove the sample from a pad (UI thread). Clears the file reference and
+     *  enqueues a nullptr buffer so the audio thread stops reading it. */
+    void removeSample(int padIndex) {
+        if (padIndex < 0 || padIndex >= 16) return;
+        settings[padIndex].loadedFile = juce::File();
+        commandQueue.push({DrumRackCommand::LoadBuffer, padIndex, nullptr});
+    }
+
+    /** Returns true if at least one pad has its solo flag set. */
+    bool anySoloed() const {
+        for (int i = 0; i < 16; ++i)
+            if (settings[i].soloed.load()) return true;
+        return false;
     }
 
     void processBlock(juce::AudioBuffer<float>& outBuffer, const juce::MidiBuffer& midiMessages) override {
@@ -184,8 +201,13 @@ public:
 
 private:
     void triggerPad(int padIndex, float velocity) {
+        // Honour mute / solo
+        bool hasSolo = anySoloed();
+        if (settings[padIndex].muted.load()) return;
+        if (hasSolo && !settings[padIndex].soloed.load()) return;
+
         int chokeGroup = settings[padIndex].chokeGroup.load();
-        
+
         // Find a free voice or steal the oldest
         int voiceIdx = -1;
         for (int i = 0; i < 32; ++i) {
@@ -195,7 +217,7 @@ private:
             }
         }
         if (voiceIdx == -1) voiceIdx = 0; // Simple stealing
-        
+
         // Choke other voices in the same group
         if (chokeGroup > 0) {
             for (int i = 0; i < 32; ++i) {
@@ -213,7 +235,7 @@ private:
         voices[voiceIdx].playhead = 0;
         voices[voiceIdx].currentGain = velocity * settings[padIndex].gain.load();
         voices[voiceIdx].decayEnvelope = 1.0f;
-        
+
         float decayTime = settings[padIndex].decay.load();
         voices[voiceIdx].decayRate = 1.0f / (decayTime * currentSampleRate);
     }

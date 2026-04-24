@@ -8,6 +8,7 @@
 static constexpr int ARR_HEADER_H = 36;
 static constexpr int ARR_SLOT_H   = 36;
 static constexpr int ARR_TRACK_W  = 180; // track header width (same as SessionView)
+static constexpr int ARR_AUTO_H   = 80;  // height of automation lane when expanded
 
 // ─── Arrangement-level automation overlay ─────────────────────────────────────
 // Drawn as a transparent, fully-interactive component placed on top of a single
@@ -58,19 +59,32 @@ public:
     {
         if (clips == nullptr || parameterId.isEmpty()) return;
 
-        // Semi-transparent dark tint over the track row so the curve stands out
-        g.setColour(juce::Colour(0x55000000));
+        // Background: dark navy tint so the lane is clearly distinct from the track
+        g.setColour(juce::Colour(0xff0a0a1a));
         g.fillRect(getLocalBounds());
 
-        // Label
-        g.setColour(juce::Colours::white.withAlpha(0.7f));
-        g.setFont(juce::Font(juce::FontOptions(10.0f)));
-        g.drawText("AUT: " + parameterId, 4, 2, getWidth() - 8, 14, juce::Justification::topLeft);
+        // Top border to visually separate from the track row above
+        g.setColour(juce::Colour(0xff00e5ff).withAlpha(0.6f));
+        g.drawHorizontalLine(0, 0.0f, static_cast<float>(getWidth()));
 
-        // Draw grid lines (quarters)
-        g.setColour(juce::Colour(0xff2a2a2a).withAlpha(0.5f));
+        // Bottom border
+        g.setColour(juce::Colour(0xff334455));
+        g.drawHorizontalLine(getHeight() - 1, 0.0f, static_cast<float>(getWidth()));
+
+        // Horizontal grid lines (value guides at 25%, 50%, 75%)
+        g.setColour(juce::Colour(0xff1e2a3a));
         for (float frac = 0.25f; frac < 1.0f; frac += 0.25f)
             g.drawHorizontalLine(static_cast<int>(getHeight() * frac), 0.0f, static_cast<float>(getWidth()));
+
+        // Label (left edge, inside the lane)
+        g.setColour(juce::Colour(0xff00e5ff).withAlpha(0.85f));
+        g.setFont(juce::Font(juce::FontOptions(10.0f)).boldened());
+        g.drawText(juce::String::fromUTF8("\u2B83 ") + parameterId,
+                   4, 2, 200, 14, juce::Justification::topLeft);
+        g.setColour(juce::Colours::white.withAlpha(0.35f));
+        g.setFont(juce::Font(juce::FontOptions(9.0f)));
+        g.drawText("dbl-click: add  |  drag: move  |  right-click: delete",
+                   4, getHeight() - 14, getWidth() - 8, 12, juce::Justification::bottomLeft);
 
         // For each clip on this track that overlaps the visible area, draw its lane
         for (const auto& clip : *clips)
@@ -86,13 +100,21 @@ public:
             double clipLenBars   = clip.lengthBars;
             double clipLenBeats  = clipLenBars * 4.0;
 
+            // Clip background tint so the lane region is easy to spot
+            float cx0 = static_cast<float>(clipStartBars * ppb);
+            float cx1 = static_cast<float>((clipStartBars + clipLenBars) * ppb);
+            g.setColour(juce::Colour(0xff1a2030));
+            g.fillRect(cx0, 0.0f, cx1 - cx0, static_cast<float>(getHeight()));
+
             auto beatToX = [&](double beatInClip) -> float {
                 double barInClip = beatInClip / 4.0;
                 return static_cast<float>((clipStartBars + barInClip) * ppb);
             };
 
             auto valToY = [&](float v) -> float {
-                return (1.0f - v) * static_cast<float>(getHeight());
+                // Reserve 2px top/bottom padding so the curve is never clipped
+                const float pad = 2.0f;
+                return pad + (1.0f - v) * (static_cast<float>(getHeight()) - 2.0f * pad);
             };
 
             // Draw filled area under the curve
@@ -109,32 +131,36 @@ public:
                 filled.lineTo(beatToX(clipLenBeats), static_cast<float>(getHeight()));
                 filled.closeSubPath();
             }
-            g.setColour(juce::Colour(0xffff4444).withAlpha(0.18f));
+            g.setColour(juce::Colour(0xffff6633).withAlpha(0.28f));
             g.fillPath(filled);
 
-            // Draw the curve line
+            // Draw the curve line — bright and thick
             juce::Path path;
             for (size_t i = 0; i < lane->points.size(); ++i) {
                 float x = beatToX(lane->points[i].positionBeats);
                 float y = valToY(lane->points[i].value);
                 if (i == 0) path.startNewSubPath(x, y); else path.lineTo(x, y);
             }
-            g.setColour(juce::Colour(0xffff5555).withAlpha(0.9f));
-            g.strokePath(path, juce::PathStrokeType(2.0f));
+            g.setColour(juce::Colour(0xffff7744));
+            g.strokePath(path, juce::PathStrokeType(2.5f));
 
-            // Draw control points
+            // Draw control points (larger for easier clicking)
             for (size_t i = 0; i < lane->points.size(); ++i) {
                 float x = beatToX(lane->points[i].positionBeats);
                 float y = valToY(lane->points[i].value);
                 bool dragged = (editingClipIndex >= 0
                                 && editingClipIndex == clipIndexOf(clip)
                                 && draggedPointIndex == (int)i);
-                g.setColour(dragged ? juce::Colours::white : juce::Colour(0xffff8888));
-                g.fillEllipse(x - 4.0f, y - 4.0f, 8.0f, 8.0f);
+                // Outer glow ring
+                g.setColour(juce::Colour(0xffff7744).withAlpha(0.4f));
+                g.fillEllipse(x - 7.0f, y - 7.0f, 14.0f, 14.0f);
+                // Inner dot
+                g.setColour(dragged ? juce::Colours::white : juce::Colour(0xffffaa88));
+                g.fillEllipse(x - 5.0f, y - 5.0f, 10.0f, 10.0f);
             }
 
             // Clip boundary lines
-            g.setColour(juce::Colours::white.withAlpha(0.2f));
+            g.setColour(juce::Colour(0xff00e5ff).withAlpha(0.35f));
             g.drawVerticalLine(static_cast<int>(clipStartBars * ppb), 0.0f, static_cast<float>(getHeight()));
             g.drawVerticalLine(static_cast<int>((clipStartBars + clipLenBars) * ppb), 0.0f, static_cast<float>(getHeight()));
         }
@@ -296,8 +322,11 @@ public:
             juce::ScrollBar::thumbColourId, juce::Colour(0xff334466));
         addAndMakeVisible(gridViewport);
 
-        // Automation overlay lives inside the content (scrolls with it)
+        // Automation overlay lives inside the content (scrolls with it).
+        // Added AFTER clip blocks are created, so it is raised to the top automatically.
         content.addChildComponent(automationOverlay);
+        // Ensure the overlay is always painted on top of clip blocks
+        automationOverlay.setAlwaysOnTop(true);
     }
 
     void resized() override
@@ -433,8 +462,15 @@ private:
             if (auto* parent = findParentComponentOfClass<ArrangementView>())
                 selTrack = parent->selectedTrack;
 
+            // Find which track has its automation lane open (if any)
+            int autoTrack = -1;
+            if (auto* parent = findParentComponentOfClass<ArrangementView>())
+                autoTrack = parent->activeAutomationTrack;
+
+            // Running Y offset: tracks shift down when a lane is inserted above them
+            int runningY = ARR_HEADER_H;
             for (int t = 0; t < (int)trackStates.size(); ++t) {
-                int y = ARR_HEADER_H + t * ARR_SLOT_H;
+                int y = runningY;
 
                 // Selected track highlight on the full row
                 if (t == selTrack) {
@@ -459,6 +495,24 @@ private:
                 g.setColour(t == selTrack ? juce::Colours::white : juce::Colours::lightgrey);
                 g.setFont(12.0f);
                 g.drawText(trackStates[t].name, 12, y, ARR_TRACK_W - 16, ARR_SLOT_H, juce::Justification::centredLeft);
+
+                runningY += ARR_SLOT_H;
+
+                // If this track has its automation lane open, paint a header label in the
+                // left-hand track header area so the lane is clearly identified
+                if (t == autoTrack) {
+                    g.setColour(juce::Colour(0xff0d1520));
+                    g.fillRect(0, runningY, ARR_TRACK_W, ARR_AUTO_H);
+                    g.setColour(juce::Colour(0xff00e5ff).withAlpha(0.6f));
+                    g.drawHorizontalLine(runningY, 0.0f, static_cast<float>(ARR_TRACK_W));
+                    g.setColour(trackStates[t].colour);
+                    g.fillRect(0, runningY + 2, 4, ARR_AUTO_H - 4);
+                    g.setColour(juce::Colour(0xff00e5ff));
+                    g.setFont(juce::Font(juce::FontOptions(10.0f)).boldened());
+                    g.drawText("AUTO", 10, runningY, ARR_TRACK_W - 12, ARR_AUTO_H,
+                               juce::Justification::centredLeft);
+                    runningY += ARR_AUTO_H;
+                }
             }
 
             // Draw vertical bar lines in ruler and timeline
@@ -498,11 +552,43 @@ private:
             return 1.0 + static_cast<double>(x - ARR_TRACK_W) / pixelsPerBar;
         }
         
+        // Helper: resolve the clicked Y coordinate to a track index, accounting
+        // for the ARR_AUTO_H gap that the automation lane inserts below its track.
+        // Returns -1 if the click lands in the ruler, the automation lane itself,
+        // or below all tracks.
+        int yToTrackIndex(int clickY) const
+        {
+            if (clickY < ARR_HEADER_H) return -1;
+
+            int autoTrack = -1;
+            if (auto* parent = findParentComponentOfClass<ArrangementView>())
+                if (parent->automationOverlay.isVisible())
+                    autoTrack = parent->activeAutomationTrack;
+
+            int runningY = ARR_HEADER_H;
+            for (int t = 0; t < (int)trackStates.size(); ++t) {
+                // Is the click inside this track row?
+                if (clickY >= runningY && clickY < runningY + ARR_SLOT_H)
+                    return t;
+                runningY += ARR_SLOT_H;
+
+                // Skip over the automation lane if it belongs to this track
+                if (t == autoTrack) {
+                    if (clickY >= runningY && clickY < runningY + ARR_AUTO_H)
+                        return -2; // inside the automation lane — handled by the overlay
+                    runningY += ARR_AUTO_H;
+                }
+            }
+            return -1; // below all tracks
+        }
+
         void mouseDown(const juce::MouseEvent& e) override {
             if (e.y < ARR_HEADER_H) return;
 
-            int trackIdx = (e.y - ARR_HEADER_H) / ARR_SLOT_H;
-            if (trackIdx < 0 || trackIdx >= (int)trackStates.size()) return;
+            int trackIdx = yToTrackIndex(e.y);
+            // -1 = ruler / below tracks, -2 = inside automation lane (overlay handles it)
+            if (trackIdx < 0) return;
+            if (trackIdx >= (int)trackStates.size()) return;
 
             // ── Track header click: select track to show device view ───────────
             if (e.x < ARR_TRACK_W) {
@@ -527,17 +613,9 @@ private:
             }
 
             if (e.mods.isPopupMenu()) {
-                // If the automation overlay is active on this track, suppress the
-                // clip-insert menu so the overlay's own right-click handler fires.
-                if (auto* parent = findParentComponentOfClass<ArrangementView>()) {
-                    if (parent->automationOverlay.isVisible()
-                        && parent->activeAutomationTrack == trackIdx) {
-                        // Let the event fall through to the overlay component
-                        return;
-                    }
-                }
-
-                // Right click empty area -> create clip
+                // Right click on the track row -> create/insert clip.
+                // The automation overlay sits BELOW the row in its own area and
+                // intercepts its own events, so no suppression needed here.
                 double clickedBar = std::floor(pixelToBar(e.x));
                 if (clickedBar < 1.0) clickedBar = 1.0;
 
@@ -596,11 +674,29 @@ private:
             }
         }
 
+        // Returns the top-left Y pixel of track row 'trackIdx', accounting for
+        // the ARR_AUTO_H gap inserted by the automation lane (if open).
+        int trackIndexToY(int trackIdx) const
+        {
+            int autoTrack = -1;
+            if (auto* parent = findParentComponentOfClass<ArrangementView>())
+                if (parent->automationOverlay.isVisible())
+                    autoTrack = parent->activeAutomationTrack;
+
+            int runningY = ARR_HEADER_H;
+            for (int t = 0; t < trackIdx; ++t) {
+                runningY += ARR_SLOT_H;
+                if (t == autoTrack)
+                    runningY += ARR_AUTO_H;
+            }
+            return runningY;
+        }
+
         void updateClipBounds() {
             for (auto* block : clipBlocks) {
                 int x = barToPixel(block->clip.startBar);
                 int w = static_cast<int>(block->clip.lengthBars * pixelsPerBar);
-                int y = ARR_HEADER_H + block->clip.trackIndex * ARR_SLOT_H;
+                int y = trackIndexToY(block->clip.trackIndex);
                 block->setBounds(x, y + 2, w, ARR_SLOT_H - 4);
             }
             if (auto* parent = findParentComponentOfClass<ArrangementView>()) {
@@ -653,14 +749,18 @@ private:
         return maxBars + 8.0;
     }
 
-    // Place the overlay over the correct track row inside content
+    // Place the overlay as a dedicated lane BELOW the clip row so it is
+    // never occluded by ArrClipBlock children.
     void positionAutomationOverlay()
     {
         if (activeAutomationTrack < 0 || !automationOverlay.isVisible()) return;
-        int y = ARR_HEADER_H + activeAutomationTrack * ARR_SLOT_H + 2;
-        int h = ARR_SLOT_H - 4;
+        // The automation lane sits directly below the track row
+        int y = ARR_HEADER_H + activeAutomationTrack * ARR_SLOT_H + ARR_SLOT_H;
+        int h = ARR_AUTO_H;
         automationOverlay.setBounds(ARR_TRACK_W, y, content.getWidth() - ARR_TRACK_W, h);
         automationOverlay.updateScale(computeTotalBars(), content.pixelsPerBar);
+        // Ensure it is painted above any child components
+        automationOverlay.toFront(false);
     }
 
     void updateContentSize()
@@ -671,8 +771,10 @@ private:
         double maxBars = computeTotalBars();
 
         int numTracks = content.trackStates.empty() ? 1 : (int)content.trackStates.size();
+        // When the automation lane is open, add its height so it doesn't get clipped
+        int autoExtra  = (activeAutomationTrack >= 0 && automationOverlay.isVisible()) ? ARR_AUTO_H : 0;
         int contentW = juce::jmax(vb.getWidth(), content.barToPixel(maxBars));
-        int contentH = juce::jmax(vb.getHeight(), ARR_HEADER_H + numTracks * ARR_SLOT_H + 20);
+        int contentH = juce::jmax(vb.getHeight(), ARR_HEADER_H + numTracks * ARR_SLOT_H + autoExtra + 20);
         content.setSize(contentW, contentH);
         positionAutomationOverlay();
     }

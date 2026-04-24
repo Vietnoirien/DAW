@@ -27,6 +27,9 @@ public:
     // Automation Registry
     virtual void registerAutomationParameters(AutomationRegistry* registry) = 0;
 
+    // Explicitly close any open UI windows before the instrument is swapped/destroyed
+    virtual void closeUI() {}
+
     // UI Creation
     virtual std::unique_ptr<juce::Component> createEditor() = 0;
 

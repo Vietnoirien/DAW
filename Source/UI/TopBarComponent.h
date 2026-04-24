@@ -10,7 +10,6 @@ public:
         addAndMakeVisible(playBtn);
         addAndMakeVisible(stopBtn);
         addAndMakeVisible(bpmSlider);
-        addAndMakeVisible(loadPluginBtn);
         addAndMakeVisible(settingsBtn);
         addAndMakeVisible(projectBtn);
         addAndMakeVisible(sessionViewBtn);
@@ -108,7 +107,6 @@ public:
         
         fb.items.add(juce::FlexItem(viewFb).withWidth(140).withHeight(30).withMargin(margin));
         
-        fb.items.add(juce::FlexItem(loadPluginBtn).withWidth(120).withHeight(30).withMargin(margin));
         fb.items.add(juce::FlexItem(settingsBtn).withWidth(110).withHeight(30).withMargin(margin));
 
         fb.performLayout(getLocalBounds());
@@ -116,7 +114,6 @@ public:
 
     juce::TextButton playBtn      {"Play"};
     juce::TextButton stopBtn      {"Stop"};
-    juce::TextButton loadPluginBtn{"Load Plugin..."};
     juce::TextButton settingsBtn  {"\u2699 Settings"};
     juce::TextButton projectBtn   {"Project \u25BC"};
     juce::TextButton sessionViewBtn{"SESSION"};

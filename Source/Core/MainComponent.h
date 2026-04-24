@@ -21,6 +21,7 @@
 #include "../Instruments/InstrumentFactory.h"
 #include "../Instruments/DrumRackComponent.h"
 #include "Instrument.h"
+#include "../Instruments/PluginInstrumentAdapter.h"
 #include "InstrumentFactory.h"
 #include "../Effects/EffectProcessor.h"
 #include "../Effects/EffectFactory.h"
@@ -58,10 +59,27 @@ struct Track : public AutomationRegistry
         float minVal;
         float maxVal;
     };
+    juce::SpinLock automationLock;
     std::unordered_map<juce::String, AutomatableParameter> automationRegistry;
     
     void registerParameter(const juce::String& id, std::atomic<float>* ptr, float minVal = 0.0f, float maxVal = 1.0f) override {
+        juce::SpinLock::ScopedLockType sl(automationLock);
         if (ptr) automationRegistry[id] = {ptr, minVal, maxVal};
+    }
+
+    void refreshAutomationRegistry() {
+        {
+            juce::SpinLock::ScopedLockType sl(automationLock);
+            automationRegistry.clear();
+        }
+        if (auto* inst = activeInstrument.load(std::memory_order_acquire)) {
+            inst->registerAutomationParameters(this);
+        }
+        for (int i = 0; i < MAX_EFFECTS; ++i) {
+            if (auto* effect = effectChain[i].load(std::memory_order_acquire)) {
+                effect->registerAutomationParameters(this);
+            }
+        }
     }
 
     void processPatternCommands(int64_t blockStartSample, int numSamples,
@@ -246,6 +264,7 @@ public:
     void regenerateEuclideanMidi(ClipData& clip);
     void loadAudioFileIntoDrumPad(int trackIdx, int padIndex, const juce::File& file);
     void updateDrumRackPatternEditor();
+    void loadPluginAsTrackInstrument(int trackIdx, const juce::File& pluginFile);
     
     juce::String activeAutomationParameterId;
     int activeAutomationTrackIdx = -1;
@@ -308,6 +327,52 @@ private:
     int selectedTrackIndex = -1;
     int selectedSceneIndex = -1;
     int selectedDrumPadIndex = 0;
+
+    // ── Browser resize state ─────────────────────────────────────────────────
+    int browserWidth { 200 };   // persisted; clamped [140, 520]
+
+    // Thin drag-strip sitting on the right edge of the browser panel.
+    // Inline nested class so it can call back into MainComponent directly.
+    struct BrowserResizer : public juce::Component
+    {
+        MainComponent& owner;
+        int dragStartX   { 0 };
+        int dragStartW   { 0 };
+
+        explicit BrowserResizer (MainComponent& o) : owner (o)
+        {
+            setMouseCursor (juce::MouseCursor::LeftRightResizeCursor);
+        }
+
+        void paint (juce::Graphics& g) override
+        {
+            // Subtle handle: a pair of short vertical dashes centred on the strip
+            auto b = getLocalBounds().toFloat();
+            float cx = b.getCentreX();
+            float cy = b.getCentreY();
+            g.setColour (juce::Colour (0xff404060));
+            for (int i = -1; i <= 1; ++i)
+                g.fillRoundedRectangle (cx - 1.0f, cy + i * 5.0f - 5.0f, 2.0f, 10.0f, 1.0f);
+        }
+
+        void mouseEnter (const juce::MouseEvent&) override { repaint(); }
+        void mouseExit  (const juce::MouseEvent&) override { repaint(); }
+
+        void mouseDown (const juce::MouseEvent& e) override
+        {
+            dragStartX = e.getScreenX();
+            dragStartW = owner.browserWidth;
+        }
+
+        void mouseDrag (const juce::MouseEvent& e) override
+        {
+            int delta = e.getScreenX() - dragStartX;
+            owner.browserWidth = juce::jlimit (140, 520, dragStartW + delta);
+            owner.resized();
+        }
+    };
+
+    BrowserResizer  browserResizer { *this };
 
     // ── UI Elements ──────────────────────────────────────────────────────────
     std::unique_ptr<TopBarComponent> topBar;
