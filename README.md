@@ -6,7 +6,9 @@
 
 ## Overview
 
-LiBeDAW is an Ableton Live–inspired Session View DAW engineered from first principles on Linux. It prioritizes **real-time audio safety**, **sample-accurate sequencing**, and a **lock-free architecture** between the UI and audio engine. Every design decision is made to guarantee deterministic, jitter-free playback at professional studio quality.
+LiBeDAW is an Ableton Live–inspired Session View DAW built with C++20 and JUCE 8. It prioritizes **real-time audio safety**, **sample-accurate sequencing**, and a **lock-free architecture** between the UI and audio engine. Every design decision is made to guarantee deterministic, jitter-free playback at professional studio quality.
+
+LiBeDAW is developed and tested on **Linux**. The codebase uses only cross-platform JUCE APIs and the build system has been structured to support **macOS** and **Windows**, but those platforms have not yet been tested. Contributions and build reports are welcome.
 
 ---
 
@@ -29,7 +31,7 @@ LiBeDAW is an Ableton Live–inspired Session View DAW engineered from first pri
 - 📁 **Asset Browser** — Drag-and-drop file browser with persistent folder bookmarks and dynamically generated drag tiles for instruments and effects.
 - 💾 **Project Management** — Full save/load via `juce::ValueTree` serialization (custom `.LBD` project file format).
 - 📤 **Audio Export** — High-quality offline rendering bounce engine supporting WAV, MP3, FLAC, and OGG formats (via FFmpeg integration).
-- 🔌 **Plugin Hosting (VST3 / LV2)** — Drag any VST3 or LV2 plugin from the new **Plugins** browser tab directly onto a track to load it as the track's instrument. The plugin editor opens in a floating window toggled by a button in the Device View chain. Plugin search directories are persisted across sessions.
+- 🔌 **Plugin Hosting (VST3 / LV2 / AU)** — Drag any VST3 plugin (all platforms), LV2 plugin (Linux), or Audio Unit (macOS) from the **Plugins** browser tab directly onto a track. The plugin editor opens in a floating window toggled by a button in the Device View chain. Platform-specific default search paths are seeded automatically; additional directories are persisted across sessions.
   > **CLAP hosting** — The `clap-juce-extensions` submodule (providing the CLAP SDK headers) is included for future readiness. Native CLAP *host* support requires JUCE 9; until then, use the VST3 version of your plugins (e.g. `Vital.vst3`).
 - ⚙️ **Audio Device Settings** — Runtime soundcard/buffer/sample-rate configuration.
 - 🕹️ **Global Transport** — Sample-accurate BPM clock driving all sequencers.
@@ -95,15 +97,22 @@ Source/
 
 ## Building
 
-### Prerequisites
+> **JUCE is fetched automatically** via CMake `FetchContent` (JUCE **8.0.12**) — no manual download needed.
 
-- **OS**: Linux (Debian 13 "Trixie" / Ubuntu 24.04+ recommended)
-- **Compiler**: GCC 14+ or Clang 18+ (C++20 required)
-- **CMake**: 3.21+
-- **Git**: required to fetch submodules
-- **Dependencies**: `pkg-config`, `libasound2-dev`, `libfreetype6-dev`, `libfontconfig1-dev`, `libcurl4-openssl-dev`, `libx11-dev`, `libxrandr-dev`, `libxinerama-dev`, `libxcursor-dev`, `libgl1-mesa-dev`, `libglu1-mesa-dev`, `libwebkit2gtk-4.1-dev`, `ffmpeg` (for MP3/FLAC/OGG export)
+---
 
-Install dependencies on Debian 13 / Ubuntu 24.04:
+### 🐧 Linux
+
+#### Prerequisites
+
+| Tool | Minimum version |
+|------|-----------------|
+| GCC or Clang | GCC 14+ / Clang 18+ (C++20 required) |
+| CMake | 3.21+ |
+| Git | any recent version |
+
+Install system dependencies (Debian 13 / Ubuntu 24.04):
+
 ```bash
 sudo apt update
 sudo apt install cmake build-essential git pkg-config \
@@ -113,40 +122,150 @@ sudo apt install cmake build-essential git pkg-config \
   libwebkit2gtk-4.1-dev ffmpeg
 ```
 
-> **Note for Debian 12 (Bookworm)**: replace `libwebkit2gtk-4.1-dev` with `libwebkit2gtk-4.0-dev`.
+> **Debian 12 (Bookworm)**: replace `libwebkit2gtk-4.1-dev` with `libwebkit2gtk-4.0-dev`.
 
-### Build
+#### Build
 
 ```bash
-git clone https://github.com/Vietnoirien/DAW.git
+git clone https://github.com/Vietnoirien/LiBeDAW.git
 cd DAW
-git submodule update --init --recursive   # pulls clap-juce-extensions
+git submodule update --init --recursive
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
-> **JUCE**: fetched automatically via CMake `FetchContent` (JUCE **8.0.12**).
-
-JUCE places the binary inside a configuration subfolder:
-
-| Build type | Binary path |
-|---|---|
-| Release (recommended) | `build/LiBeDAW_artefacts/Release/LiBeDAW` |
-| Debug | `build/LiBeDAW_artefacts/Debug/LiBeDAW` |
-
-A convenience **symlink** is created automatically at `build/LiBeDAW_artefacts/LiBeDAW` pointing to whichever configuration was last built, so the run command below always works.
-
-### Run
+#### Run
 
 ```bash
+# Via convenience symlink (always points to the last-built config)
 ./build/LiBeDAW_artefacts/LiBeDAW
-```
 
-Or run the configuration binary directly:
-
-```bash
+# Or directly
 ./build/LiBeDAW_artefacts/Release/LiBeDAW
 ```
+
+#### Plugin formats
+
+- **VST3** — standard locations (`/usr/lib/vst3`, `~/.vst3`) are scanned automatically
+- **LV2** — standard locations (`/usr/lib/lv2`, `~/.lv2`) are scanned automatically
+
+---
+
+### 🍎 macOS *(untested — build reports welcome)*
+
+> **⚠️ Untested platform.** The code changes required for macOS compatibility have been applied (platform-guarded LV2/AU plugin formats, default search paths), but LiBeDAW has not yet been compiled or run on macOS. The instructions below follow JUCE 8's documented requirements and should work, but may need adjustment.
+
+#### Prerequisites
+
+| Tool | Minimum version |
+|------|-----------------|
+| Xcode | 14+ (includes Apple Clang with C++20) |
+| Xcode Command Line Tools | required even if using Ninja |
+| CMake | 3.21+ |
+| Git | any recent version |
+| ffmpeg | for MP3/FLAC/OGG export (via Homebrew) |
+
+```bash
+# Install Xcode Command Line Tools (if not already installed)
+xcode-select --install
+
+# Install Homebrew dependencies
+brew install cmake git ffmpeg
+```
+
+#### Build
+
+```bash
+git clone https://github.com/Vietnoirien/LiBeDAW.git
+cd DAW
+git submodule update --init --recursive
+
+# Intel Mac
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+# Apple Silicon + Intel Universal Binary
+cmake -B build -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+
+cmake --build build -j$(nproc)
+```
+
+> **Xcode generator (optional):** replace the first cmake line with
+> `cmake -B build -G Xcode` to open the project in Xcode instead.
+
+#### Run
+
+```bash
+open build/LiBeDAW_artefacts/Release/LiBeDAW.app
+# or
+./build/LiBeDAW_artefacts/Release/LiBeDAW.app/Contents/MacOS/LiBeDAW
+```
+
+#### Plugin formats
+
+- **VST3** — `/Library/Audio/Plug-Ins/VST3` and `~/Library/Audio/Plug-Ins/VST3` are scanned automatically
+- **Audio Units (AU)** — `/Library/Audio/Plug-Ins/Components` and `~/Library/Audio/Plug-Ins/Components` are scanned automatically
+
+> **Code signing:** for local development no signing is required. For distribution, sign with `codesign --deep --sign - LiBeDAW.app` or configure a Developer ID certificate.
+
+---
+
+### 🪟 Windows *(untested — build reports welcome)*
+
+> **⚠️ Untested platform.** The code changes required for Windows compatibility have been applied (platform-guarded LV2 format, symlink guard, default VST3 paths), but LiBeDAW has not yet been compiled or run on Windows. The instructions below follow JUCE 8's documented requirements and should work, but may need adjustment.
+
+#### Prerequisites
+
+| Tool | Minimum version | Notes |
+|------|-----------------|-------|
+| Visual Studio | 2022 (MSVC v143) | Community edition is free; select **"Desktop development with C++"** |
+| CMake | 3.21+ | Bundled with Visual Studio or install from cmake.org |
+| Git | any recent version | |
+| ffmpeg | any | Add `ffmpeg.exe` to `PATH` for MP3/FLAC/OGG export |
+
+> **MinGW is not supported.** JUCE uses Windows COM/WinRT APIs for audio (WASAPI) and VST3 hosting that require MSVC.
+
+#### Build (Developer Command Prompt or PowerShell)
+
+```powershell
+git clone https://github.com/Vietnoirien/LiBeDAW.git
+cd DAW
+git submodule update --init --recursive
+
+cmake -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+```
+
+> **Ninja (faster):** if you have the "Ninja" component installed via Visual Studio,
+> open a **"x64 Native Tools Command Prompt for VS 2022"** and use:
+> ```powershell
+> cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+> cmake --build build
+> ```
+
+#### Run
+
+```powershell
+.\build\LiBeDAW_artefacts\Release\LiBeDAW.exe
+```
+
+#### Plugin formats
+
+- **VST3** — `C:\Program Files\Common Files\VST3` and `%APPDATA%\VST3` are scanned automatically
+- LV2 and AU are not available on Windows
+
+> **Low-latency audio:** Windows' default audio stack (WASAPI) works out of the box. For sub-10 ms latency, install an **ASIO driver** (e.g. [ASIO4ALL](https://www.asio4all.org/) for generic hardware or your audio interface's native driver) and select it in *Settings → Audio Device*.
+
+---
+
+### Binary locations (all platforms)
+
+| Platform | Release binary |
+|----------|----------------|
+| Linux | `build/LiBeDAW_artefacts/Release/LiBeDAW` |
+| Linux (symlink) | `build/LiBeDAW_artefacts/LiBeDAW` |
+| macOS | `build/LiBeDAW_artefacts/Release/LiBeDAW.app` |
+| Windows | `build\LiBeDAW_artefacts\Release\LiBeDAW.exe` |
 
 ---
 

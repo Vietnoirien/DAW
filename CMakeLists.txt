@@ -50,8 +50,15 @@ target_compile_features(LiBeDAW PRIVATE cxx_std_20)
 target_compile_definitions(LiBeDAW PRIVATE
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
-    JUCE_PLUGINHOST_VST3=1
-    JUCE_PLUGINHOST_LV2=1)
+    JUCE_PLUGINHOST_VST3=1)
+
+if (UNIX AND NOT APPLE)
+    target_compile_definitions(LiBeDAW PRIVATE JUCE_PLUGINHOST_LV2=1)
+endif()
+
+if (APPLE)
+    target_compile_definitions(LiBeDAW PRIVATE JUCE_PLUGINHOST_AU=1)
+endif()
 
 target_link_libraries(LiBeDAW PRIVATE
     juce::juce_core
@@ -71,9 +78,12 @@ target_link_libraries(LiBeDAW PRIVATE
 # JUCE places the binary under LiBeDAW_artefacts/<Config>/LiBeDAW (e.g. Debug/
 # or Release/).  The symlink at the parent level keeps `./build/LiBeDAW_artefacts/LiBeDAW`
 # working regardless of the chosen build type, matching what the README documents.
-add_custom_command(TARGET LiBeDAW POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E create_symlink
-        $<CONFIG>/LiBeDAW
-        ${CMAKE_CURRENT_BINARY_DIR}/LiBeDAW_artefacts/LiBeDAW
-    COMMENT "Creating LiBeDAW_artefacts/LiBeDAW symlink → $<CONFIG>/LiBeDAW"
-)
+# Symlinks require Unix; skip on Windows where they need elevated privileges.
+if (UNIX)
+    add_custom_command(TARGET LiBeDAW POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E create_symlink
+            $<CONFIG>/LiBeDAW
+            ${CMAKE_CURRENT_BINARY_DIR}/LiBeDAW_artefacts/LiBeDAW
+        COMMENT "Creating LiBeDAW_artefacts/LiBeDAW symlink → $<CONFIG>/LiBeDAW"
+    )
+endif()

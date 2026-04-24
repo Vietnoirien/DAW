@@ -380,7 +380,12 @@ MainComponent::MainComponent()
 
     formatManager.registerBasicFormats();
     pluginFormatManager.addFormat (std::make_unique<juce::VST3PluginFormat>());
+   #if JUCE_LINUX
     pluginFormatManager.addFormat (std::make_unique<juce::LV2PluginFormat>());
+   #endif
+   #if JUCE_MAC
+    pluginFormatManager.addFormat (std::make_unique<juce::AudioUnitPluginFormat>());
+   #endif
 
 
     topBar = std::make_unique<TopBarComponent>(transportClock, deviceManager);
@@ -620,12 +625,37 @@ MainComponent::MainComponent()
     };
 
     // ── Plugin Browser (Plugins tab in BrowserComponent) ──────────────────────
-    // Restore saved plugin search paths from userSettings, then add the default
-    // Vital installer path so it shows up immediately on first launch.
+    // Seed platform-specific default VST3 / AU locations so plugins show up
+    // immediately on first launch without the user having to add folders.
     {
-        juce::File vitalDefault (u8"/home/vietnoirien/Téléchargements/VitalInstaller/lib");
-        if (vitalDefault.isDirectory())
-            browser.addPluginSearchPath (vitalDefault);
+        juce::Array<juce::File> defaultPluginDirs;
+
+       #if JUCE_WINDOWS
+        defaultPluginDirs.add (juce::File ("C:\\Program Files\\Common Files\\VST3"));
+        defaultPluginDirs.add (juce::File ("C:\\Program Files (x86)\\Common Files\\VST3"));
+        defaultPluginDirs.add (juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                                          .getChildFile ("VST3"));
+       #elif JUCE_MAC
+        defaultPluginDirs.add (juce::File ("/Library/Audio/Plug-Ins/VST3"));
+        defaultPluginDirs.add (juce::File ("/Library/Audio/Plug-Ins/Components"));
+        defaultPluginDirs.add (juce::File::getSpecialLocation (juce::File::userHomeDirectory)
+                                          .getChildFile ("Library/Audio/Plug-Ins/VST3"));
+        defaultPluginDirs.add (juce::File::getSpecialLocation (juce::File::userHomeDirectory)
+                                          .getChildFile ("Library/Audio/Plug-Ins/Components"));
+       #else  // Linux
+        defaultPluginDirs.add (juce::File ("/usr/lib/vst3"));
+        defaultPluginDirs.add (juce::File ("/usr/local/lib/vst3"));
+        defaultPluginDirs.add (juce::File::getSpecialLocation (juce::File::userHomeDirectory)
+                                          .getChildFile (".vst3"));
+        defaultPluginDirs.add (juce::File ("/usr/lib/lv2"));
+        defaultPluginDirs.add (juce::File ("/usr/local/lib/lv2"));
+        defaultPluginDirs.add (juce::File::getSpecialLocation (juce::File::userHomeDirectory)
+                                          .getChildFile (".lv2"));
+       #endif
+
+        for (const auto& dir : defaultPluginDirs)
+            if (dir.isDirectory())
+                browser.addPluginSearchPath (dir);
     }
 
     browser.getPluginsPanel().onAddFolder = [this] (const juce::File& dir)
@@ -649,6 +679,7 @@ MainComponent::MainComponent()
     patternEditor.onEuclideanChanged = [this](int k, int n) {
         if (selectedTrackIndex < 0) return;
         if (selectedSceneIndex < 0) return;
+        markDirty();
 
         auto& clip = clipGrid[selectedTrackIndex][selectedSceneIndex];
 
@@ -688,6 +719,7 @@ MainComponent::MainComponent()
     patternEditor.onEuclideanBarsChanged = [this](int bars) {
         if (selectedTrackIndex < 0) return;
         if (selectedSceneIndex < 0) return;
+        markDirty();
 
         auto& clip = clipGrid[selectedTrackIndex][selectedSceneIndex];
 
@@ -726,6 +758,7 @@ MainComponent::MainComponent()
     patternEditor.onEuclideanHitMapChanged = [this](const std::vector<uint8_t>& map) {
         if (selectedTrackIndex < 0) return;
         if (selectedSceneIndex < 0) return;
+        markDirty();
 
         auto& clip = clipGrid[selectedTrackIndex][selectedSceneIndex];
 
@@ -759,6 +792,7 @@ MainComponent::MainComponent()
     patternEditor.onMidiNotesChanged = [this](const std::vector<MidiNote>& notes) {
         if (selectedTrackIndex < 0) return;
         if (selectedSceneIndex < 0) return;
+        markDirty();
 
         double maxBeat = 0.0;
         for (const auto& n : notes)
@@ -782,10 +816,11 @@ MainComponent::MainComponent()
 
     patternEditor.onModeChanged = [this](const juce::String& mode) {
         if (selectedTrackIndex >= 0 && selectedSceneIndex >= 0) {
-            // "automation" is a UI view-only state — never overwrite the clip's MIDI
-            // generation mode (pianoroll/euclidean/drumrack) with it.
             if (mode != "automation")
+            {
                 clipGrid[selectedTrackIndex][selectedSceneIndex].patternMode = mode;
+                markDirty();
+            }
         }
     };
 
@@ -810,6 +845,7 @@ MainComponent::MainComponent()
 
     patternEditor.onAutomationLaneChanged = [this]() {
         if (selectedTrackIndex < 0 || selectedSceneIndex < 0) return;
+        markDirty();
         auto& clip = clipGrid[selectedTrackIndex][selectedSceneIndex];
         
         sessionView.setClipData(selectedTrackIndex, selectedSceneIndex, clip);
@@ -840,6 +876,7 @@ MainComponent::MainComponent()
     // ── Session View Callbacks ────────────────────────────────────────────────
     sessionView.onCreateClip = [this](int t, int s) {
         if (t < 0 || t >= (int)audioTracks.size()) return;
+        markDirty();
         auto& clip           = clipGrid[t][s];
         clip.hasClip         = true;
         clip.name            = "Pattern " + juce::String(s + 1);
@@ -1021,6 +1058,7 @@ MainComponent::MainComponent()
         if (t < 0 || t >= (int)audioTracks.size()) return;
         auto& clip = clipGrid[t][s];
         if (!clip.hasClip) return;
+        markDirty();
 
         if (clip.isPlaying) {
             audioTracks[t]->commandQueue.push({ TrackCommand::Type::StopPattern, nullptr, 0 });
@@ -1059,10 +1097,32 @@ MainComponent::MainComponent()
         int nTracks = numActiveTracks.load(std::memory_order_acquire);
         if (trackIndex < 0 || trackIndex >= nTracks) return;
 
-        bool wasRunning = renderThread.isThreadRunning();
-        if (wasRunning) renderThread.stopThread(500);
+        // ── Step 1: Atomically detach the instrument BEFORE stopping the thread.
+        // This ensures the render thread will see nullptr on its next processBlock
+        // call even if it's currently finishing an iteration.  We also close any
+        // open plugin UI window here (on the message thread, which is the right place).
+        InstrumentProcessor* deadInst = nullptr;
+        {
+            auto* inst = audioTracks[trackIndex]->activeInstrument.load(std::memory_order_acquire);
+            if (inst) inst->closeUI();
+            deadInst = audioTracks[trackIndex]->activeInstrument.exchange(
+                nullptr, std::memory_order_acq_rel);
+        }
 
-        // Clear the track being deleted
+        // ── Step 2: Stop the render thread with a generous timeout.
+        // Because activeInstrument is already nullptr, the render thread won't
+        // enter processBlock for this track — so 2 s is more than enough.
+        bool wasRunning = renderThread.isThreadRunning();
+        if (wasRunning) renderThread.stopThread(2000);
+
+        // ── Step 3: Async-delete the old instrument on the message thread.
+        // This matches the GC path used by the render thread and is safe for
+        // PluginInstrumentAdapters whose VST3 destructors need the message loop.
+        if (deadInst)
+            juce::MessageManager::callAsync([deadInst] { delete deadInst; });
+
+        // ── Step 4: Drain remaining garbage (patterns, effects) synchronously
+        // now that the render thread is stopped.
         audioTracks[trackIndex]->clear();
 
         // Erase from all parallel vectors
@@ -1158,6 +1218,7 @@ MainComponent::MainComponent()
             targetIdx = trackIdx;
             sessionView.gridContent.columns[targetIdx]->header.hasInstrument = true;
             sessionView.gridContent.columns[targetIdx]->header.instrumentName = type;
+            sessionView.gridContent.columns[targetIdx]->header.repaint();
             trackInstruments[targetIdx] = type;
             if (auto* current = audioTracks[targetIdx]->activeInstrument.load(std::memory_order_acquire)) {
                 current->closeUI();
@@ -1214,6 +1275,7 @@ MainComponent::MainComponent()
         showDeviceEditorForTrack(targetIdx);
 
         resized();
+        markDirty();
     };
 
     sessionView.onEffectDropped = [this](int trackIdx, const juce::String& type) {
@@ -1250,6 +1312,7 @@ MainComponent::MainComponent()
         
         showDeviceEditorForTrack(trackIdx);
         resized();
+        markDirty();
     };
 
     // ── Mixer Volume Callbacks ────────────────────────────────────────
@@ -1288,6 +1351,7 @@ MainComponent::MainComponent()
         if (t >= 0 && t < (int)clipGrid.size() && juce::isPositiveAndBelow(s, NUM_SCENES)) {
             clipGrid[t][s].name = name;
             sessionView.setClipData(t, s, clipGrid[t][s]);
+            markDirty();
         }
     };
 
@@ -1295,12 +1359,14 @@ MainComponent::MainComponent()
         if (t >= 0 && t < (int)clipGrid.size() && juce::isPositiveAndBelow(s, NUM_SCENES)) {
             clipGrid[t][s].colour = c;
             sessionView.setClipData(t, s, clipGrid[t][s]);
+            markDirty();
         }
     };
 
     sessionView.onRenameTrack = [this](int t, const juce::String& name) {
         // The TrackHeader already updated its own trackName and repainted;
         // nothing else to do at runtime (persistence happens on Save).
+        markDirty();
         juce::ignoreUnused(t, name);
     };
 
@@ -1891,6 +1957,73 @@ void MainComponent::loadDeviceSettings()
 //  Project Management & Workspace Lifecycle
 // ════════════════════════════════════════════════════════════════════════════
 
+void MainComponent::updateWindowTitle()
+{
+    juce::String projectName = (currentProjectFile != juce::File{})
+                                   ? currentProjectFile.getFileNameWithoutExtension()
+                                   : "Untitled";
+    juce::String title = "LiBeDAW \u2014 " + projectName + (projectIsDirty ? " *" : "");
+
+    if (auto* tlc = getTopLevelComponent())
+        tlc->setName(title);
+}
+
+void MainComponent::markDirty()
+{
+    if (!projectIsDirty)
+    {
+        projectIsDirty = true;
+        updateWindowTitle();
+    }
+}
+
+bool MainComponent::saveIfNeededBeforeQuit()
+{
+    if (!projectIsDirty)
+        return true; // nothing unsaved — proceed with quit
+
+    juce::String projectName = (currentProjectFile != juce::File{})
+                                   ? currentProjectFile.getFileNameWithoutExtension()
+                                   : "Untitled";
+
+    const int result = juce::NativeMessageBox::showYesNoCancelBox(
+        juce::MessageBoxIconType::QuestionIcon,
+        "Unsaved Changes",
+        "\"" + projectName + "\" has unsaved changes.\nDo you want to save before quitting?",
+        nullptr, nullptr);
+
+    // result: 1 = Yes (Save), 0 = No (Discard), -1 = Cancel
+    if (result == 1)
+    {
+        // Save now, then quit
+        if (currentProjectFile == juce::File{})
+        {
+            // No file yet — trigger Save As synchronously via the existing callback
+            if (topBar && topBar->onSaveProjectAs)
+                topBar->onSaveProjectAs();
+            // After Save As the dirty flag will be cleared by the lambda;
+            // we still allow quit (the file chooser already ran).
+        }
+        else
+        {
+            syncProjectToUI();
+            projectManager.saveProject(currentProjectFile);
+            projectIsDirty = false;
+            updateWindowTitle();
+        }
+        return true;
+    }
+    else if (result == 0)
+    {
+        return true; // Discard — proceed with quit
+    }
+    else
+    {
+        return false; // Cancel — abort quit
+    }
+}
+
+
 bool MainComponent::ensureWorkspaceDirectory()
 {
     juce::File appDataDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("LiBeDAW");
@@ -1967,7 +2100,9 @@ void MainComponent::configureProjectMenu()
         transportClock.stop();
         projectManager.createNewProject();
         currentProjectFile = juce::File();
+        projectIsDirty = false;
         syncUIToProject();
+        updateWindowTitle();
     };
 
     topBar->onOpenProject = [this] {
@@ -1979,7 +2114,9 @@ void MainComponent::configureProjectMenu()
                     transportClock.stop();
                     if (projectManager.loadProject(result)) {
                         currentProjectFile = result;
+                        projectIsDirty = false;
                         syncUIToProject();
+                        updateWindowTitle();
                     } else {
                         juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Error", "Could not load project file.");
                     }
@@ -1993,6 +2130,8 @@ void MainComponent::configureProjectMenu()
         } else {
             syncProjectToUI();
             projectManager.saveProject(currentProjectFile);
+            projectIsDirty = false;
+            updateWindowTitle();
         }
     };
 
@@ -2008,9 +2147,13 @@ void MainComponent::configureProjectMenu()
                     currentProjectFile = result;
                     syncProjectToUI();
                     projectManager.saveProject(currentProjectFile);
+                    projectIsDirty = false;
+                    updateWindowTitle();
                 }
             });
     };
+
+    topBar->onBpmChanged = [this] { markDirty(); };
 }
 
 void MainComponent::syncUIToProject()
@@ -2896,7 +3039,7 @@ void MainComponent::loadPluginAsTrackInstrument (int trackIdx, const juce::File&
         targetIdx = numActiveTracks.fetch_add (1, std::memory_order_release);
         sessionView.addTrack (TrackType::Audio, pluginName);
         sessionView.gridContent.columns[targetIdx]->header.hasInstrument = true;
-        sessionView.gridContent.columns[targetIdx]->header.instrumentName = pluginName;
+        sessionView.gridContent.columns[targetIdx]->header.instrumentName = "Plugin:" + pluginName;
         sessionView.gridContent.columns[targetIdx]->header.repaint();
     }
     else
@@ -2904,7 +3047,7 @@ void MainComponent::loadPluginAsTrackInstrument (int trackIdx, const juce::File&
         juce::String pluginName = foundDescs[0]->name;
         trackInstruments[targetIdx] = "Plugin:" + pluginName;
         sessionView.gridContent.columns[targetIdx]->header.hasInstrument = true;
-        sessionView.gridContent.columns[targetIdx]->header.instrumentName = pluginName;
+        sessionView.gridContent.columns[targetIdx]->header.instrumentName = "Plugin:" + pluginName;
         sessionView.gridContent.columns[targetIdx]->header.repaint();
     }
 

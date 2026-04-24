@@ -246,14 +246,34 @@ public:
         if (hasInstrument)
         {
             auto tag = juce::Rectangle<float> ((float)(getWidth() - 46), (float)(getHeight() / 2) - 7.0f, 42.0f, 14.0f);
-            juce::String shortName = "SMPLR";
-            juce::Colour tagC = juce::Colour(0xff226644);
+            juce::String shortName;
+            juce::Colour tagC;
             if (instrumentName == "Oscillator") {
                 shortName = "OSCL";
-                tagC = juce::Colour(0xff1a4a7a);
+                tagC = juce::Colour(0xff1a4a7a);   // blue
             } else if (instrumentName == "DrumRack") {
                 shortName = "DRUM";
-                tagC = juce::Colour(0xff7a4a1a);
+                tagC = juce::Colour(0xff7a4a1a);   // orange-brown
+            } else if (instrumentName == "Simpler") {
+                shortName = "SMPLR";
+                tagC = juce::Colour(0xff226644);   // green
+            } else if (instrumentName == "FMSynth") {
+                shortName = "FM";
+                tagC = juce::Colour(0xff1a6a6a);   // teal
+            } else if (instrumentName == "WavetableSynth") {
+                shortName = "WVTB";
+                tagC = juce::Colour(0xff3a2a7a);   // indigo
+            } else if (instrumentName == "KarplusStrong") {
+                shortName = "KPLS";
+                tagC = juce::Colour(0xff7a2a4a);   // rose
+            } else if (instrumentName.startsWith ("Plugin:")) {
+                // External VST/AU plugin — show first 4 chars of plugin name
+                shortName = instrumentName.substring (7).trim().substring (0, 4).toUpperCase();
+                tagC = juce::Colour(0xff5a2a7a);   // purple
+            } else {
+                // Unknown / generic instrument
+                shortName = "INST";
+                tagC = juce::Colour(0xff3a3a7a);   // dark blue
             }
             g.setColour (tagC);
             g.fillRoundedRectangle (tag, 3.0f);

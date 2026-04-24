@@ -34,7 +34,10 @@ public:
         bpmSlider.setRange(20.0, 300.0, 1.0);
         bpmSlider.setValue(transport.getBpm());
         bpmSlider.setDoubleClickReturnValue(true, 120.0);
-        bpmSlider.onValueChange = [this] { transport.setBpm(bpmSlider.getValue()); };
+        bpmSlider.onValueChange = [this] {
+            transport.setBpm(bpmSlider.getValue());
+            if (onBpmChanged) onBpmChanged();
+        };
 
         settingsBtn.onClick = [this] { openAudioSettings(); };
 
@@ -67,6 +70,7 @@ public:
     std::function<void()> onSaveProject;
     std::function<void()> onSaveProjectAs;
     std::function<void()> onExportAudio;
+    std::function<void()> onBpmChanged;
 
     // View callbacks
     std::function<void()> onSwitchToSession;

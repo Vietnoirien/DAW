@@ -283,6 +283,10 @@ public:
                                     const juce::MidiMessage& message) override;
     void timerCallback() override;
 
+    // ── Quit-time save dialog (called by MainWindow) ─────────────────────────
+    bool saveIfNeededBeforeQuit();
+    bool isProjectDirty() const { return projectIsDirty; }
+
     // ── State exposed to RenderThread (friend) ───────────────────────────────
     friend class RenderThread;
 
@@ -304,6 +308,7 @@ private:
     GlobalTransport transportClock;
     ProjectManager  projectManager;
     juce::File      currentProjectFile;
+    bool            projectIsDirty { false };
     std::unique_ptr<juce::FileChooser> projectChooser;
 
     void configureProjectMenu();
@@ -311,6 +316,8 @@ private:
     void syncUIToProject();
     void loadAudioFileIntoTrack(int trackIdx, const juce::File& file);
     void exportProject(const juce::File& outputFile, const juce::String& format);
+    void updateWindowTitle();
+    void markDirty();
 
     // ── Audio Graph Elements ─────────────────────────────────────────────────
     // Tracks are heap-allocated (Track has non-movable std::atomic members).

@@ -52,6 +52,11 @@ public:
 
         void closeButtonPressed() override
         {
+            if (auto* mc = dynamic_cast<MainComponent*>(getContentComponent()))
+            {
+                if (!mc->saveIfNeededBeforeQuit())
+                    return; // user clicked Cancel — keep the app alive
+            }
             JUCEApplication::getInstance()->systemRequestedQuit();
         }
 
