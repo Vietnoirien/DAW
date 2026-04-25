@@ -329,8 +329,8 @@ private:
     std::atomic<int> numActiveTracks {0}; // written UI, read audio+render thread
 
     // ── Clip Grid State (UI thread only) ─────────────────────────────────────
-    // clipGrid[t][s] — grows in sync with audioTracks
-    std::vector<std::array<ClipData, NUM_SCENES>> clipGrid;
+    // clipGrid[t][s] — each track has its own dynamic scene list
+    std::vector<std::vector<ClipData>> clipGrid;
     int selectedTrackIndex = -1;
     int selectedSceneIndex = -1;
     int selectedDrumPadIndex = 0;

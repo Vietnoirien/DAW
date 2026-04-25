@@ -5,9 +5,10 @@
 #include <cstdint>
 
 // ─── Global DAW Layout Constants ──────────────────────────────────────────────
-static constexpr int NUM_SCENES  = 8;
-// MAX_TRACKS has been removed — track count is now unbounded at runtime.
-// Use numActiveTracks (atomic in MainComponent) as the live count.
+// MAX_TRACKS and NUM_SCENES have been removed — both track count and scene
+// count are now unbounded at runtime.
+// Use numActiveTracks (atomic in MainComponent) and clipGrid[t].size() for
+// the live counts.
 
 // ─── Track Type ───────────────────────────────────────────────────────────────
 enum class TrackType { Audio, Midi };

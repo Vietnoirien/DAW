@@ -55,6 +55,9 @@ public:
     std::function<bool()> canAddAutomation;
     // Returns true if the selected clip already has an automation lane for this parameter
     std::function<bool(const juce::String&)> hasAutomationForParam;
+    // Fired after any slider/knob/button inside the device chain is released.
+    // Wire this to MainComponent::markDirty() to track unsaved parameter changes.
+    std::function<void()> onParamChanged;
 
     DeviceView() {
         setOpaque(true);
@@ -92,6 +95,16 @@ public:
                 }
             }
         }
+    }
+
+    // Fired when the user releases the mouse after interacting with any child
+    // control (slider, knob, button). One call per user gesture — not on every
+    // intermediate drag tick — so markDirty() won't flood on fader drags.
+    void mouseUp(const juce::MouseEvent& event) override
+    {
+        // Only count interactions with actual controls, not the DeviceView background.
+        if (event.originalComponent != this && onParamChanged)
+            onParamChanged();
     }
 
     void paint(juce::Graphics& g) override {

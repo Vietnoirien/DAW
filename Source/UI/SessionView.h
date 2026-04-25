@@ -4,13 +4,14 @@
 #include "ClipData.h"
 
 // ─── Layout Constants ─────────────────────────────────────────────────────────
-static constexpr int SV_HEADER_H  = 36;
-static constexpr int SV_SLOT_H    = 36;
-static constexpr int SV_MIXER_H   = 220;
-static constexpr int SV_SCENE_W   = 52;
-static constexpr int SV_RETURN_W  = 80;
-static constexpr int SV_MASTER_W  = 80;
-static constexpr int SV_TRACK_W   = 180; // fixed track column width
+static constexpr int SV_HEADER_H        = 36;
+static constexpr int SV_SLOT_H          = 36;
+static constexpr int SV_ADD_SCENE_BTN_H = 28;  // height of the per-column '+ Scene' button
+static constexpr int SV_MIXER_H         = 220;
+static constexpr int SV_SCENE_W         = 52;
+static constexpr int SV_RETURN_W        = 80;
+static constexpr int SV_MASTER_W        = 80;
+static constexpr int SV_TRACK_W         = 180; // fixed track column width
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ClipSlot
@@ -381,8 +382,9 @@ public:
     juce::OwnedArray<ClipSlot> slots;
     juce::Slider     volFader;
     juce::Slider     sendAKnob;
-    juce::TextButton muteBtn  { "M" };
-    juce::TextButton soloBtn  { "S" };
+    juce::TextButton muteBtn     { "M" };
+    juce::TextButton soloBtn     { "S" };
+    juce::TextButton addSceneBtn { "+" }; // '+ Scene' button below last slot
     bool isMuted  = false;
     bool isSoloed = false;
     // Visual data updated from timerCallback on the message thread (no locking needed)
@@ -405,6 +407,8 @@ public:
     std::function<void(int scene, juce::Colour)>        onSetClipColourAt;
     std::function<void(const juce::String&)>            onRenameTrack;
     std::function<void(juce::Colour)>                   onSetTrackColour;
+    // Called when the user clicks the '+ Scene' button at the bottom of this column.
+    std::function<void()> onAddScene;
 
     TrackColumn (int index, const juce::String& name, TrackType type)
         : trackIndex (index)
@@ -413,27 +417,19 @@ public:
         header.trackType  = type;
         addAndMakeVisible (header);
 
-        for (int s = 0; s < NUM_SCENES; ++s)
-        {
-            auto* slot        = new ClipSlot();
-            slot->trackIndex  = index;
-            slot->sceneIndex  = s;
-            slot->onCreateClip    = [this, s] { if (onCreateClipAt)    onCreateClipAt (s); };
-            slot->onSelectClip    = [this, s] { if (onSelectClipAt)    onSelectClipAt (s); };
-            slot->onLaunchClip    = [this, s] { if (onLaunchClipAt)    onLaunchClipAt (s); };
-            slot->onPauseClip     = [this, s] { if (onPauseClipAt)     onPauseClipAt  (s); };
-            slot->onDeleteClip    = [this, s] { if (onDeleteClipAt)    onDeleteClipAt (s); };
-            slot->onDuplicateClip = [this, s] { if (onDuplicateClipAt) onDuplicateClipAt (s); };
-            slot->onRenameClip    = [this, s] (const juce::String& n) { if (onRenameClipAt)    onRenameClipAt    (s, n); };
-            slot->onSetClipColour = [this, s] (juce::Colour c)         { if (onSetClipColourAt) onSetClipColourAt (s, c); };
-            addAndMakeVisible (slot);
-            slots.add (slot);
-        }
+        // Slots start empty; user adds them via the '+' button (addScene()).
+        addSceneBtn.setButtonText ("+ Add Pattern");
+        addSceneBtn.setTooltip ("Add a clip slot to this track");
+        addSceneBtn.setColour (juce::TextButton::buttonColourId,   juce::Colour (0xff0d0d1f));
+        addSceneBtn.setColour (juce::TextButton::buttonOnColourId,  juce::Colour (0xff1a1a3a));
+        addSceneBtn.setColour (juce::TextButton::textColourOffId,   juce::Colour (0xff3a3a88));
+        addSceneBtn.onClick = [this] { if (onAddScene) onAddScene(); };
+        addAndMakeVisible (addSceneBtn);
 
         volFader.setSliderStyle (juce::Slider::LinearVertical);
         volFader.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 50, 16);
         volFader.setRange (0.0, 1.0);
-        volFader.setValue (1.0);
+        volFader.setValue (1.0, juce::dontSendNotification);
         volFader.setDoubleClickReturnValue (true, 1.0);
         volFader.onValueChange = [this] {
             if (onVolumeChanged) onVolumeChanged ((float) volFader.getValue());
@@ -469,6 +465,27 @@ public:
         addAndMakeVisible (soloBtn);
     }
 
+    // ── Add a new scene slot at the bottom ───────────────────────────────────
+    void addScene()
+    {
+        int s      = slots.size();
+        auto* slot = new ClipSlot();
+        slot->trackIndex  = trackIndex;
+        slot->sceneIndex  = s;
+        slot->onCreateClip    = [this, s] { if (onCreateClipAt)    onCreateClipAt (s); };
+        slot->onSelectClip    = [this, s] { if (onSelectClipAt)    onSelectClipAt (s); };
+        slot->onLaunchClip    = [this, s] { if (onLaunchClipAt)    onLaunchClipAt (s); };
+        slot->onPauseClip     = [this, s] { if (onPauseClipAt)     onPauseClipAt  (s); };
+        slot->onDeleteClip    = [this, s] { if (onDeleteClipAt)    onDeleteClipAt (s); };
+        slot->onDuplicateClip = [this, s] { if (onDuplicateClipAt) onDuplicateClipAt (s); };
+        slot->onRenameClip    = [this, s] (const juce::String& n) { if (onRenameClipAt)    onRenameClipAt    (s, n); };
+        slot->onSetClipColour = [this, s] (juce::Colour c)         { if (onSetClipColourAt) onSetClipColourAt (s, c); };
+        addAndMakeVisible (slot);
+        slots.add (slot);
+        // Layout is deferred: addSceneToTrack() calls updateContentSize() which
+        // resizes the content component, triggering the layout cascade correctly.
+    }
+
     // ── Public helpers ────────────────────────────────────────────────────────
     void setMuted (bool m)
     {
@@ -497,17 +514,18 @@ public:
         btnRow.removeFromLeft (2);
         soloBtn.setBounds (btnRow);
 
-        mix.removeFromTop (4); // gap between buttons and send label
-
-        // "Send A" label row (so it never overlaps M/S buttons)
-        mix.removeFromTop (14); // label area — painted manually in paint()
-
-        // Larger send knob
+        mix.removeFromTop (4);
+        mix.removeFromTop (14); // label area
         sendAKnob.setBounds (mix.removeFromTop (52).withSizeKeepingCentre (44, 44));
-        mix.removeFromTop (2); // small gap before fader
+        mix.removeFromTop (2);
         volFader.setBounds (mix);
+
+        // Slot rows from top down, then the '+ Scene' add button
         for (int s = 0; s < slots.size(); ++s)
             slots[s]->setBounds (b.removeFromTop (SV_SLOT_H).reduced (2));
+
+        // '+ Scene' button sits immediately below the last slot
+        addSceneBtn.setBounds (b.removeFromTop (SV_ADD_SCENE_BTN_H));
     }
 
     void paint (juce::Graphics& g) override
@@ -677,7 +695,7 @@ public:
         volFader.setSliderStyle (juce::Slider::LinearVertical);
         volFader.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 50, 16);
         volFader.setRange (0.0, 1.0);
-        volFader.setValue (1.0);
+        volFader.setValue (1.0, juce::dontSendNotification);
         volFader.setDoubleClickReturnValue (true, 1.0);
         volFader.onValueChange = [this] {
             if (onVolumeChanged) onVolumeChanged ((float) volFader.getValue());
@@ -726,8 +744,7 @@ public:
 
     void repaintMixerStrip()
     {
-        // Repaint only the fader area — header and scenes don't change on ticks
-        int faderTop = SV_HEADER_H + NUM_SCENES * SV_SLOT_H;
+        int faderTop = SV_HEADER_H;
         repaint (0, faderTop, getWidth(), getHeight() - faderTop);
     }
 
@@ -741,7 +758,7 @@ public:
     void resized() override
     {
         auto b = getLocalBounds();
-        b.removeFromTop (SV_HEADER_H + NUM_SCENES * SV_SLOT_H);
+        b.removeFromTop (SV_HEADER_H);
         volFader.setBounds (b.reduced (6));
     }
 };
@@ -773,6 +790,7 @@ public:
     std::function<void(int track, int scene, juce::Colour)>            onSetClipColour;
     std::function<void(int trackIndex, const juce::String&)>           onRenameTrack;
     std::function<void(int trackIndex, juce::Colour)>                  onSetTrackColour;
+    std::function<void(int trackIndex)>                                onAddScene;
 
     // ── Track Management ─────────────────────────────────────────────────────
     int addTrack (TrackType type, const juce::String& name)
@@ -795,6 +813,7 @@ public:
         col->onSetTrackColour   = [this, idx] (juce::Colour c)         { if (onSetTrackColour) onSetTrackColour (idx, c); };
         col->onRenameClipAt     = [this, idx] (int s, const juce::String& n) { if (onRenameClip)    onRenameClip    (idx, s, n); };
         col->onSetClipColourAt  = [this, idx] (int s, juce::Colour c)         { if (onSetClipColour) onSetClipColour (idx, s, c); };
+        col->onAddScene         = [this, idx] () { if (onAddScene) onAddScene (idx); };
         col->header.onSelectTrack  = col->onSelectTrack;
         col->header.onDeleteTrack  = col->onDeleteTrack;
         col->header.onRenameTrack  = col->onRenameTrack;
@@ -891,13 +910,7 @@ public:
     {
         g.fillAll (juce::Colour (0xff0e0e1c));
 
-        // Alternating scene row tint
-        for (int s = 0; s < NUM_SCENES; ++s)
-            if (s % 2 == 1)
-            {
-                g.setColour (juce::Colour (0x08ffffff));
-                g.fillRect (0, SV_HEADER_H + s * SV_SLOT_H, getWidth(), SV_SLOT_H);
-            }
+        // Row tints omitted: each column has its own independent slot count.
 
         // ── Drop Zone ────────────────────────────────────────────────────────
         int dzX = columns.size() * SV_TRACK_W;
@@ -965,6 +978,7 @@ public:
     std::function<void(int trackIndex, const juce::String&)>       onRenameTrack;
     std::function<void(int trackIndex, juce::Colour)>              onSetTrackColour;
     std::function<void()>                                          onSceneLabelClicked;
+    std::function<void(int trackIndex)> onAddScene;
 
     SessionView()
     {
@@ -1017,6 +1031,7 @@ public:
         {
             if (onSetTrackColour) onSetTrackColour (t, c);
         };
+        gridContent.onAddScene = [this] (int t) { if (onAddScene) onAddScene (t); };
 
         // Viewport – horizontal scroll only
         gridViewport.setViewedComponent (&gridContent, false);
@@ -1025,15 +1040,7 @@ public:
             juce::ScrollBar::thumbColourId, juce::Colour (0xff334466));
         addAndMakeVisible (gridViewport);
 
-        // Scene buttons
-        for (int s = 0; s < NUM_SCENES; ++s)
-        {
-            auto* btn      = new SceneLaunchButton();
-            btn->sceneIndex = s;
-            btn->onLaunch  = [this, s] { if (onLaunchScene) onLaunchScene (s); };
-            addAndMakeVisible (btn);
-            sceneButtons.add (btn);
-        }
+        // Scene launch buttons are added dynamically via addSceneButton().
 
         returnColumn = std::make_unique<FixedTrackColumn> ("Return A");
         masterColumn = std::make_unique<FixedTrackColumn> ("Master");
@@ -1050,6 +1057,75 @@ public:
         int idx = gridContent.addTrack (type, name);
         updateContentSize();
         return idx;
+    }
+
+    void addSceneToTrack (int trackIndex)
+    {
+        if (juce::isPositiveAndBelow (trackIndex, gridContent.columns.size()))
+        {
+            gridContent.columns[trackIndex]->addScene();
+            updateContentSize();
+            gridContent.resized();
+            gridContent.columns[trackIndex]->resized();
+            updateSceneButtons();
+        }
+    }
+
+    // Remove scene slot at sceneIndex from the given track column,
+    // compact the slot list, and re-wire scene indices.
+    void removeSceneFromTrack (int trackIndex, int sceneIndex)
+    {
+        if (!juce::isPositiveAndBelow (trackIndex, gridContent.columns.size())) return;
+        auto* col = gridContent.columns[trackIndex];
+        if (!juce::isPositiveAndBelow (sceneIndex, col->slots.size())) return;
+
+        // Remove the slot component
+        col->removeChildComponent (col->slots[sceneIndex]);
+        col->slots.remove (sceneIndex, true); // deletes the object
+
+        // Re-wire scene indices and callbacks for all subsequent slots
+        for (int si = sceneIndex; si < col->slots.size(); ++si)
+        {
+            col->slots[si]->sceneIndex = si;
+            col->slots[si]->onCreateClip    = [col, si] { if (col->onCreateClipAt)    col->onCreateClipAt (si); };
+            col->slots[si]->onSelectClip    = [col, si] { if (col->onSelectClipAt)    col->onSelectClipAt (si); };
+            col->slots[si]->onLaunchClip    = [col, si] { if (col->onLaunchClipAt)    col->onLaunchClipAt (si); };
+            col->slots[si]->onPauseClip     = [col, si] { if (col->onPauseClipAt)     col->onPauseClipAt  (si); };
+            col->slots[si]->onDeleteClip    = [col, si] { if (col->onDeleteClipAt)    col->onDeleteClipAt (si); };
+            col->slots[si]->onDuplicateClip = [col, si] { if (col->onDuplicateClipAt) col->onDuplicateClipAt (si); };
+            col->slots[si]->onRenameClip    = [col, si] (const juce::String& n) { if (col->onRenameClipAt)    col->onRenameClipAt    (si, n); };
+            col->slots[si]->onSetClipColour = [col, si] (juce::Colour c)         { if (col->onSetClipColourAt) col->onSetClipColourAt (si, c); };
+        }
+
+        updateContentSize();
+        gridContent.resized();
+        col->resized();
+        updateSceneButtons();
+    }
+
+    // Sync the scene-launch button strip to the maximum slot count across all tracks.
+    void updateSceneButtons()
+    {
+        int maxSlots = 0;
+        for (auto* col : gridContent.columns)
+            maxSlots = juce::jmax (maxSlots, col->slots.size());
+
+        // Add missing buttons
+        while (sceneButtons.size() < maxSlots)
+        {
+            int s      = sceneButtons.size();
+            auto* btn  = new SceneLaunchButton();
+            btn->sceneIndex = s;
+            btn->onLaunch   = [this, s] { if (onLaunchScene) onLaunchScene (s); };
+            addAndMakeVisible (btn);
+            sceneButtons.add (btn);
+        }
+
+        // Remove excess buttons (max shrunk after a delete)
+        while (sceneButtons.size() > maxSlots)
+            sceneButtons.removeLast (1);
+
+        resized(); // re-positions all scene buttons
     }
 
     void setClipData    (int t, int s, const ClipData& d) { gridContent.setClipData    (t, s, d); }
@@ -1103,7 +1179,7 @@ public:
         masterColumn->setBounds (masterB);
         returnColumn->setBounds (returnB);
 
-        for (int s = 0; s < NUM_SCENES; ++s)
+        for (int s = 0; s < sceneButtons.size(); ++s)
             sceneButtons[s]->setBounds (sceneStrip.getX(), SV_HEADER_H + s * SV_SLOT_H, SV_SCENE_W, SV_SLOT_H);
 
         gridViewport.setBounds (b);
@@ -1187,12 +1263,20 @@ private:
         auto vb = gridViewport.getBounds();
         if (vb.isEmpty()) return;
 
-        int numCols   = gridContent.columns.size() + 1; // +1 always-visible drop zone
-        int contentW  = juce::jmax (vb.getWidth(), numCols * SV_TRACK_W);
-        bool needsBar = contentW > vb.getWidth();
-        int  barH     = needsBar ? gridViewport.getScrollBarThickness() : 0;
+        int numCols  = gridContent.columns.size() + 1; // +1 always-visible drop zone
+        int contentW = juce::jmax (vb.getWidth(), numCols * SV_TRACK_W);
 
-        gridContent.setSize (contentW, vb.getHeight() - barH);
+        // Height: header + tallest slot area + '+ scene' btn + mixer
+        int maxSlots = 0;
+        for (auto* col : gridContent.columns)
+            maxSlots = juce::jmax (maxSlots, col->slots.size());
+        int contentH = SV_HEADER_H + maxSlots * SV_SLOT_H + SV_ADD_SCENE_BTN_H + SV_MIXER_H;
+        contentH = juce::jmax (contentH, vb.getHeight());
+
+        bool needsHBar = contentW > vb.getWidth();
+        int  barH      = needsHBar ? gridViewport.getScrollBarThickness() : 0;
+
+        gridContent.setSize (contentW, contentH - barH);
     }
 
     // Convert a SessionView-local point into TrackGridContent coordinates

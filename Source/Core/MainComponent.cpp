@@ -417,13 +417,18 @@ MainComponent::MainComponent()
         loadAudioFileIntoTrack(trackIdx, file);
     };
 
+    // Any knob/slider/button release inside the device chain marks the project dirty.
+    deviceView.onParamChanged = [this] { markDirty(); };
+
     deviceView.canAddAutomation = [this]() -> bool {
         if (selectedTrackIndex < 0 || selectedTrackIndex >= (int)audioTracks.size()) return false;
         // Arrangement mode: need a selected clip
         if (currentView == DAWView::Arrangement)
             return selectedArrangementClip != nullptr;
         // Session mode: need a clip in the grid
-        if (selectedSceneIndex < 0 || selectedSceneIndex >= NUM_SCENES) return false;
+        if (selectedSceneIndex < 0) return false;
+        if (selectedTrackIndex >= 0 && selectedTrackIndex < (int)clipGrid.size()
+            && selectedSceneIndex >= (int)clipGrid[selectedTrackIndex].size()) return false;
         return clipGrid[selectedTrackIndex][selectedSceneIndex].hasClip;
     };
 
@@ -438,7 +443,7 @@ MainComponent::MainComponent()
         }
         // Session mode: check the clip grid
         if (selectedSceneIndex < 0 || selectedTrackIndex >= (int)audioTracks.size()
-            || selectedSceneIndex >= NUM_SCENES) return false;
+            || selectedSceneIndex >= (int)clipGrid[selectedTrackIndex].size()) return false;
         const auto& clip = clipGrid[selectedTrackIndex][selectedSceneIndex];
         for (const auto& lane : clip.automationLanes)
             if (lane.parameterId == paramId && !lane.points.empty()) return true;
@@ -541,7 +546,7 @@ MainComponent::MainComponent()
                 collectLanes(selectedArrangementClip->automationLanes);
         } else {
             if (selectedTrackIndex >= 0 && selectedSceneIndex >= 0
-                && selectedSceneIndex < NUM_SCENES
+                && selectedSceneIndex < (int)clipGrid[selectedTrackIndex].size()
                 && selectedTrackIndex < (int)clipGrid.size())
             {
                 collectLanes(clipGrid[selectedTrackIndex][selectedSceneIndex].automationLanes);
@@ -568,7 +573,7 @@ MainComponent::MainComponent()
         for (int t = 0; t < nTracks; ++t)
             audioTracks[t]->commandQueue.push({ TrackCommand::Type::StopPattern, nullptr, 0 });
         for (int t = 0; t < nTracks; ++t)
-            for (int s = 0; s < NUM_SCENES; ++s)
+            for (int s = 0; s < (int)clipGrid[t].size(); ++s)
                 if (clipGrid[t][s].isPlaying) {
                     clipGrid[t][s].isPlaying = false;
                     sessionView.setClipData(t, s, clipGrid[t][s]);
@@ -874,8 +879,31 @@ MainComponent::MainComponent()
     };
 
     // ── Session View Callbacks ────────────────────────────────────────────────
+    sessionView.onAddScene = [this](int t) {
+        if (t < 0 || t >= (int)audioTracks.size()) return;
+
+        // Create a pre-filled ClipData so the slot shows immediately as a clip.
+        int s = (int)clipGrid[t].size(); // index of the new slot
+        ClipData newClip;
+        newClip.hasClip         = true;
+        newClip.name            = "Pattern " + juce::String(s + 1);
+        newClip.colour          = juce::Colour::fromHSV(
+            std::fmod((float)(t * 47 + s * 31) / 360.0f, 1.0f), 0.65f, 0.70f, 1.0f);
+        newClip.euclideanSteps  = 16;
+        newClip.euclideanPulses = 4;
+        newClip.patternMode     = (trackInstruments[t] == "Oscillator") ? "pianoroll"
+                                : (trackInstruments[t] == "DrumRack")   ? "drumrack"
+                                                                         : "euclidean";
+        clipGrid[t].push_back(newClip);  // grow data model with filled clip
+        sessionView.addSceneToTrack(t);  // grow UI slot
+        sessionView.setClipData(t, s, clipGrid[t][s]); // paint the slot as filled
+        markDirty();
+    };
+
     sessionView.onCreateClip = [this](int t, int s) {
         if (t < 0 || t >= (int)audioTracks.size()) return;
+        // Ensure the scene row exists in the data model
+        while ((int)clipGrid[t].size() <= s) clipGrid[t].emplace_back();
         markDirty();
         auto& clip           = clipGrid[t][s];
         clip.hasClip         = true;
@@ -1012,7 +1040,7 @@ MainComponent::MainComponent()
         p->automationLanes = clip.automationLanes;
 
         // Stop visually playing clip in the track
-        for (int i = 0; i < NUM_SCENES; ++i) {
+        for (int i = 0; i < (int)clipGrid[t].size(); ++i) {
             if (i != s && clipGrid[t][i].isPlaying) {
                 clipGrid[t][i].isPlaying = false;
                 sessionView.setClipData(t, i, clipGrid[t][i]);
@@ -1038,7 +1066,7 @@ MainComponent::MainComponent()
         bool anyPlaying = false;
         int nTracks = numActiveTracks.load(std::memory_order_relaxed);
         for (int ti = 0; ti < nTracks && !anyPlaying; ++ti)
-            for (int si = 0; si < NUM_SCENES && !anyPlaying; ++si)
+            for (int si = 0; si < (int)clipGrid[ti].size() && !anyPlaying; ++si)
                 if (clipGrid[ti][si].isPlaying) anyPlaying = true;
 
         if (!anyPlaying)
@@ -1056,19 +1084,28 @@ MainComponent::MainComponent()
 
     sessionView.onDeleteClip = [this](int t, int s) {
         if (t < 0 || t >= (int)audioTracks.size()) return;
+        if (s < 0 || s >= (int)clipGrid[t].size()) return;
+
         auto& clip = clipGrid[t][s];
-        if (!clip.hasClip) return;
         markDirty();
 
-        if (clip.isPlaying) {
+        if (clip.isPlaying)
             audioTracks[t]->commandQueue.push({ TrackCommand::Type::StopPattern, nullptr, 0 });
-        }
-        clip = ClipData();
-        sessionView.setClipData(t, s, clip);
+
+        // Erase from data model (shifts subsequent elements down)
+        clipGrid[t].erase(clipGrid[t].begin() + s);
+
+        // Remove the slot from the UI column and re-wire subsequent indices
+        sessionView.removeSceneFromTrack(t, s);
+
+        // Clear pattern editor if this was the selected scene
         if (selectedTrackIndex == t && selectedSceneIndex == s) {
             patternEditor.setVisible(false);
             selectedSceneIndex = -1;
             resized();
+        } else if (selectedTrackIndex == t && selectedSceneIndex > s) {
+            // Adjust selection index since all scenes above shifted down
+            selectedSceneIndex--;
         }
     };
 
@@ -1078,7 +1115,7 @@ MainComponent::MainComponent()
         if (!sourceClip.hasClip) return;
         
         int nextEmpty = -1;
-        for (int ns = s + 1; ns < NUM_SCENES; ++ns) {
+        for (int ns = s + 1; ns < (int)clipGrid[t].size(); ++ns) {
             if (!clipGrid[t][ns].hasClip) {
                 nextEmpty = ns;
                 break;
@@ -1159,15 +1196,16 @@ MainComponent::MainComponent()
 
         int nTracks = numActiveTracks.load(std::memory_order_relaxed);
         for (int t = 0; t < nTracks; ++t) {
-            // Stop visually playing clip in the track
-            for (int s = 0; s < NUM_SCENES; ++s) {
+            // Stop any currently-playing clip in this track (except the target row)
+            for (int s = 0; s < (int)clipGrid[t].size(); ++s) {
                 if (s != sceneIdx && clipGrid[t][s].isPlaying) {
                     clipGrid[t][s].isPlaying = false;
                     sessionView.setClipData(t, s, clipGrid[t][s]);
                 }
             }
 
-            if (clipGrid[t][sceneIdx].hasClip) {
+            // Only launch if this track actually has a scene at sceneIdx
+            if (sceneIdx < (int)clipGrid[t].size() && clipGrid[t][sceneIdx].hasClip) {
                 auto& clip = clipGrid[t][sceneIdx];
                 Pattern* p = nullptr;
 
@@ -1194,6 +1232,7 @@ MainComponent::MainComponent()
                 clip.isPlaying = true;
                 sessionView.setClipData(t, sceneIdx, clip);
             } else {
+                // Track has no clip at this row — stop it silently
                 audioTracks[t]->commandQueue.push({ TrackCommand::Type::StopPattern, nullptr, schedSample });
             }
         }
@@ -1238,7 +1277,7 @@ MainComponent::MainComponent()
             // Push to all parallel vectors BEFORE incrementing numActiveTracks so
             // the render thread never sees an out-of-range index.
             audioTracks.push_back(std::make_unique<Track>());
-            clipGrid.push_back({});
+            clipGrid.push_back(std::vector<ClipData>());
             trackInstruments.push_back(type);
             loadedFiles.push_back(juce::File{});
             arrangementTracks.push_back({});
@@ -1319,36 +1358,46 @@ MainComponent::MainComponent()
     // These are the ONLY paths that write to the audio-thread gain atomics.
     // Without them the faders are purely cosmetic.
     sessionView.onTrackVolumeChanged = [this](int t, float gain) {
-        if (t >= 0 && t < (int)audioTracks.size())
+        if (t >= 0 && t < (int)audioTracks.size()) {
             audioTracks[t]->gain.store(gain, std::memory_order_relaxed);
+            markDirty();
+        }
     };
 
     sessionView.onTrackSendChanged = [this](int t, float level) {
-        if (t >= 0 && t < (int)audioTracks.size())
+        if (t >= 0 && t < (int)audioTracks.size()) {
             audioTracks[t]->sendALevel.store(level, std::memory_order_relaxed);
+            markDirty();
+        }
     };
 
     sessionView.onMasterVolumeChanged = [this](float gain) {
         masterTrack.gain.store(gain, std::memory_order_relaxed);
+        markDirty();
     };
 
     sessionView.onReturnVolumeChanged = [this](float gain) {
         returnTrackA.gain.store(gain, std::memory_order_relaxed);
+        markDirty();
     };
 
     sessionView.onTrackMuteChanged = [this](int t, bool muted) {
-        if (t >= 0 && t < (int)audioTracks.size())
+        if (t >= 0 && t < (int)audioTracks.size()) {
             audioTracks[t]->muted.store(muted, std::memory_order_relaxed);
+            markDirty();
+        }
     };
 
     sessionView.onTrackSoloChanged = [this](int t, bool soloed) {
-        if (t >= 0 && t < (int)audioTracks.size())
+        if (t >= 0 && t < (int)audioTracks.size()) {
             audioTracks[t]->soloed.store(soloed, std::memory_order_relaxed);
+            markDirty();
+        }
     };
 
     // ── Rename / Color callbacks ──────────────────────────────────────────────
     sessionView.onRenameClip = [this](int t, int s, const juce::String& name) {
-        if (t >= 0 && t < (int)clipGrid.size() && juce::isPositiveAndBelow(s, NUM_SCENES)) {
+        if (t >= 0 && t < (int)clipGrid.size() && s >= 0 && s < (int)clipGrid[t].size()) {
             clipGrid[t][s].name = name;
             sessionView.setClipData(t, s, clipGrid[t][s]);
             markDirty();
@@ -1356,7 +1405,7 @@ MainComponent::MainComponent()
     };
 
     sessionView.onSetClipColour = [this](int t, int s, juce::Colour c) {
-        if (t >= 0 && t < (int)clipGrid.size() && juce::isPositiveAndBelow(s, NUM_SCENES)) {
+        if (t >= 0 && t < (int)clipGrid.size() && s >= 0 && s < (int)clipGrid[t].size()) {
             clipGrid[t][s].colour = c;
             sessionView.setClipData(t, s, clipGrid[t][s]);
             markDirty();
@@ -1743,7 +1792,7 @@ void MainComponent::syncArrangementFromSession()
         }
         
         // Gather clips present on this track
-        for (int s = 0; s < NUM_SCENES; ++s) {
+        for (int s = 0; s < (int)clipGrid[t].size(); ++s) {
             if (clipGrid[t][s].hasClip) {
                 state.availableClips.push_back(clipGrid[t][s]);
             }
@@ -1962,10 +2011,14 @@ void MainComponent::updateWindowTitle()
     juce::String projectName = (currentProjectFile != juce::File{})
                                    ? currentProjectFile.getFileNameWithoutExtension()
                                    : "Untitled";
-    juce::String title = "LiBeDAW \u2014 " + projectName + (projectIsDirty ? " *" : "");
+    juce::String title = "LiBeDAW - " + projectName + (projectIsDirty ? " *" : "");
 
     if (auto* tlc = getTopLevelComponent())
-        tlc->setName(title);
+    {
+        tlc->setName (title);               // keeps JUCE component name in sync
+        if (auto* peer = tlc->getPeer())
+            peer->setTitle (title);         // pushes the title to the OS title bar
+    }
 }
 
 void MainComponent::markDirty()
@@ -2214,7 +2267,7 @@ void MainComponent::syncUIToProject()
                     // Grow all parallel vectors to accommodate this track index
                     while ((int)audioTracks.size() <= tIdx) {
                         audioTracks.push_back(std::make_unique<Track>());
-                        clipGrid.push_back({});
+                        clipGrid.push_back(std::vector<ClipData>());
                         trackInstruments.push_back("");
                         loadedFiles.push_back(juce::File{});
                         arrangementTracks.push_back({});
@@ -2316,7 +2369,12 @@ void MainComponent::syncUIToProject()
                             auto clipNode = clipsNode.getChild(c);
                             if (clipNode.hasType("Clip")) {
                                 int sIdx = clipNode.getProperty("scene", -1);
-                                if (sIdx >= 0 && sIdx < NUM_SCENES) {
+                                if (sIdx >= 0) {
+                                    // Grow data model and UI column to accommodate this scene index
+                                    while ((int)clipGrid[tIdx].size() <= sIdx) {
+                                        clipGrid[tIdx].emplace_back();
+                                        sessionView.addSceneToTrack(tIdx);
+                                    }
                                     ClipData d;
                                     d.hasClip  = clipNode.getProperty("hasClip", false);
                                     d.isPlaying = false;
@@ -2583,7 +2641,7 @@ void MainComponent::syncProjectToUI()
         }
 
         juce::ValueTree clipsNode("Clips");
-        for (int s = 0; s < NUM_SCENES; ++s) {
+        for (int s = 0; s < (int)clipGrid[t].size(); ++s) {
             auto& clip = clipGrid[t][s];
             if (clip.hasClip) {
                 juce::ValueTree clipNode("Clip");
@@ -2953,7 +3011,7 @@ void MainComponent::showDeviceEditorForTrack(int trackIdx) {
     }
 
     std::unordered_map<juce::String, DeviceView::AutomationParamInfo> autoInfo;
-    if (trackIdx >= 0 && trackIdx < (int)audioTracks.size() && selectedSceneIndex >= 0 && selectedSceneIndex < NUM_SCENES) {
+    if (trackIdx >= 0 && trackIdx < (int)audioTracks.size() && selectedSceneIndex >= 0 && selectedSceneIndex < (int)clipGrid[selectedTrackIndex].size()) {
         auto& clip = clipGrid[trackIdx][selectedSceneIndex];
         auto* track = audioTracks[trackIdx].get();
         for (const auto& lane : clip.automationLanes) {

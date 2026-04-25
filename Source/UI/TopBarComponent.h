@@ -118,8 +118,8 @@ public:
 
     juce::TextButton playBtn      {"Play"};
     juce::TextButton stopBtn      {"Stop"};
-    juce::TextButton settingsBtn  {"\u2699 Settings"};
-    juce::TextButton projectBtn   {"Project \u25BC"};
+    juce::TextButton settingsBtn  {"[=] Settings"};
+    juce::TextButton projectBtn   {"Project v"};
     juce::TextButton sessionViewBtn{"SESSION"};
     juce::TextButton arrangeViewBtn{"ARRANGE"};
     juce::Slider     bpmSlider;
