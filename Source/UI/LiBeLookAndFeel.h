@@ -155,8 +155,10 @@ public:
         slider.setValue(val, juce::dontSendNotification);
         slider.setDoubleClickReturnValue(true, defaultV < 0.0 ? val : defaultV);
         slider.getProperties().set("accentColour", (juce::int64)accent.getARGB());
-        if (paramId.isNotEmpty())
+        if (paramId.isNotEmpty()) {
             slider.getProperties().set("parameterId", paramId);
+            getProperties().set("parameterId", paramId);
+        }
     }
 
     // Called by DeviceView::updateAutomationIndicators

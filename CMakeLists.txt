@@ -35,6 +35,8 @@ target_sources(LiBeDAW PRIVATE
     Source/Instruments/FMSynthProcessor.cpp
     Source/Instruments/WavetableSynthProcessor.cpp
     Source/Instruments/KarplusStrongProcessor.cpp
+    Source/Instruments/DrumMachineProcessor.cpp
+    Source/Instruments/AudioInputProcessor.cpp
     Source/Instruments/PluginInstrumentAdapter.cpp
     Source/Effects/BuiltInEffects.cpp)
 

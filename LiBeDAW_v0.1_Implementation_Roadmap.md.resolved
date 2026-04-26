@@ -1,0 +1,89 @@
+# LiBeDAW v0.1 Implementation Roadmap: Path to Tier-1
+
+This staged execution plan outlines the critical path to resolving the architectural bottlenecks identified in the Tier-1 Comparative Report. The stages are ordered by technical dependency, ensuring foundational audio engine changes are completed before higher-level UI and workflow features are implemented.
+
+---
+
+## Phase 1: Core Audio Graph & Latency Foundation
+*Objective: Remove hardcoded limitations and establish a professional timing foundation.*
+
+### 1.1 Dynamic Insert & Return Tracks [DONE - with UI Bugs]
+- **Current State:** Dynamic return track engine and Ableton-style send knobs are implemented.
+- **Bugs/Regression:**
+  - **Mixer Control Drift:** Adding clip slots (patterns) pushes the mixer strip (M/S/Arm, Send knobs, Fader) downwards, eventually causing them to overflow or be clipped at the bottom. The Viewport is not correctly constraining the clip area.
+  - **Layout Instability:** Send knobs and labels may become misaligned or invisible depending on the number of tracks and return buses.
+  - **Missing Context Menu:** No right-click menu on return track headers to allow for track removal.
+- **Implementation:**
+  - Refactored `TrackColumn` to use a `juce::Viewport` for the clip area.
+  - Implemented `OwnedArray<juce::Slider>` for dynamic Send knob creation.
+  - Integrated `onReturnRackDropped` signal in `MainComponent` to instantiate `Track` objects for return buses.
+  - Added "Return Rack" tile in Browser Effects tab.
+- **Validation:** Verify that the mixer strip remains pinned to the bottom of the track column regardless of the number of clip slots.
+
+### 1.2 Plugin Delay Compensation (PDC)
+- **Current State:** No PDC engine; lookahead effects will cause phase issues.
+- **Implementation:**
+  - Update `EffectProcessor` and `PluginInstrumentAdapter` to query and report latency.
+  - Implement a delay-graph calculation in `ProjectManager` or the main audio graph that analyzes the latency of every track.
+  - Insert delay buffers natively into tracks that have lower latency to perfectly align the final Master output.
+- **Validation:** Null-test a transient signal sent through an empty track against a parallel track containing an effect with an artificial 1000-sample latency.
+
+---
+
+## Phase 2: Advanced Routing & Mixing
+*Objective: Enable professional mix-down capabilities.*
+
+### 2.1 Sidechain Routing
+- **Current State:** Built-in `CompressorEffect` and `NoiseGateEffect` only trigger from their own input.
+- **Implementation:**
+  - Add a "Sidechain Input Source" pointer to the `Track` or `EffectProcessor`.
+  - Update the `AppAudioBuffer` or DSP processing loop to pass a secondary read-only audio buffer to processors that request sidechain inputs.
+- **Validation:** Demonstrate a kick drum successfully ducking a bassline via the native `CompressorEffect`.
+
+### 2.2 Group Tracks & VCA Faders
+- **Current State:** Flat track hierarchy.
+- **Implementation:**
+  - Create a new `GroupTrack` class inheriting from `Track`.
+  - Allow standard audio/MIDI tracks to set their output destination to a `GroupTrack` rather than the Master track.
+  - Implement VCA logic where a master VCA fader applies an offset to the automation of assigned child tracks.
+- **Validation:** Group multiple drum tracks, apply a single native `FilterEffect` to the group, and verify correct processing.
+
+---
+
+## Phase 3: Audio Manipulation & Arrangement
+*Objective: Elastic audio and modern recording workflows.*
+
+### 3.1 Real-Time Time-Stretching (Warping)
+- **Current State:** Audio clips play at their native speed.
+- **Implementation:**
+  - Integrate an industry-standard time-stretching DSP library (e.g., RubberBand Library, or a custom phase vocoder).
+  - Update `ClipData` and `ArrangementClip` to include warp markers and a "Warp Mode" setting (Complex, Beats, Tones).
+  - Sync the stretch ratio dynamically to the `GlobalTransport` tempo.
+- **Validation:** Change the global project tempo by +/- 20 BPM and verify that audio loops remain in sync without pitch artifacts.
+
+### 3.2 Non-Destructive Comping & Crossfading
+- **Current State:** Basic recording via `AudioInputProcessor` and `RecordingThread`.
+- **Implementation:**
+  - Introduce `Take` lanes beneath `ArrangementClip` objects in the UI.
+  - Implement "swipe-to-comp" UI logic in `ArrangementView` that splits and mutes portions of underlying takes.
+  - Build automatic zero-crossing crossfades at clip boundaries to prevent pops and clicks.
+- **Validation:** Record 3 takes of audio in a loop, swipe across the takes, and play back the seamless composite track.
+
+---
+
+## Phase 4: Modern MIDI & Expression
+*Objective: Future-proof synthesis and sequencing.*
+
+### 4.1 MPE (MIDI Polyphonic Expression) Integration
+- **Current State:** Standard 14-bit MIDI support.
+- **Implementation:**
+  - Upgrade the internal MIDI engine and `TrackCommand` structure to support MPE events (per-note pitch bend, channel pressure, and timbre).
+  - Refactor `PianoRollEditor` to allow drawing per-note expression curves.
+  - Update `WavetableSynthProcessor` and `FMSynthProcessor` to map MPE data to macro parameters.
+- **Validation:** Connect a Seaboard or MPE controller and verify per-note pitch bending on the Wavetable synth.
+
+---
+
+## Summary of Execution Strategy
+
+To execute this roadmap efficiently without breaking the application, development should be strictly sequential. **Phase 1** requires deep brain surgery on the `RenderThread` and atomic track structures. Only once the lock-free dynamic effect chain is stable should the team proceed to **Phase 2** (Routing). **Phases 3 and 4** are largely additive and can be developed in parallel once the core engine is finalized.

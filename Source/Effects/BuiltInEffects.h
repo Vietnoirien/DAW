@@ -25,6 +25,12 @@ public:
     std::atomic<float> dryLevel { 1.0f };
     std::atomic<float> width    { 1.0f };
 
+    // Audio FIFO for real-time spectrum display
+    static constexpr int fftOrder = 10;
+    static constexpr int fftSize  = 1024;
+    juce::AbstractFifo audioFifo { 4096 };
+    std::array<float, 4096> audioFifoData;
+
 private:
     juce::dsp::Reverb reverb;
     juce::dsp::Reverb::Parameters params;
@@ -51,8 +57,13 @@ public:
     std::atomic<float> feedback { 0.5f };
     std::atomic<float> mix { 0.5f };
 
+    static constexpr int fftOrder = 10;
+    static constexpr int fftSize  = 1024;
+    juce::AbstractFifo audioFifo { 4096 };
+    std::array<float, 4096> audioFifoData;
+
 private:
-    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> delayLine { 192000 }; // Max ~4 sec at 44.1kHz
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> delayLine { 192000 };
     double currentSampleRate = 44100.0;
 };
 
@@ -79,6 +90,11 @@ public:
     std::atomic<float> feedback { 0.0f };
     std::atomic<float> mix { 0.5f };
 
+    static constexpr int fftOrder = 10;
+    static constexpr int fftSize  = 1024;
+    juce::AbstractFifo audioFifo { 4096 };
+    std::array<float, 4096> audioFifoData;
+
 private:
     juce::dsp::Chorus<float> chorus;
 };
@@ -102,6 +118,12 @@ public:
 
     std::atomic<float> cutoff { 1000.0f };
     std::atomic<float> resonance { 1.0f };
+
+    static constexpr int fftOrder = 10;
+    static constexpr int fftSize  = 1024;
+    juce::AbstractFifo audioFifo { 4096 };
+    std::array<float, 4096> audioFifoData;
+    double currentSampleRate = 44100.0;
 
 private:
     juce::dsp::StateVariableTPTFilter<float> filter;
@@ -130,6 +152,10 @@ public:
     std::atomic<float> attack { 10.0f };
     std::atomic<float> release { 100.0f };
 
+    // Real-time level/GR for meter display
+    std::atomic<float> inputLevelDb  { -100.0f };
+    std::atomic<float> gainReductionDb { 0.0f };
+
 private:
     juce::dsp::Compressor<float> compressor;
 };
@@ -154,6 +180,10 @@ public:
 
     std::atomic<float> threshold { -1.0f };
     std::atomic<float> release { 50.0f };
+
+    // Real-time level for meter display
+    std::atomic<float> inputLevelDb  { -100.0f };
+    std::atomic<float> outputLevelDb { -100.0f };
 
 private:
     juce::dsp::Limiter<float> limiter;
@@ -183,6 +213,11 @@ public:
     std::atomic<float> feedback { 0.5f };
     std::atomic<float> mix { 0.5f };
 
+    static constexpr int fftOrder = 10;
+    static constexpr int fftSize  = 1024;
+    juce::AbstractFifo audioFifo { 4096 };
+    std::array<float, 4096> audioFifoData;
+
 private:
     juce::dsp::Phaser<float> phaser;
 };
@@ -207,6 +242,11 @@ public:
 
     std::atomic<float> drive { 1.0f };
     std::atomic<float> mix { 1.0f };
+
+    static constexpr int fftOrder = 10;
+    static constexpr int fftSize  = 1024;
+    juce::AbstractFifo audioFifo { 4096 };
+    std::array<float, 4096> audioFifoData;
 
 private:
     juce::dsp::WaveShaper<float> waveShaper;
@@ -256,4 +296,119 @@ private:
         juce::dsp::IIR::Filter<float>
     > eqChain;
     double currentSampleRate = 44100.0;
+};
+// ─── GainEffect ──────────────────────────────────────────────────────────────
+class GainEffect : public EffectProcessor {
+public:
+    GainEffect();
+    ~GainEffect() override = default;
+
+    void prepareToPlay(double sampleRate) override;
+    void processBlock(juce::AudioBuffer<float>& buffer) override;
+    void clear() override;
+
+    juce::ValueTree saveState() const override;
+    void loadState(const juce::ValueTree& tree) override;
+    void registerAutomationParameters(AutomationRegistry* registry) override;
+
+    std::unique_ptr<juce::Component> createEditor() override;
+    juce::String getName() const override { return "Gain"; }
+
+    std::atomic<float> gainDb { 0.0f };
+    std::atomic<float> pan    { 0.0f };
+
+    // FIFO for level meter display
+    static constexpr int fftOrder = 10;
+    static constexpr int fftSize  = 1024;
+    juce::AbstractFifo inputFifo  { 4096 };
+    juce::AbstractFifo outputFifo { 4096 };
+    std::array<float, 4096> inputFifoData;
+    std::array<float, 4096> outputFifoData;
+    std::atomic<float> inputLevelDb  { -100.0f };
+    std::atomic<float> outputLevelDb { -100.0f };
+
+private:
+    juce::dsp::Gain<float> gainProc;
+};
+
+// ─── TransientShaperEffect ───────────────────────────────────────────────────
+class TransientShaperEffect : public EffectProcessor {
+public:
+    TransientShaperEffect();
+    ~TransientShaperEffect() override = default;
+
+    void prepareToPlay(double sampleRate) override;
+    void processBlock(juce::AudioBuffer<float>& buffer) override;
+    void clear() override;
+
+    juce::ValueTree saveState() const override;
+    void loadState(const juce::ValueTree& tree) override;
+    void registerAutomationParameters(AutomationRegistry* registry) override;
+
+    std::unique_ptr<juce::Component> createEditor() override;
+    juce::String getName() const override { return "TransientShaper"; }
+
+    std::atomic<float> attackAmt     { 0.0f };  // -1..+1
+    std::atomic<float> sustainAmt    { 0.0f };  // -1..+1
+    std::atomic<float> sensitivity   { 1.0f };  // 0.1..10
+
+    // Envelope state visible to the editor for display
+    std::atomic<float> fastEnvDisplay  { 0.0f };
+    std::atomic<float> slowEnvDisplay  { 0.0f };
+
+    // FIFO for spectrum
+    static constexpr int fftOrder = 10;
+    static constexpr int fftSize  = 1024;
+    juce::AbstractFifo audioFifo { 4096 };
+    std::array<float, 4096> audioFifoData;
+
+private:
+    // Per-channel fast/slow envelope follower state
+    std::array<float, 2> fastEnv { 0.0f, 0.0f };
+    std::array<float, 2> slowEnv { 0.0f, 0.0f };
+    double currentSampleRate = 44100.0;
+    // IIR coefficients for the two followers
+    float alphaFast = 0.0f;
+    float alphaSlow = 0.0f;
+};
+
+// ─── NoiseGateEffect ─────────────────────────────────────────────────────────
+class NoiseGateEffect : public EffectProcessor {
+public:
+    NoiseGateEffect();
+    ~NoiseGateEffect() override = default;
+
+    void prepareToPlay(double sampleRate) override;
+    void processBlock(juce::AudioBuffer<float>& buffer) override;
+    void clear() override;
+
+    juce::ValueTree saveState() const override;
+    void loadState(const juce::ValueTree& tree) override;
+    void registerAutomationParameters(AutomationRegistry* registry) override;
+
+    std::unique_ptr<juce::Component> createEditor() override;
+    juce::String getName() const override { return "NoiseGate"; }
+
+    std::atomic<float> threshold { -40.0f }; // dBFS
+    std::atomic<float> attackMs  {   5.0f }; // ms
+    std::atomic<float> releaseMs { 200.0f }; // ms
+    std::atomic<float> holdMs    {  50.0f }; // ms
+    std::atomic<float> rangeDb   { -80.0f }; // attenuation when closed
+
+    // Gate state for display
+    std::atomic<bool>  gateOpen  { false };
+    std::atomic<float> gainReduction { 0.0f }; // 0..1 (1 = fully open)
+
+    // FIFO for spectrum
+    static constexpr int fftOrder = 10;
+    static constexpr int fftSize  = 1024;
+    juce::AbstractFifo audioFifo { 4096 };
+    std::array<float, 4096> audioFifoData;
+
+private:
+    double currentSampleRate = 44100.0;
+    float  envGain = 0.0f;    // current smoothed gate gain (0..1)
+    int    holdCounter = 0;   // samples remaining in hold phase
+    float  alphaAttack  = 0.0f;
+    float  alphaRelease = 0.0f;
 };

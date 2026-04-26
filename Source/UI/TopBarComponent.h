@@ -7,6 +7,7 @@ public:
     TopBarComponent(GlobalTransport& t, juce::AudioDeviceManager& dm)
         : transport(t), deviceManager(dm)
     {
+        addAndMakeVisible(recordBtn);
         addAndMakeVisible(playBtn);
         addAndMakeVisible(stopBtn);
         addAndMakeVisible(bpmSlider);
@@ -29,6 +30,13 @@ public:
             if (arrangeViewBtn.getToggleState() && onSwitchToArrangement)
                 onSwitchToArrangement();
         };
+
+        recordBtn.onClick = [this] {
+            transport.toggleRecord();
+            recordBtn.setToggleState(transport.getIsRecording(), juce::dontSendNotification);
+        };
+        recordBtn.setClickingTogglesState(true);
+        recordBtn.setColour(juce::TextButton::buttonOnColourId, juce::Colours::red.withAlpha(0.8f));
 
         bpmSlider.setSliderStyle(juce::Slider::LinearBar);
         bpmSlider.setRange(20.0, 300.0, 1.0);
@@ -98,6 +106,7 @@ public:
 
         auto margin = juce::FlexItem::Margin(5.0f);
         fb.items.add(juce::FlexItem(projectBtn).withWidth(90).withHeight(30).withMargin(margin));
+        fb.items.add(juce::FlexItem(recordBtn).withWidth(40).withHeight(30).withMargin(margin));
         fb.items.add(juce::FlexItem(playBtn).withWidth(80).withHeight(30).withMargin(margin));
         fb.items.add(juce::FlexItem(stopBtn).withWidth(80).withHeight(30).withMargin(margin));
         fb.items.add(juce::FlexItem(bpmSlider).withWidth(100).withHeight(30).withMargin(margin));
@@ -116,6 +125,7 @@ public:
         fb.performLayout(getLocalBounds());
     }
 
+    juce::TextButton recordBtn    {"O"}; // Record symbol
     juce::TextButton playBtn      {"Play"};
     juce::TextButton stopBtn      {"Stop"};
     juce::TextButton settingsBtn  {"[=] Settings"};

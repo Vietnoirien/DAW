@@ -10,6 +10,8 @@
 #include "FMSynthProcessor.h"
 #include "WavetableSynthProcessor.h"
 #include "KarplusStrongProcessor.h"
+#include "DrumMachineProcessor.h"
+#include "AudioInputProcessor.h"
 
 class InstrumentFactory {
 public:
@@ -20,11 +22,14 @@ public:
         if (name == "FMSynth")        return std::make_unique<FMSynthProcessor>();
         if (name == "WavetableSynth") return std::make_unique<WavetableSynthProcessor>();
         if (name == "KarplusStrong")  return std::make_unique<KarplusStrongProcessor>();
+        if (name == "DrumMachine")    return std::make_unique<DrumMachineProcessor>();
+        if (name == "AudioInput")     return std::make_unique<AudioInputProcessor>();
         return nullptr;
     }
 
     static juce::StringArray getAvailableInstruments() {
         return { "Oscillator", "Simpler", "DrumRack",
-                 "FMSynth", "WavetableSynth", "KarplusStrong" };
+                 "FMSynth", "WavetableSynth", "KarplusStrong",
+                 "DrumMachine", "AudioInput" };
     }
 };

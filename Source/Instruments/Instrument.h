@@ -41,4 +41,9 @@ public:
         juce::ignoreUnused(file);
         return false; 
     }
+    
+    // Optional: bind to host track for hardware I/O
+    virtual void setHostTrack(void* track) {
+        juce::ignoreUnused(track);
+    }
 };

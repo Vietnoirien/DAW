@@ -32,19 +32,40 @@
 struct Track : public AutomationRegistry
 {
     std::atomic<float> gain     { 1.0f };
-    std::atomic<float> sendALevel { 0.0f };
+    std::array<std::atomic<float>, 8> sendLevels;
+    
+    Track() {
+        for (auto& s : sendLevels) s.store(0.0f);
+    }
     std::atomic<float> rmsLevel { 0.0f };
     std::atomic<bool>  muted    { false };
     std::atomic<bool>  soloed   { false };
+
+    // ── Recording ──
+    std::atomic<bool>  isArmedForRecord { false };
+    std::atomic<int>   recordInputChannel { 0 };
+    std::unique_ptr<juce::AbstractFifo> recordFifo;
+    std::vector<float> recordBuffer;
+    
+    // ── Monitoring ──
+    std::atomic<bool>  monitorEnabled { false };
+    std::atomic<float> monitorGain { 1.0f };
+    std::unique_ptr<juce::AbstractFifo> monitorFifo;
+    std::vector<float> monitorBuffer;
+
+    juce::File         currentRecordingFile;
+    std::unique_ptr<juce::AudioFormatWriter> recordWriter;
+    bool               wasRecording { false }; // Used by RecordingThread
+    int64_t            recordStartSample { -1 };
 
     LockFreeQueue<TrackCommand, 128> commandQueue;
     LockFreeQueue<Pattern*, 128>     garbageQueue;
     LockFreeQueue<InstrumentProcessor*, 8> instrumentGarbageQueue;
     std::atomic<InstrumentProcessor*> activeInstrument {nullptr};
 
-    static constexpr int MAX_EFFECTS = 4;
-    std::atomic<EffectProcessor*> effectChain[MAX_EFFECTS] {nullptr};
+    std::atomic<std::vector<EffectProcessor*>*> activeEffectChain {nullptr};
     LockFreeQueue<EffectProcessor*, 16> effectGarbageQueue;
+    LockFreeQueue<std::vector<EffectProcessor*>*, 16> effectVectorGarbageQueue;
 
     Pattern* currentPattern {nullptr};
     Pattern* pendingPattern {nullptr};
@@ -75,9 +96,9 @@ struct Track : public AutomationRegistry
         if (auto* inst = activeInstrument.load(std::memory_order_acquire)) {
             inst->registerAutomationParameters(this);
         }
-        for (int i = 0; i < MAX_EFFECTS; ++i) {
-            if (auto* effect = effectChain[i].load(std::memory_order_acquire)) {
-                effect->registerAutomationParameters(this);
+        if (auto* vec = activeEffectChain.load(std::memory_order_acquire)) {
+            for (auto* effect : *vec) {
+                if (effect) effect->registerAutomationParameters(this);
             }
         }
     }
@@ -172,10 +193,11 @@ struct Track : public AutomationRegistry
 
     void clear() {
         gain.store(1.0f, std::memory_order_relaxed);
-        sendALevel.store(0.0f, std::memory_order_relaxed);
+        for (auto& s : sendLevels) s.store(0.0f, std::memory_order_relaxed);
         rmsLevel.store(0.0f, std::memory_order_relaxed);
         muted.store(false, std::memory_order_relaxed);
         soloed.store(false, std::memory_order_relaxed);
+        isArmedForRecord.store(false, std::memory_order_relaxed);
         currentPattern = nullptr;
         pendingPattern = nullptr;
         switchSample = -1.0;
@@ -188,21 +210,36 @@ struct Track : public AutomationRegistry
         }
         while (auto opt = instrumentGarbageQueue.pop()) { delete *opt; }
 
-        for (int i = 0; i < MAX_EFFECTS; ++i) {
-            if (auto* old = effectChain[i].exchange(nullptr, std::memory_order_acq_rel)) {
-                delete old;
+        if (auto* oldVec = activeEffectChain.exchange(nullptr, std::memory_order_acq_rel)) {
+            for (auto* old : *oldVec) {
+                if (old) delete old;
             }
+            delete oldVec;
         }
         while (auto opt = effectGarbageQueue.pop()) { delete *opt; }
+        while (auto opt = effectVectorGarbageQueue.pop()) { delete *opt; }
     }
 
     void moveFrom(Track& other) {
         clear();
         gain.store(other.gain.load(std::memory_order_relaxed), std::memory_order_relaxed);
-        sendALevel.store(other.sendALevel.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        for (size_t i = 0; i < sendLevels.size(); ++i)
+            sendLevels[i].store(other.sendLevels[i].load(std::memory_order_relaxed), std::memory_order_relaxed);
         rmsLevel.store(other.rmsLevel.load(std::memory_order_relaxed), std::memory_order_relaxed);
         muted.store(other.muted.load(std::memory_order_relaxed), std::memory_order_relaxed);
         soloed.store(other.soloed.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        isArmedForRecord.store(other.isArmedForRecord.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        monitorEnabled.store(other.monitorEnabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        monitorGain.store(other.monitorGain.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        recordInputChannel.store(other.recordInputChannel.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        recordFifo = std::move(other.recordFifo);
+        recordBuffer = std::move(other.recordBuffer);
+        monitorFifo = std::move(other.monitorFifo);
+        monitorBuffer = std::move(other.monitorBuffer);
+        currentRecordingFile = std::move(other.currentRecordingFile);
+        recordWriter = std::move(other.recordWriter);
+        wasRecording = other.wasRecording;
+        recordStartSample = other.recordStartSample;
         currentPattern = other.currentPattern;
         pendingPattern = other.pendingPattern;
         switchSample = other.switchSample;
@@ -216,10 +253,9 @@ struct Track : public AutomationRegistry
         activeInstrument.store(other.activeInstrument.exchange(nullptr, std::memory_order_acq_rel), std::memory_order_release);
         while (auto opt = other.instrumentGarbageQueue.pop()) instrumentGarbageQueue.push(*opt);
 
-        for (int i = 0; i < MAX_EFFECTS; ++i) {
-            effectChain[i].store(other.effectChain[i].exchange(nullptr, std::memory_order_acq_rel), std::memory_order_release);
-        }
+        activeEffectChain.store(other.activeEffectChain.exchange(nullptr, std::memory_order_acq_rel), std::memory_order_release);
         while (auto opt = other.effectGarbageQueue.pop()) effectGarbageQueue.push(*opt);
+        while (auto opt = other.effectVectorGarbageQueue.pop()) effectVectorGarbageQueue.push(*opt);
     }
 };
 
@@ -245,6 +281,20 @@ private:
 };
 
 // ════════════════════════════════════════════════════════════════════════════
+//  RecordingThread — Non-RT thread that drains track FIFOs to disk
+// ════════════════════════════════════════════════════════════════════════════
+class RecordingThread : public juce::Thread
+{
+public:
+    explicit RecordingThread(MainComponent& mc) : juce::Thread("DAW Recording Thread"), owner(mc) {}
+    void run() override;
+
+private:
+    MainComponent& owner;
+};
+
+
+// ════════════════════════════════════════════════════════════════════════════
 //  MainComponent
 // ════════════════════════════════════════════════════════════════════════════
 class MainComponent : public juce::AudioAppComponent,
@@ -263,6 +313,7 @@ public:
     void regenerateDrumRackMidi(ClipData& clip);
     void regenerateEuclideanMidi(ClipData& clip);
     void loadAudioFileIntoDrumPad(int trackIdx, int padIndex, const juce::File& file);
+    void loadAudioFileIntoTrack(int trackIdx, const juce::File& file);
     void updateDrumRackPatternEditor();
     void loadPluginAsTrackInstrument(int trackIdx, const juce::File& pluginFile);
     
@@ -287,8 +338,9 @@ public:
     bool saveIfNeededBeforeQuit();
     bool isProjectDirty() const { return projectIsDirty; }
 
-    // ── State exposed to RenderThread (friend) ───────────────────────────────
+    // ── State exposed to RenderThread and RecordingThread (friends) ───────────────────────────────
     friend class RenderThread;
+    friend class RecordingThread;
 
 private:
     // ── Persistent Settings ──────────────────────────────────────────────────
@@ -314,7 +366,6 @@ private:
     void configureProjectMenu();
     void syncProjectToUI();
     void syncUIToProject();
-    void loadAudioFileIntoTrack(int trackIdx, const juce::File& file);
     void exportProject(const juce::File& outputFile, const juce::String& format);
     void updateWindowTitle();
     void markDirty();
@@ -324,7 +375,8 @@ private:
     // Pre-reserved to 128 so no reallocation occurs during the session
     // (vector pointer stability is required by the lock-free render thread).
     Track masterTrack;
-    Track returnTrackA;
+    std::vector<std::unique_ptr<Track>> returnTracks;
+    std::atomic<int> numReturnTracks {0};
     std::vector<std::unique_ptr<Track>> audioTracks; // indexed 0..numActiveTracks-1
     std::atomic<int> numActiveTracks {0}; // written UI, read audio+render thread
 
@@ -438,9 +490,11 @@ private:
     // The render thread fills this asynchronously; getNextAudioBlock only reads.
     AppAudioBuffer appBuffer;
     RenderThread   renderThread;
+    RecordingThread recordingThread;
 
     // Scratch buffer used by the render thread (pre-allocated in prepareToPlay)
     juce::AudioBuffer<float> renderScratch;
+    std::array<juce::AudioBuffer<float>, 8> returnScratches;
 
     // Signal from audio thread → render thread: wake up and fill the buffer
     juce::WaitableEvent renderWakeEvent { true }; // manual-reset

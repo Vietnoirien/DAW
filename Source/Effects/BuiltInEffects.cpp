@@ -1,66 +1,24 @@
 #include "BuiltInEffects.h"
+#include "../UI/LiBeLookAndFeel.h"
+#include "BespokeEffectEditors.h"
 
-// ─── Generic Parameter Editor ────────────────────────────────────────────────
-class GenericEffectEditor : public juce::Component {
-public:
-    struct Param {
-        juce::String name;
-        std::atomic<float>* value;
-        float min, max;
-        juce::String id;
-    };
+// ─── Shared editor constants ──────────────────────────────────────────────────
+static constexpr int kEditorFftOrder = 10;
+static constexpr int kEditorFftSize  = 1 << kEditorFftOrder; // 1024
+static constexpr int kEditorSpecSize = 200;
 
-    GenericEffectEditor(juce::String title, std::vector<Param> parameters) 
-        : effectTitle(title), params(parameters) 
-    {
-        for (auto& p : params) {
-            auto* slider = new juce::Slider(juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox);
-            slider->setRange(p.min, p.max);
-            slider->setValue(p.value->load());
-            slider->setDoubleClickReturnValue(true, p.value->load());
-            slider->onValueChange = [slider, p]() {
-                p.value->store((float)slider->getValue(), std::memory_order_relaxed);
-            };
-            if (p.id.isNotEmpty()) slider->getProperties().set("parameterId", p.id);
-            addAndMakeVisible(slider);
-            sliders.add(slider);
-        }
-        setSize(80 + params.size() * 60, 140);
-    }
-
-    void paint(juce::Graphics& g) override {
-        g.fillAll(juce::Colour(0xff222222));
-        g.setColour(juce::Colour(0xff444444));
-        g.drawRect(getLocalBounds(), 2);
-        
-        g.setColour(juce::Colours::white);
-        g.setFont(juce::Font(juce::FontOptions(14.0f, juce::Font::bold)));
-        g.drawText(effectTitle, 0, 10, getWidth(), 20, juce::Justification::centred);
-
-        g.setFont(juce::Font(juce::FontOptions(10.0f)));
-        for (int i = 0; i < params.size(); ++i) {
-            g.drawText(params[i].name, 10 + i * 60, 100, 60, 20, juce::Justification::centred);
-        }
-
-        for (auto* slider : sliders) {
-            if (slider->getProperties().contains("isAutomated") && (bool)slider->getProperties()["isAutomated"]) {
-                g.setColour(juce::Colours::orange);
-                g.drawEllipse(slider->getBounds().toFloat().reduced(2.0f), 2.0f);
-            }
-        }
-    }
-
-    void resized() override {
-        for (int i = 0; i < sliders.size(); ++i) {
-            sliders[i]->setBounds(15 + i * 60, 40, 50, 50);
-        }
-    }
-
-private:
-    juce::String effectTitle;
-    std::vector<Param> params;
-    juce::OwnedArray<juce::Slider> sliders;
-};
+// Helper: push post-processed audio into an effect's FIFO (call from processBlock)
+template<int FifoCapacity>
+static void pushToFifo(juce::AbstractFifo& fifo,
+                       std::array<float, FifoCapacity>& fifoData,
+                       const float* channelData, int numSamples)
+{
+    int s1, n1, s2, n2;
+    fifo.prepareToWrite(numSamples, s1, n1, s2, n2);
+    if (n1 > 0) std::copy(channelData, channelData + n1, fifoData.begin() + s1);
+    if (n2 > 0) std::copy(channelData + n1, channelData + n1 + n2, fifoData.begin() + s2);
+    fifo.finishedWrite(n1 + n2);
+}
 
 // ─── ReverbEffect ────────────────────────────────────────────────────────────
 ReverbEffect::ReverbEffect() {
@@ -92,6 +50,10 @@ void ReverbEffect::processBlock(juce::AudioBuffer<float>& buffer) {
     juce::dsp::AudioBlock<float> block(buffer);
     juce::dsp::ProcessContextReplacing<float> context(block);
     reverb.process(context);
+
+    if (buffer.getNumChannels() > 0)
+        pushToFifo<4096>(audioFifo, audioFifoData,
+                         buffer.getReadPointer(0), buffer.getNumSamples());
 }
 
 void ReverbEffect::clear() {
@@ -126,11 +88,7 @@ void ReverbEffect::registerAutomationParameters(AutomationRegistry* registry) {
 }
 
 std::unique_ptr<juce::Component> ReverbEffect::createEditor() {
-    return std::make_unique<GenericEffectEditor>("Reverb", std::vector<GenericEffectEditor::Param>{
-        {"Size", &roomSize, 0.0f, 1.0f, "Reverb/Size"},
-        {"Damp", &damping, 0.0f, 1.0f, "Reverb/Damping"},
-        {"Mix", &wetLevel, 0.0f, 1.0f, "Reverb/Wet Level"}
-    });
+    return std::make_unique<ReverbEditor>(this);
 }
 
 // ─── DelayEffect ─────────────────────────────────────────────────────────────
@@ -168,6 +126,10 @@ void DelayEffect::processBlock(juce::AudioBuffer<float>& buffer) {
             channelData[i] = input * (1.0f - mx) + delayed * mx;
         }
     }
+
+    if (buffer.getNumChannels() > 0)
+        pushToFifo<4096>(audioFifo, audioFifoData,
+                         buffer.getReadPointer(0), buffer.getNumSamples());
 }
 
 void DelayEffect::clear() {
@@ -196,11 +158,7 @@ void DelayEffect::registerAutomationParameters(AutomationRegistry* registry) {
 }
 
 std::unique_ptr<juce::Component> DelayEffect::createEditor() {
-    return std::make_unique<GenericEffectEditor>("Delay", std::vector<GenericEffectEditor::Param>{
-        {"Time ms", &delayTimeMs, 10.0f, 1000.0f, "Delay/Time"},
-        {"Fdbk", &feedback, 0.0f, 0.95f, "Delay/Feedback"},
-        {"Mix", &mix, 0.0f, 1.0f, "Delay/Mix"}
-    });
+    return std::make_unique<DelayEditor>(this);
 }
 
 // ─── ChorusEffect ────────────────────────────────────────────────────────────
@@ -224,6 +182,10 @@ void ChorusEffect::processBlock(juce::AudioBuffer<float>& buffer) {
     juce::dsp::AudioBlock<float> block(buffer);
     juce::dsp::ProcessContextReplacing<float> context(block);
     chorus.process(context);
+
+    if (buffer.getNumChannels() > 0)
+        pushToFifo<4096>(audioFifo, audioFifoData,
+                         buffer.getReadPointer(0), buffer.getNumSamples());
 }
 
 void ChorusEffect::clear() {
@@ -258,12 +220,7 @@ void ChorusEffect::registerAutomationParameters(AutomationRegistry* registry) {
 }
 
 std::unique_ptr<juce::Component> ChorusEffect::createEditor() {
-    return std::make_unique<GenericEffectEditor>("Chorus", std::vector<GenericEffectEditor::Param>{
-        {"Rate", &rate, 0.0f, 99.0f, "Chorus/Rate"},
-        {"Depth", &depth, 0.0f, 1.0f, "Chorus/Depth"},
-        {"Delay", &centreDelay, 1.0f, 100.0f, "Chorus/Delay"},
-        {"Mix", &mix, 0.0f, 1.0f, "Chorus/Mix"}
-    });
+    return std::make_unique<ChorusEditor>(this);
 }
 
 // ─── FilterEffect ────────────────────────────────────────────────────────────
@@ -272,6 +229,7 @@ FilterEffect::FilterEffect() {
 }
 
 void FilterEffect::prepareToPlay(double sampleRate) {
+    currentSampleRate = sampleRate;
     juce::dsp::ProcessSpec spec;
     spec.sampleRate = sampleRate;
     spec.maximumBlockSize = 8192;
@@ -286,6 +244,10 @@ void FilterEffect::processBlock(juce::AudioBuffer<float>& buffer) {
     juce::dsp::AudioBlock<float> block(buffer);
     juce::dsp::ProcessContextReplacing<float> context(block);
     filter.process(context);
+
+    if (buffer.getNumChannels() > 0)
+        pushToFifo<4096>(audioFifo, audioFifoData,
+                         buffer.getReadPointer(0), buffer.getNumSamples());
 }
 
 void FilterEffect::clear() {
@@ -311,10 +273,7 @@ void FilterEffect::registerAutomationParameters(AutomationRegistry* registry) {
 }
 
 std::unique_ptr<juce::Component> FilterEffect::createEditor() {
-    return std::make_unique<GenericEffectEditor>("Filter", std::vector<GenericEffectEditor::Param>{
-        {"Cutoff", &cutoff, 20.0f, 20000.0f, "Filter/Cutoff"},
-        {"Res", &resonance, 0.1f, 10.0f, "Filter/Resonance"}
-    });
+    return std::make_unique<FilterEditor>(this);
 }
 
 // ─── CompressorEffect ────────────────────────────────────────────────────────
@@ -334,6 +293,17 @@ void CompressorEffect::prepareToPlay(double sampleRate) {
 }
 
 void CompressorEffect::processBlock(juce::AudioBuffer<float>& buffer) {
+    // Measure input RMS before compression
+    float sumSq = 0.0f;
+    int total = buffer.getNumChannels() * buffer.getNumSamples();
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch) {
+        auto* d = buffer.getReadPointer(ch);
+        for (int i = 0; i < buffer.getNumSamples(); ++i) sumSq += d[i] * d[i];
+    }
+    float rms = (total > 0) ? std::sqrt(sumSq / total) : 0.0f;
+    float inDb = juce::Decibels::gainToDecibels(rms, -100.0f);
+    inputLevelDb.store(inDb, std::memory_order_relaxed);
+
     compressor.setThreshold(threshold.load(std::memory_order_relaxed));
     compressor.setRatio(ratio.load(std::memory_order_relaxed));
     compressor.setAttack(attack.load(std::memory_order_relaxed));
@@ -342,6 +312,14 @@ void CompressorEffect::processBlock(juce::AudioBuffer<float>& buffer) {
     juce::dsp::AudioBlock<float> block(buffer);
     juce::dsp::ProcessContextReplacing<float> context(block);
     compressor.process(context);
+
+    // Compute gain reduction analytically from input level
+    float thr = threshold.load(std::memory_order_relaxed);
+    float rat = ratio.load(std::memory_order_relaxed);
+    float gr  = (inDb > thr && rat > 1.0f)
+                ? (inDb - thr) * (1.0f - 1.0f / rat)
+                : 0.0f;
+    gainReductionDb.store(gr, std::memory_order_relaxed);
 }
 
 void CompressorEffect::clear() {
@@ -373,12 +351,7 @@ void CompressorEffect::registerAutomationParameters(AutomationRegistry* registry
 }
 
 std::unique_ptr<juce::Component> CompressorEffect::createEditor() {
-    return std::make_unique<GenericEffectEditor>("Compressor", std::vector<GenericEffectEditor::Param>{
-        {"Thresh", &threshold, -60.0f, 0.0f, "Compressor/Threshold"},
-        {"Ratio", &ratio, 1.0f, 20.0f, "Compressor/Ratio"},
-        {"Attack", &attack, 0.1f, 100.0f, "Compressor/Attack"},
-        {"Release", &release, 10.0f, 1000.0f, "Compressor/Release"}
-    });
+    return std::make_unique<CompressorEditor>(this);
 }
 
 // ─── LimiterEffect ───────────────────────────────────────────────────────────
@@ -396,12 +369,38 @@ void LimiterEffect::prepareToPlay(double sampleRate) {
 }
 
 void LimiterEffect::processBlock(juce::AudioBuffer<float>& buffer) {
-    limiter.setThreshold(threshold.load(std::memory_order_relaxed));
+    // Measure input peak before limiting
+    float inPeak = 0.0f;
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch) {
+        auto* d = buffer.getReadPointer(ch);
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+            inPeak = std::max(inPeak, std::abs(d[i]));
+    }
+    inputLevelDb.store(juce::Decibels::gainToDecibels(inPeak, -100.0f), std::memory_order_relaxed);
+
+    float thr = threshold.load(std::memory_order_relaxed);
+    limiter.setThreshold(thr);
     limiter.setRelease(release.load(std::memory_order_relaxed));
 
     juce::dsp::AudioBlock<float> block(buffer);
     juce::dsp::ProcessContextReplacing<float> context(block);
     limiter.process(context);
+
+    // ── Makeup-gain correction ────────────────────────────────────────────
+    // juce::dsp::Limiter applies automatic makeup gain = decibelsToGain(-thr)
+    // so it behaves as a "maximiser" (signals below threshold are boosted).
+    // We cancel that by applying the inverse so the net effect is brickwall
+    // clamping at `thr` dBFS with no gain change below threshold.
+    buffer.applyGain(juce::Decibels::decibelsToGain(thr));
+
+    // Measure output peak after limiting
+    float outPeak = 0.0f;
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch) {
+        auto* d = buffer.getReadPointer(ch);
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+            outPeak = std::max(outPeak, std::abs(d[i]));
+    }
+    outputLevelDb.store(juce::Decibels::gainToDecibels(outPeak, -100.0f), std::memory_order_relaxed);
 }
 
 void LimiterEffect::clear() {
@@ -427,10 +426,7 @@ void LimiterEffect::registerAutomationParameters(AutomationRegistry* registry) {
 }
 
 std::unique_ptr<juce::Component> LimiterEffect::createEditor() {
-    return std::make_unique<GenericEffectEditor>("Limiter", std::vector<GenericEffectEditor::Param>{
-        {"Thresh", &threshold, -40.0f, 0.0f, "Limiter/Threshold"},
-        {"Release", &release, 10.0f, 1000.0f, "Limiter/Release"}
-    });
+    return std::make_unique<LimiterEditor>(this);
 }
 
 // ─── PhaserEffect ────────────────────────────────────────────────────────────
@@ -454,6 +450,10 @@ void PhaserEffect::processBlock(juce::AudioBuffer<float>& buffer) {
     juce::dsp::AudioBlock<float> block(buffer);
     juce::dsp::ProcessContextReplacing<float> context(block);
     phaser.process(context);
+
+    if (buffer.getNumChannels() > 0)
+        pushToFifo<4096>(audioFifo, audioFifoData,
+                         buffer.getReadPointer(0), buffer.getNumSamples());
 }
 
 void PhaserEffect::clear() {
@@ -488,13 +488,7 @@ void PhaserEffect::registerAutomationParameters(AutomationRegistry* registry) {
 }
 
 std::unique_ptr<juce::Component> PhaserEffect::createEditor() {
-    return std::make_unique<GenericEffectEditor>("Phaser", std::vector<GenericEffectEditor::Param>{
-        {"Rate", &rate, 0.01f, 10.0f, "Phaser/Rate"},
-        {"Depth", &depth, 0.0f, 1.0f, "Phaser/Depth"},
-        {"Freq", &centreFreq, 50.0f, 5000.0f, "Phaser/Frequency"},
-        {"Fdbk", &feedback, -1.0f, 1.0f, "Phaser/Feedback"},
-        {"Mix", &mix, 0.0f, 1.0f, "Phaser/Mix"}
-    });
+    return std::make_unique<PhaserEditor>(this);
 }
 
 // ─── SaturationEffect ────────────────────────────────────────────────────────
@@ -535,6 +529,10 @@ void SaturationEffect::processBlock(juce::AudioBuffer<float>& buffer) {
             writePtr[i] = dryPtr[i] * (1.0f - mx) + writePtr[i] * mx;
         }
     }
+
+    if (buffer.getNumChannels() > 0)
+        pushToFifo<4096>(audioFifo, audioFifoData,
+                         buffer.getReadPointer(0), buffer.getNumSamples());
 }
 
 void SaturationEffect::clear() {
@@ -560,10 +558,7 @@ void SaturationEffect::registerAutomationParameters(AutomationRegistry* registry
 }
 
 std::unique_ptr<juce::Component> SaturationEffect::createEditor() {
-    return std::make_unique<GenericEffectEditor>("Saturation", std::vector<GenericEffectEditor::Param>{
-        {"Drive", &drive, 1.0f, 20.0f, "Saturation/Drive"},
-        {"Mix", &mix, 0.0f, 1.0f, "Saturation/Mix"}
-    });
+    return std::make_unique<SaturationEditor>(this);
 }
 
 // ─── ParametricEQEditor ──────────────────────────────────────────────────────
@@ -835,3 +830,433 @@ std::unique_ptr<juce::Component> ParametricEQEffect::createEditor() {
     return std::make_unique<ParametricEQEditor>(this);
 }
 
+// ─── GainEffect ──────────────────────────────────────────────────────────────
+GainEffect::GainEffect() {}
+
+void GainEffect::prepareToPlay(double sampleRate) {
+    juce::dsp::ProcessSpec spec;
+    spec.sampleRate = sampleRate;
+    spec.maximumBlockSize = 8192;
+    spec.numChannels = 2;
+    gainProc.prepare(spec);
+}
+
+void GainEffect::processBlock(juce::AudioBuffer<float>& buffer) {
+    // Measure input peak
+    float inPeak = 0.0f;
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch) {
+        auto* d = buffer.getReadPointer(ch);
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+            inPeak = std::max(inPeak, std::abs(d[i]));
+    }
+    inputLevelDb.store(juce::Decibels::gainToDecibels(inPeak, -100.0f), std::memory_order_relaxed);
+
+    // Apply gain
+    gainProc.setGainDecibels(gainDb.load(std::memory_order_relaxed));
+    juce::dsp::AudioBlock<float> block(buffer);
+    juce::dsp::ProcessContextReplacing<float> ctx(block);
+    gainProc.process(ctx);
+
+    // Apply pan (cosine law)
+    float p = pan.load(std::memory_order_relaxed); // -1..+1
+    if (buffer.getNumChannels() >= 2) {
+        float leftGain  = std::cos((p + 1.0f) * juce::MathConstants<float>::pi * 0.25f);
+        float rightGain = std::sin((p + 1.0f) * juce::MathConstants<float>::pi * 0.25f);
+        buffer.applyGain(0, 0, buffer.getNumSamples(), leftGain);
+        buffer.applyGain(1, 0, buffer.getNumSamples(), rightGain);
+    }
+
+    // Measure output peak
+    float outPeak = 0.0f;
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch) {
+        auto* d = buffer.getReadPointer(ch);
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+            outPeak = std::max(outPeak, std::abs(d[i]));
+    }
+    outputLevelDb.store(juce::Decibels::gainToDecibels(outPeak, -100.0f), std::memory_order_relaxed);
+}
+
+void GainEffect::clear() { gainProc.reset(); }
+
+juce::ValueTree GainEffect::saveState() const {
+    juce::ValueTree state("GainState");
+    state.setProperty("gainDb", gainDb.load(), nullptr);
+    state.setProperty("pan",    pan.load(),    nullptr);
+    return state;
+}
+
+void GainEffect::loadState(const juce::ValueTree& tree) {
+    if (tree.hasProperty("gainDb")) gainDb.store(tree.getProperty("gainDb"), std::memory_order_relaxed);
+    if (tree.hasProperty("pan"))    pan.store(tree.getProperty("pan"),    std::memory_order_relaxed);
+}
+
+void GainEffect::registerAutomationParameters(AutomationRegistry* registry) {
+    if (!registry) return;
+    registry->registerParameter("Gain/Gain dB", &gainDb, -40.0f, 40.0f);
+    registry->registerParameter("Gain/Pan",     &pan,    -1.0f,   1.0f);
+}
+
+// ─── GainEditor ──────────────────────────────────────────────────────────────
+class GainEditor : public BespokeEffectEditor {
+public:
+    GainEditor(GainEffect* fx) : BespokeEffectEditor("Gain", juce::Colour(0xffA8EDEA)), effect(fx) {
+        setupKnob(kGain, "Gain dB", &effect->gainDb, -40.0f, 40.0f, "Gain/Gain dB");
+        setupKnob(kPan,  "Pan",     &effect->pan,    -1.0f,  1.0f,  "Gain/Pan");
+        setSize(20 + 2 * (LiBeKnob::kW + 10) - 10, 220);
+    }
+
+    void timerCallback() override {
+        smoothIn  = std::max(effect->inputLevelDb.load(),  smoothIn  - 0.8f);
+        smoothOut = std::max(effect->outputLevelDb.load(), smoothOut - 0.8f);
+        repaint();
+    }
+
+    void drawVisualiser(juce::Graphics& g, juce::Rectangle<int> b) override {
+        // Two vertical bar meters: IN (left) and OUT (right)
+        auto drawMeterBar = [&](juce::Rectangle<int> r, float db) {
+            g.setColour(juce::Colour(0xff1A1A2A));
+            g.fillRect(r);
+            float norm = juce::jlimit(0.0f, 1.0f, juce::jmap(db, -60.0f, 12.0f, 0.0f, 1.0f));
+            int fillH = int(r.getHeight() * norm);
+            auto fill = r.removeFromBottom(fillH);
+            // Colour gradient: green → yellow → red
+            juce::ColourGradient grad(juce::Colour(0xff4CAF50), fill.getBottomLeft().toFloat(),
+                                      juce::Colour(0xffFF5252), fill.getTopLeft().toFloat(), false);
+            grad.addColour(0.75, juce::Colour(0xffFFD54F));
+            g.setGradientFill(grad);
+            g.fillRect(fill);
+            g.setColour(juce::Colour(0xff2A2A3A));
+            g.drawRect(r.expanded(0, fillH), 1);
+        };
+
+        int mW = (b.getWidth() - 30) / 2;
+        drawMeterBar({ b.getX() + 5,       b.getY() + 5, mW, b.getHeight() - 10 }, smoothIn);
+        drawMeterBar({ b.getX() + mW + 20, b.getY() + 5, mW, b.getHeight() - 10 }, smoothOut);
+
+        g.setColour(juce::Colours::white.withAlpha(0.6f));
+        g.setFont(9.0f);
+        g.drawText("IN",  b.getX() + 5,         b.getBottom() - 14, mW, 12, juce::Justification::centred);
+        g.drawText("OUT", b.getX() + mW + 20,   b.getBottom() - 14, mW, 12, juce::Justification::centred);
+
+        // 0 dB line
+        float y0 = b.getY() + 5 + (b.getHeight() - 10) * (1.0f - juce::jmap(0.0f, -60.0f, 12.0f, 0.0f, 1.0f));
+        g.setColour(juce::Colours::white.withAlpha(0.4f));
+        g.drawHorizontalLine(int(y0), float(b.getX()), float(b.getRight()));
+        g.drawText("0",  b.getRight() - 18, int(y0) - 5, 16, 10, juce::Justification::centred);
+    }
+
+private:
+    GainEffect* effect;
+    float smoothIn = -100.0f, smoothOut = -100.0f;
+    LiBeKnob kGain, kPan;
+    void setupKnob(LiBeKnob& k, const juce::String& lbl, std::atomic<float>* ptr,
+                   float min, float max, const juce::String& id) {
+        k.setup(lbl, ptr->load(), min, max, ptr->load(), id, accent);
+        k.slider.onValueChange = [&k, ptr]() {
+            ptr->store((float)k.slider.getValue(), std::memory_order_relaxed);
+        };
+        k.startTrackingParam(ptr, min, max);
+        addKnob(&k);
+    }
+};
+
+std::unique_ptr<juce::Component> GainEffect::createEditor() {
+    return std::make_unique<GainEditor>(this);
+}
+
+// ─── TransientShaperEffect ───────────────────────────────────────────────────
+TransientShaperEffect::TransientShaperEffect() {}
+
+void TransientShaperEffect::prepareToPlay(double sampleRate) {
+    currentSampleRate = sampleRate;
+    // Fast follower: 1ms attack
+    alphaFast = std::exp(-1.0f / float(sampleRate * 0.001));
+    // Slow follower: 15ms attack
+    alphaSlow = std::exp(-1.0f / float(sampleRate * 0.015));
+    fastEnv.fill(0.0f);
+    slowEnv.fill(0.0f);
+}
+
+void TransientShaperEffect::processBlock(juce::AudioBuffer<float>& buffer) {
+    const int numCh   = buffer.getNumChannels();
+    const int numSamp = buffer.getNumSamples();
+    const float atk  = attackAmt.load(std::memory_order_relaxed);
+    const float sus  = sustainAmt.load(std::memory_order_relaxed);
+    const float sens = sensitivity.load(std::memory_order_relaxed);
+
+    for (int ch = 0; ch < std::min(numCh, 2); ++ch) {
+        float* data = buffer.getWritePointer(ch);
+        for (int i = 0; i < numSamp; ++i) {
+            float x    = std::abs(data[i]);
+            float fast = alphaFast * fastEnv[ch] + (1.0f - alphaFast) * x;
+            float slow = alphaSlow * slowEnv[ch] + (1.0f - alphaSlow) * x;
+            fastEnv[ch] = fast;
+            slowEnv[ch] = slow;
+
+            // Differential: positive when a transient is detected
+            float diff = (fast - slow) * sens;
+
+            // Gain modulation
+            float mod = 1.0f + atk * diff + sus * slow;
+            mod = juce::jlimit(0.0f, 4.0f, mod);
+            data[i] *= mod;
+        }
+    }
+
+    // Expose last-sample envelope for the editor
+    fastEnvDisplay.store(fastEnv[0], std::memory_order_relaxed);
+    slowEnvDisplay.store(slowEnv[0], std::memory_order_relaxed);
+
+    if (buffer.getNumChannels() > 0)
+        pushToFifo<4096>(audioFifo, audioFifoData, buffer.getReadPointer(0), numSamp);
+}
+
+void TransientShaperEffect::clear() {
+    fastEnv.fill(0.0f);
+    slowEnv.fill(0.0f);
+}
+
+juce::ValueTree TransientShaperEffect::saveState() const {
+    juce::ValueTree state("TransientShaperState");
+    state.setProperty("attack",    attackAmt.load(),  nullptr);
+    state.setProperty("sustain",   sustainAmt.load(), nullptr);
+    state.setProperty("sensitivity", sensitivity.load(), nullptr);
+    return state;
+}
+
+void TransientShaperEffect::loadState(const juce::ValueTree& tree) {
+    if (tree.hasProperty("attack"))     attackAmt.store(tree.getProperty("attack"),    std::memory_order_relaxed);
+    if (tree.hasProperty("sustain"))    sustainAmt.store(tree.getProperty("sustain"),  std::memory_order_relaxed);
+    if (tree.hasProperty("sensitivity")) sensitivity.store(tree.getProperty("sensitivity"), std::memory_order_relaxed);
+}
+
+void TransientShaperEffect::registerAutomationParameters(AutomationRegistry* registry) {
+    if (!registry) return;
+    registry->registerParameter("TransientShaper/Attack",      &attackAmt,   -1.0f, 1.0f);
+    registry->registerParameter("TransientShaper/Sustain",     &sustainAmt,  -1.0f, 1.0f);
+    registry->registerParameter("TransientShaper/Sensitivity", &sensitivity,  0.1f, 10.0f);
+}
+
+// ─── TransientShaperEditor ───────────────────────────────────────────────────
+class TransientShaperEditor : public BespokeEffectEditor {
+public:
+    TransientShaperEditor(TransientShaperEffect* fx)
+        : BespokeEffectEditor("Transient Shaper", juce::Colour(0xffFFA040)), effect(fx) {
+        smoothSpectrum.fill(-100.0f);
+        setupKnob(kAttack,    "Attack",  &effect->attackAmt,  -1.0f, 1.0f, "TransientShaper/Attack");
+        setupKnob(kSustain,   "Sustain", &effect->sustainAmt, -1.0f, 1.0f, "TransientShaper/Sustain");
+        setupKnob(kSensitivity,"Sens",   &effect->sensitivity, 0.1f, 10.0f, "TransientShaper/Sensitivity");
+        setSize(20 + 3 * (LiBeKnob::kW + 10) - 10, 220);
+    }
+
+    void timerCallback() override {
+        updateSpectrum(effect->audioFifo, effect->audioFifoData, 44100.0);
+        fastVal = fastVal * 0.7f + effect->fastEnvDisplay.load() * 0.3f;
+        slowVal = slowVal * 0.7f + effect->slowEnvDisplay.load() * 0.3f;
+        repaint();
+    }
+
+    void drawVisualiser(juce::Graphics& g, juce::Rectangle<int> b) override {
+        drawSpectrum(g, b, accent);
+
+        // Draw two envelope curves on top: fast (accent) and slow (white)
+        auto drawEnv = [&](float envVal, juce::Colour col) {
+            float norm = juce::jlimit(0.0f, 1.0f, envVal * 4.0f); // scale for display
+            juce::Path p;
+            for (int x = 0; x < b.getWidth(); ++x) {
+                float phase = float(x) / b.getWidth();
+                // Visualise as a decaying tail — shows "snapshot" of envelope level
+                float y = b.getBottom() - norm * b.getHeight() * std::exp(-phase * 3.0f);
+                if (x == 0) p.startNewSubPath(b.getX() + x, y);
+                else p.lineTo(b.getX() + x, y);
+            }
+            g.setColour(col);
+            g.strokePath(p, juce::PathStrokeType(2.0f, juce::PathStrokeType::curved));
+        };
+        drawEnv(slowVal, juce::Colours::white.withAlpha(0.5f));
+        drawEnv(fastVal, accent);
+
+        // Label
+        g.setColour(juce::Colours::white.withAlpha(0.5f));
+        g.setFont(9.0f);
+        g.drawText("FAST", b.getX() + 4, b.getY() + 4, 30, 10, juce::Justification::left);
+        g.setColour(accent.withAlpha(0.8f));
+        g.drawText("SLOW", b.getX() + 4, b.getY() + 16, 30, 10, juce::Justification::left);
+    }
+
+private:
+    TransientShaperEffect* effect;
+    float fastVal = 0.0f, slowVal = 0.0f;
+    LiBeKnob kAttack, kSustain, kSensitivity;
+    void setupKnob(LiBeKnob& k, const juce::String& lbl, std::atomic<float>* ptr,
+                   float min, float max, const juce::String& id) {
+        k.setup(lbl, ptr->load(), min, max, ptr->load(), id, accent);
+        k.slider.onValueChange = [&k, ptr]() {
+            ptr->store((float)k.slider.getValue(), std::memory_order_relaxed);
+        };
+        k.startTrackingParam(ptr, min, max);
+        addKnob(&k);
+    }
+};
+
+std::unique_ptr<juce::Component> TransientShaperEffect::createEditor() {
+    return std::make_unique<TransientShaperEditor>(this);
+}
+
+// ─── NoiseGateEffect ─────────────────────────────────────────────────────────
+NoiseGateEffect::NoiseGateEffect() {}
+
+void NoiseGateEffect::prepareToPlay(double sampleRate) {
+    currentSampleRate = sampleRate;
+    auto msToCoeff = [&](float ms) {
+        return std::exp(-1.0f / float(sampleRate * ms * 0.001));
+    };
+    alphaAttack  = msToCoeff(attackMs.load());
+    alphaRelease = msToCoeff(releaseMs.load());
+    envGain = 0.0f;
+    holdCounter = 0;
+}
+
+void NoiseGateEffect::processBlock(juce::AudioBuffer<float>& buffer) {
+    const int numSamp = buffer.getNumSamples();
+    const int numCh   = buffer.getNumChannels();
+    const float thr   = juce::Decibels::decibelsToGain(threshold.load(std::memory_order_relaxed));
+    const float range = juce::Decibels::decibelsToGain(rangeDb.load(std::memory_order_relaxed));
+    const int   hold  = int(holdMs.load(std::memory_order_relaxed) * 0.001f * currentSampleRate);
+
+    // Recompute smoothing coefficients from current parameters
+    auto msToCoeff = [&](float ms) {
+        return std::exp(-1.0f / float(currentSampleRate * ms * 0.001f));
+    };
+    alphaAttack  = msToCoeff(attackMs.load(std::memory_order_relaxed));
+    alphaRelease = msToCoeff(releaseMs.load(std::memory_order_relaxed));
+
+    for (int i = 0; i < numSamp; ++i) {
+        // Compute peak across all channels
+        float peak = 0.0f;
+        for (int ch = 0; ch < numCh; ++ch)
+            peak = std::max(peak, std::abs(buffer.getReadPointer(ch)[i]));
+
+        bool aboveThr = (peak >= thr);
+        float targetGain;
+        if (aboveThr) {
+            holdCounter = hold;
+            targetGain  = 1.0f;
+        } else if (holdCounter > 0) {
+            --holdCounter;
+            targetGain = 1.0f;
+        } else {
+            targetGain = range;
+        }
+
+        // Smooth with attack/release
+        float alpha = (targetGain > envGain) ? (1.0f - alphaAttack) : (1.0f - alphaRelease);
+        envGain += alpha * (targetGain - envGain);
+
+        for (int ch = 0; ch < numCh; ++ch)
+            buffer.getWritePointer(ch)[i] *= envGain;
+    }
+
+    gateOpen.store(envGain > 0.5f, std::memory_order_relaxed);
+    gainReduction.store(envGain, std::memory_order_relaxed);
+
+    if (buffer.getNumChannels() > 0)
+        pushToFifo<4096>(audioFifo, audioFifoData, buffer.getReadPointer(0), numSamp);
+}
+
+void NoiseGateEffect::clear() {
+    envGain = 0.0f;
+    holdCounter = 0;
+}
+
+juce::ValueTree NoiseGateEffect::saveState() const {
+    juce::ValueTree state("NoiseGateState");
+    state.setProperty("threshold", threshold.load(), nullptr);
+    state.setProperty("attackMs",  attackMs.load(),  nullptr);
+    state.setProperty("releaseMs", releaseMs.load(), nullptr);
+    state.setProperty("holdMs",    holdMs.load(),    nullptr);
+    state.setProperty("rangeDb",   rangeDb.load(),   nullptr);
+    return state;
+}
+
+void NoiseGateEffect::loadState(const juce::ValueTree& tree) {
+    if (tree.hasProperty("threshold")) threshold.store(tree.getProperty("threshold"), std::memory_order_relaxed);
+    if (tree.hasProperty("attackMs"))  attackMs.store(tree.getProperty("attackMs"),   std::memory_order_relaxed);
+    if (tree.hasProperty("releaseMs")) releaseMs.store(tree.getProperty("releaseMs"), std::memory_order_relaxed);
+    if (tree.hasProperty("holdMs"))    holdMs.store(tree.getProperty("holdMs"),       std::memory_order_relaxed);
+    if (tree.hasProperty("rangeDb"))   rangeDb.store(tree.getProperty("rangeDb"),     std::memory_order_relaxed);
+}
+
+void NoiseGateEffect::registerAutomationParameters(AutomationRegistry* registry) {
+    if (!registry) return;
+    registry->registerParameter("NoiseGate/Threshold", &threshold, -80.0f,    0.0f);
+    registry->registerParameter("NoiseGate/Attack",    &attackMs,   0.1f,   100.0f);
+    registry->registerParameter("NoiseGate/Release",   &releaseMs, 10.0f,  2000.0f);
+    registry->registerParameter("NoiseGate/Hold",      &holdMs,     0.0f,   500.0f);
+    registry->registerParameter("NoiseGate/Range",     &rangeDb,  -80.0f,    0.0f);
+}
+
+// ─── NoiseGateEditor ─────────────────────────────────────────────────────────
+class NoiseGateEditor : public BespokeEffectEditor {
+public:
+    NoiseGateEditor(NoiseGateEffect* fx)
+        : BespokeEffectEditor("Noise Gate", juce::Colour(0xff69F0AE)), effect(fx) {
+        smoothSpectrum.fill(-100.0f);
+        setupKnob(kThresh,  "Thresh",  &effect->threshold, -80.0f,   0.0f, "NoiseGate/Threshold");
+        setupKnob(kAttack,  "Attack",  &effect->attackMs,   0.1f, 100.0f,  "NoiseGate/Attack");
+        setupKnob(kRelease, "Release", &effect->releaseMs, 10.0f, 2000.0f, "NoiseGate/Release");
+        setupKnob(kHold,    "Hold",    &effect->holdMs,     0.0f,  500.0f, "NoiseGate/Hold");
+        setupKnob(kRange,   "Range",   &effect->rangeDb,  -80.0f,    0.0f, "NoiseGate/Range");
+        setSize(20 + 5 * (LiBeKnob::kW + 10) - 10, 220);
+    }
+
+    void timerCallback() override {
+        updateSpectrum(effect->audioFifo, effect->audioFifoData, 44100.0);
+        isOpen = effect->gateOpen.load();
+        smoothGr = smoothGr * 0.8f + effect->gainReduction.load() * 0.2f;
+        repaint();
+    }
+
+    void drawVisualiser(juce::Graphics& g, juce::Rectangle<int> b) override {
+        drawSpectrum(g, b, accent);
+
+        // Threshold line
+        float thrNorm = juce::jmap(effect->threshold.load(), -80.0f, 0.0f, 0.0f, 1.0f);
+        thrNorm = juce::jlimit(0.0f, 1.0f, thrNorm);
+        float thrX = b.getX() + b.getWidth() * thrNorm;  // map to x-axis (not frequency for clarity)
+        float thrY = b.getY() + b.getHeight() * (1.0f - thrNorm);
+        g.setColour(juce::Colours::white.withAlpha(0.6f));
+        g.drawHorizontalLine(int(thrY), float(b.getX()), float(b.getRight()));
+        g.drawText("THR", b.getX() + 4, int(thrY) - 11, 28, 10, juce::Justification::left);
+
+        // OPEN / CLOSED LED
+        float ledSize = 16.0f;
+        juce::Rectangle<float> led(b.getRight() - ledSize - 6, b.getY() + 6, ledSize, ledSize);
+        g.setColour(isOpen ? accent : juce::Colour(0xff333333));
+        g.fillEllipse(led);
+        g.setColour(isOpen ? accent.brighter(0.4f) : juce::Colour(0xff555555));
+        g.drawEllipse(led, 1.5f);
+        g.setColour(juce::Colours::white.withAlpha(0.7f));
+        g.setFont(8.0f);
+        g.drawText(isOpen ? "OPEN" : "GATE", b.getRight() - 40, b.getY() + 24, 38, 10, juce::Justification::centred);
+    }
+
+private:
+    NoiseGateEffect* effect;
+    bool  isOpen  = false;
+    float smoothGr = 0.0f;
+    LiBeKnob kThresh, kAttack, kRelease, kHold, kRange;
+    void setupKnob(LiBeKnob& k, const juce::String& lbl, std::atomic<float>* ptr,
+                   float min, float max, const juce::String& id) {
+        k.setup(lbl, ptr->load(), min, max, ptr->load(), id, accent);
+        k.slider.onValueChange = [&k, ptr]() {
+            ptr->store((float)k.slider.getValue(), std::memory_order_relaxed);
+        };
+        k.startTrackingParam(ptr, min, max);
+        addKnob(&k);
+    }
+};
+
+std::unique_ptr<juce::Component> NoiseGateEffect::createEditor() {
+    return std::make_unique<NoiseGateEditor>(this);
+}

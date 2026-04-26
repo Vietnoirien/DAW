@@ -80,7 +80,40 @@ private:
     bool         isHovered = false;
 };
 
-// ─── Plugin Tile ──────────────────────────────────────────────────────────────
+// ─── Return Rack Tile ────────────────────────────────────────────────────────
+// Dragging this creates a new return track (Return B, Return C, …).
+class ReturnRackTile : public juce::Component
+{
+public:
+    void paint (juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat().reduced (4.0f);
+        juce::Colour col = isHovered ? juce::Colour (0xff9955ff) : juce::Colour (0xff6633cc);
+        g.setColour (col.darker (0.1f));
+        g.fillRoundedRectangle (b, 6.0f);
+        g.setColour (juce::Colour (0xffbb88ff));
+        g.drawRoundedRectangle (b, 6.0f, 1.5f);
+        g.setColour (juce::Colours::white);
+        g.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
+        g.drawText (juce::String::fromUTF8 ("\xf0\x9f\x94\x81") + "  Return Rack",
+                    b.reduced (6.0f, 0.0f).toNearestInt(), juce::Justification::centredLeft);
+    }
+
+    void mouseEnter (const juce::MouseEvent&) override { isHovered = true;  repaint(); }
+    void mouseExit  (const juce::MouseEvent&) override { isHovered = false; repaint(); }
+
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (e.getDistanceFromDragStart() > 6)
+            if (auto* c = juce::DragAndDropContainer::findParentDragContainerFor (this))
+                c->startDragging ("ReturnRackDrag:", this);
+    }
+
+private:
+    bool isHovered = false;
+};
+
+
 // Represents a discovered VST3 / CLAP plugin in the Plugins browser tab.
 // Dragging a tile sends "PluginDrag:<absolutePath>" to the drop target.
 class PluginTile : public juce::Component
@@ -141,6 +174,7 @@ public:
             { "FMSynth",        juce::Colour (0xff8a5500) },
             { "WavetableSynth", juce::Colour (0xff006870) },
             { "KarplusStrong",  juce::Colour (0xff1a6a30) },
+            { "DrumMachine",    juce::Colour (0xffCC2244) },
         };
 
         // ── Build tiles from the factory list ────────────────────────────────
@@ -203,33 +237,60 @@ class EffectsBrowserPanel : public juce::Component
 public:
     EffectsBrowserPanel()
     {
-        addTile ("Reverb", "    Reverb", juce::Colour (0xff7a1a4a));
-        addTile ("Delay", "    Delay", juce::Colour (0xff7a7a1a));
-        addTile ("Chorus", "    Chorus", juce::Colour (0xff4a7a1a));
-        addTile ("Filter", "    Filter", juce::Colour (0xff4a1a7a));
-        addTile ("Compressor", "  Compressor", juce::Colour (0xffaa4422));
-        addTile ("Limiter", "    Limiter", juce::Colour (0xffdd3322));
-        addTile ("Phaser", "    Phaser", juce::Colour (0xff22aa77));
-        addTile ("Saturation", "  Saturation", juce::Colour (0xffcc7722));
-        addTile ("ParametricEQ", " Parametric EQ", juce::Colour (0xff443399));
+        // ── Return Rack appears at the very top (creates a new return bus) ───
+        auto* rrTile = new ReturnRackTile();
+        listContent.addAndMakeVisible (rrTile);
+        tiles.add (rrTile);
+
+        addTile ("Reverb",          "    Reverb",           juce::Colour (0xff7B68EE));
+        addTile ("Delay",           "    Delay",            juce::Colour (0xff00BCD4));
+        addTile ("Chorus",          "    Chorus",           juce::Colour (0xffFFAA00));
+        addTile ("Filter",          "    Filter",           juce::Colour (0xff00897B));
+        addTile ("Compressor",      "  Compressor",         juce::Colour (0xffE53935));
+        addTile ("Limiter",         "    Limiter",          juce::Colour (0xffFF6D00));
+        addTile ("Phaser",          "    Phaser",           juce::Colour (0xffAB47BC));
+        addTile ("Saturation",      "  Saturation",         juce::Colour (0xffF9A825));
+        addTile ("ParametricEQ",    " Parametric EQ",       juce::Colour (0xff443399));
+        addTile ("Gain",            "    Gain",             juce::Colour (0xff26A69A));
+        addTile ("TransientShaper", " Transient Shaper",    juce::Colour (0xffFFA040));
+        addTile ("NoiseGate",       "  Noise Gate",         juce::Colour (0xff43A047));
+
+        viewport.setViewedComponent (&listContent, false);
+        viewport.setScrollBarsShown (true, false);
+        addAndMakeVisible (viewport);
     }
 
     void resized() override
     {
-        int y = 8;
-        for (auto* t : tiles) { t->setBounds (4, y, getWidth() - 8, 44); y += 52; }
+        viewport.setBounds (getLocalBounds());
+
+        const int tileH   = 44;
+        const int spacing = 8;
+        const int totalH  = spacing + tiles.size() * (tileH + spacing);
+
+        listContent.setSize (getWidth() - viewport.getScrollBarThickness(), totalH);
+
+        int y = spacing;
+        for (auto* t : tiles)
+        {
+            t->setBounds (4, y, listContent.getWidth() - 8, tileH);
+            y += tileH + spacing;
+        }
     }
 
 private:
     void addTile (const juce::String& type, const juce::String& label, juce::Colour c)
     {
         auto* t = new EffectTile (type, label, c);
-        addAndMakeVisible (t);
+        listContent.addAndMakeVisible (t);
         tiles.add (t);
     }
 
-    juce::OwnedArray<EffectTile> tiles;
+    juce::Component              listContent;
+    juce::Viewport               viewport;
+    juce::OwnedArray<juce::Component> tiles;
 };
+
 
 // ─── Plugins Browser Panel ────────────────────────────────────────────────────
 // Scans a list of user-managed directories for VST3 and CLAP plugin files.

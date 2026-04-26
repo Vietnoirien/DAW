@@ -23,7 +23,14 @@ public:
     void stop() { 
         isPlaying.store(false, std::memory_order_release);
         playheadPosition.store(0, std::memory_order_release);
+        isRecording.store(false, std::memory_order_release);
     }
+    
+    void toggleRecord() {
+        isRecording.store(!isRecording.load(std::memory_order_acquire), std::memory_order_release);
+    }
+
+    bool getIsRecording() const { return isRecording.load(std::memory_order_acquire); }
 
     // Seek to an absolute sample position. Safe to call from the message thread.
     // The render thread must re-anchor its transport offset after this call.
@@ -85,6 +92,7 @@ private:
     }
 
     std::atomic<bool>    isPlaying {false};
+    std::atomic<bool>    isRecording {false};
     std::atomic<int64_t> playheadPosition {0}; // Absolute sample position since play start
     std::atomic<double>  bpm {120.0};
     std::atomic<double>  samplesPerBeat {0.0};

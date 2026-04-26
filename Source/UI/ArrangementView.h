@@ -352,6 +352,9 @@ public:
     std::function<void(int trackIdx)>                                    onTrackSelected;
     // Fired when the user left-clicks a clip block to select it
     std::function<void(ArrangementClip* clip)>                           onClipSelected;
+    std::function<void(int trackIndex, bool armed)>                      onTrackArmChanged;
+    std::function<void(int trackIndex, const juce::String& instrumentType)> onInstrumentDropped;
+    std::function<void(int trackIndex, const juce::String& effectType)>     onEffectDropped;
 
     // Currently selected clip (nullptr = none). Stored here so blocks can read it for drawing.
     ArrangementClip* selectedClip = nullptr;
@@ -360,6 +363,7 @@ public:
     struct TrackState {
         juce::String name;
         juce::Colour colour {juce::Colour(0xff2d89ef)}; // Default color
+        bool isArmed {false};
         std::vector<ClipData> availableClips;
     };
 
@@ -459,7 +463,8 @@ private:
 
         DragMode getDragModeForPosition(int x) const;
     };
-    class ArrangementContent : public juce::Component
+    class ArrangementContent : public juce::Component,
+                               public juce::DragAndDropTarget
     {
     public:
         void paint(juce::Graphics& g) override
@@ -502,6 +507,21 @@ private:
                 g.setColour(juce::Colour(0xff2a2a40));
                 g.drawHorizontalLine(y, 0.0f, (float)getWidth());
 
+                // Highlight track if dragging over it
+                if (dragOverTrackIndex == t) {
+                    g.setColour(juce::Colour(0x261a7a4a));
+                    g.fillRect(0, y, getWidth(), ARR_SLOT_H);
+                    
+                    // Dashed border around the track
+                    juce::Path solid;
+                    solid.addRectangle(ARR_TRACK_W + 5.0f, y + 2.0f, getWidth() - ARR_TRACK_W - 10.0f, ARR_SLOT_H - 4.0f);
+                    juce::Path dashed;
+                    float dash[] = { 5.0f, 4.0f };
+                    juce::PathStrokeType(1.3f).createDashedStroke(dashed, solid, dash, 2);
+                    g.setColour(juce::Colour(0xff44aa77));
+                    g.strokePath(dashed, juce::PathStrokeType(1.3f));
+                }
+
                 // Track header badge (color)
                 g.setColour(trackStates[t].colour);
                 g.fillRect(0, y + 2, 4, ARR_SLOT_H - 4);
@@ -515,7 +535,15 @@ private:
                 // Track header text
                 g.setColour(t == selTrack ? juce::Colours::white : juce::Colours::lightgrey);
                 g.setFont(12.0f);
-                g.drawText(trackStates[t].name, 12, y, ARR_TRACK_W - 16, ARR_SLOT_H, juce::Justification::centredLeft);
+                g.drawText(trackStates[t].name, 12, y, ARR_TRACK_W - 40, ARR_SLOT_H, juce::Justification::centredLeft);
+
+                // Record Arm indicator
+                juce::Rectangle<int> armRect(ARR_TRACK_W - 24, y + (ARR_SLOT_H - 16) / 2, 16, 16);
+                g.setColour(trackStates[t].isArmed ? juce::Colour(0xffff3333) : juce::Colour(0xff333333));
+                g.fillRoundedRectangle(armRect.toFloat(), 3.0f);
+                g.setColour(trackStates[t].isArmed ? juce::Colours::white : juce::Colours::grey);
+                g.setFont(juce::Font(juce::FontOptions(10.0f)).boldened());
+                g.drawText(juce::String::fromUTF8("●"), armRect, juce::Justification::centred);
 
                 runningY += ARR_SLOT_H;
 
@@ -675,8 +703,18 @@ private:
             if (trackIdx < 0) return;
             if (trackIdx >= (int)trackStates.size()) return;
 
-            // ── Track header click: select track to show device view ───────────
+            // ── Track header click: select track or arm ───────────
             if (e.x < ARR_TRACK_W) {
+                juce::Rectangle<int> armRect(ARR_TRACK_W - 24, trackIdx * ARR_SLOT_H + ARR_HEADER_H + (ARR_SLOT_H - 16) / 2, 16, 16);
+                if (armRect.contains(e.x, e.y)) {
+                    trackStates[trackIdx].isArmed = !trackStates[trackIdx].isArmed;
+                    if (auto* parent = findParentComponentOfClass<ArrangementView>()) {
+                        if (parent->onTrackArmChanged) parent->onTrackArmChanged(trackIdx, trackStates[trackIdx].isArmed);
+                    }
+                    repaint();
+                    return;
+                }
+                
                 if (auto* parent = findParentComponentOfClass<ArrangementView>()) {
                     parent->selectedTrack = trackIdx;
                     if (parent->onTrackSelected) parent->onTrackSelected(trackIdx);
@@ -849,6 +887,49 @@ private:
         bool   loopActive       = false;
         double rulerDragStart   = 1.0;
         bool   rulerDragInProgress = false;
+
+        // ── DragAndDropTarget ──────────────────────────────────────────────────
+        int dragOverTrackIndex = -1;
+
+        bool isInterestedInDragSource (const SourceDetails& d) override
+        {
+            return d.description.toString().startsWith ("InstrumentDrag:") ||
+                   d.description.toString().startsWith ("EffectDrag:")     ||
+                   d.description.toString().startsWith ("PluginDrag:");
+        }
+
+        void itemDragEnter (const SourceDetails& d) override { updateContentDrag (d.localPosition); }
+        void itemDragMove  (const SourceDetails& d) override { updateContentDrag (d.localPosition); }
+        void itemDragExit  (const SourceDetails&)   override { if (dragOverTrackIndex != -1) { dragOverTrackIndex = -1; repaint(); } }
+
+        void itemDropped (const SourceDetails& d) override
+        {
+            dragOverTrackIndex = -1;
+            repaint();
+
+            auto type = d.description.toString().fromFirstOccurrenceOf(":", false, false);
+            int hit = yToTrackIndex(d.localPosition.y);
+
+            if (auto* parent = findParentComponentOfClass<ArrangementView>()) {
+                if (d.description.toString().startsWith("InstrumentDrag:")) {
+                    if (parent->onInstrumentDropped) parent->onInstrumentDropped(hit, type);
+                } else if (d.description.toString().startsWith("PluginDrag:")) {
+                    juce::String path = d.description.toString().fromFirstOccurrenceOf("PluginDrag:", false, false);
+                    if (parent->onInstrumentDropped) parent->onInstrumentDropped(hit, "__PluginPath__:" + path);
+                } else if (d.description.toString().startsWith("EffectDrag:")) {
+                    if (parent->onEffectDropped && hit >= 0) parent->onEffectDropped(hit, type);
+                }
+            }
+        }
+
+        void updateContentDrag (juce::Point<int> localPosition)
+        {
+            int newTrack = yToTrackIndex(localPosition.y);
+            if (newTrack != dragOverTrackIndex) {
+                dragOverTrackIndex = newTrack;
+                repaint();
+            }
+        }
     };
 
     juce::Viewport     gridViewport;

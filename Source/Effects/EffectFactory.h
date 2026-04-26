@@ -13,6 +13,9 @@ public:
         if (type == "Phaser") return std::make_unique<PhaserEffect>();
         if (type == "Saturation") return std::make_unique<SaturationEffect>();
         if (type == "ParametricEQ") return std::make_unique<ParametricEQEffect>();
+        if (type == "Gain")          return std::make_unique<GainEffect>();
+        if (type == "TransientShaper") return std::make_unique<TransientShaperEffect>();
+        if (type == "NoiseGate")     return std::make_unique<NoiseGateEffect>();
         return nullptr;
     }
 };

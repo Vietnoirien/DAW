@@ -375,21 +375,30 @@ static void styleToggleBtn (juce::TextButton& btn, juce::Colour activeColour)
 // ─────────────────────────────────────────────────────────────────────────────
 class TrackColumn : public juce::Component
 {
+    struct SlotsContent : public juce::Component
+    {
+        void paint (juce::Graphics& g) override { g.fillAll (juce::Colour (0xff111120)); }
+    };
+
 public:
     int        trackIndex = -1;
     bool       isSelected = false;
     TrackHeader header;
     juce::OwnedArray<ClipSlot> slots;
     juce::Slider     volFader;
-    juce::Slider     sendAKnob;
+    juce::OwnedArray<juce::Slider> sendKnobs;
     juce::TextButton muteBtn     { "M" };
     juce::TextButton soloBtn     { "S" };
-    juce::TextButton addSceneBtn { "+" }; // '+ Scene' button below last slot
+    juce::TextButton recordArmBtn{ "\u25cf" };
+    juce::TextButton addSceneBtn { "+" };
     bool isMuted  = false;
     bool isSoloed = false;
-    // Visual data updated from timerCallback on the message thread (no locking needed)
-    float rmsLevel  = 0.0f;  // 0..1 VU meter display
-    float gainValue = 1.0f;  // mirrors track gain for fader tint
+    bool isArmed  = false;
+    float rmsLevel  = 0.0f;
+    float gainValue = 1.0f;
+
+    juce::Viewport slotsViewport;
+    SlotsContent   slotsContent;
 
     std::function<void(int scene)> onCreateClipAt;
     std::function<void(int scene)> onSelectClipAt;
@@ -400,14 +409,14 @@ public:
     std::function<void()>          onSelectTrack;
     std::function<void()>          onDeleteTrack;
     std::function<void(float)>     onVolumeChanged;
-    std::function<void(float)>     onSendChanged;
+    std::function<void(int retIdx, float level)> onSendChanged;
     std::function<void(bool)>      onMuteChanged;
     std::function<void(bool)>      onSoloChanged;
+    std::function<void(bool)>      onArmChanged;
     std::function<void(int scene, const juce::String&)> onRenameClipAt;
     std::function<void(int scene, juce::Colour)>        onSetClipColourAt;
     std::function<void(const juce::String&)>            onRenameTrack;
     std::function<void(juce::Colour)>                   onSetTrackColour;
-    // Called when the user clicks the '+ Scene' button at the bottom of this column.
     std::function<void()> onAddScene;
 
     TrackColumn (int index, const juce::String& name, TrackType type)
@@ -417,14 +426,19 @@ public:
         header.trackType  = type;
         addAndMakeVisible (header);
 
-        // Slots start empty; user adds them via the '+' button (addScene()).
+        slotsViewport.setViewedComponent (&slotsContent, false);
+        slotsViewport.setScrollBarsShown (true, false);
+        slotsViewport.getVerticalScrollBar().setColour (
+            juce::ScrollBar::thumbColourId, juce::Colour (0xff334466));
+        addAndMakeVisible (slotsViewport);
+
         addSceneBtn.setButtonText ("+ Add Pattern");
         addSceneBtn.setTooltip ("Add a clip slot to this track");
-        addSceneBtn.setColour (juce::TextButton::buttonColourId,   juce::Colour (0xff0d0d1f));
-        addSceneBtn.setColour (juce::TextButton::buttonOnColourId,  juce::Colour (0xff1a1a3a));
-        addSceneBtn.setColour (juce::TextButton::textColourOffId,   juce::Colour (0xff3a3a88));
+        addSceneBtn.setColour (juce::TextButton::buttonColourId,  juce::Colour (0xff0d0d1f));
+        addSceneBtn.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xff1a1a3a));
+        addSceneBtn.setColour (juce::TextButton::textColourOffId,  juce::Colour (0xff3a3a88));
         addSceneBtn.onClick = [this] { if (onAddScene) onAddScene(); };
-        addAndMakeVisible (addSceneBtn);
+        slotsContent.addAndMakeVisible (addSceneBtn);
 
         volFader.setSliderStyle (juce::Slider::LinearVertical);
         volFader.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 50, 16);
@@ -436,17 +450,8 @@ public:
         };
         addAndMakeVisible (volFader);
 
-        sendAKnob.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-        sendAKnob.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
-        sendAKnob.setDoubleClickReturnValue (true, 0.0);
-        sendAKnob.onValueChange = [this] {
-            if (onSendChanged) onSendChanged ((float) sendAKnob.getValue());
-        };
-        addAndMakeVisible (sendAKnob);
-
-        // ── Mute button ───────────────────────────────────────────────────────
         muteBtn.setClickingTogglesState (true);
-        styleToggleBtn (muteBtn, juce::Colour (0xffdd8800)); // amber when on
+        styleToggleBtn (muteBtn, juce::Colour (0xffdd8800));
         muteBtn.onClick = [this] {
             isMuted = muteBtn.getToggleState();
             styleToggleBtn (muteBtn, juce::Colour (0xffdd8800));
@@ -454,18 +459,26 @@ public:
         };
         addAndMakeVisible (muteBtn);
 
-        // ── Solo button ───────────────────────────────────────────────────────
         soloBtn.setClickingTogglesState (true);
-        styleToggleBtn (soloBtn, juce::Colour (0xff22cc55)); // green when on
+        styleToggleBtn (soloBtn, juce::Colour (0xff22cc55));
         soloBtn.onClick = [this] {
             isSoloed = soloBtn.getToggleState();
             styleToggleBtn (soloBtn, juce::Colour (0xff22cc55));
             if (onSoloChanged) onSoloChanged (isSoloed);
         };
         addAndMakeVisible (soloBtn);
+
+        recordArmBtn.setClickingTogglesState (true);
+        styleToggleBtn (recordArmBtn, juce::Colour (0xffff3333));
+        recordArmBtn.onClick = [this] {
+            isArmed = recordArmBtn.getToggleState();
+            styleToggleBtn (recordArmBtn, juce::Colour (0xffff3333));
+            if (onArmChanged) onArmChanged (isArmed);
+        };
+        addAndMakeVisible (recordArmBtn);
     }
 
-    // ── Add a new scene slot at the bottom ───────────────────────────────────
+    // -- Add a clip slot ---------------------------------------------------
     void addScene()
     {
         int s      = slots.size();
@@ -478,54 +491,87 @@ public:
         slot->onPauseClip     = [this, s] { if (onPauseClipAt)     onPauseClipAt  (s); };
         slot->onDeleteClip    = [this, s] { if (onDeleteClipAt)    onDeleteClipAt (s); };
         slot->onDuplicateClip = [this, s] { if (onDuplicateClipAt) onDuplicateClipAt (s); };
-        slot->onRenameClip    = [this, s] (const juce::String& n) { if (onRenameClipAt)    onRenameClipAt    (s, n); };
-        slot->onSetClipColour = [this, s] (juce::Colour c)         { if (onSetClipColourAt) onSetClipColourAt (s, c); };
-        addAndMakeVisible (slot);
+        slot->onRenameClip    = [this, s] (const juce::String& n) {
+            if (onRenameClipAt) onRenameClipAt (s, n); };
+        slot->onSetClipColour = [this, s] (juce::Colour c) {
+            if (onSetClipColourAt) onSetClipColourAt (s, c); };
+        slotsContent.addAndMakeVisible (slot);
         slots.add (slot);
-        // Layout is deferred: addSceneToTrack() calls updateContentSize() which
-        // resizes the content component, triggering the layout cascade correctly.
+        layoutSlotsContent();
     }
 
-    // ── Public helpers ────────────────────────────────────────────────────────
-    void setMuted (bool m)
+    // -- Add a send knob for a new return ----------------------------------
+    void addSendKnob (int retIdx)
     {
-        isMuted = m;
-        muteBtn.setToggleState (m, juce::dontSendNotification);
-        styleToggleBtn (muteBtn, juce::Colour (0xffdd8800));
+        auto* k = new juce::Slider();
+        k->setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+        k->setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+        k->setRange (0.0, 1.0);
+        k->setValue (0.0, juce::dontSendNotification);
+        k->setDoubleClickReturnValue (true, 0.0);
+        k->onValueChange = [this, retIdx] {
+            if (onSendChanged) onSendChanged (retIdx, (float) sendKnobs[retIdx]->getValue());
+        };
+        addAndMakeVisible (k);
+        sendKnobs.add (k);
+        resized();
+        repaint();
     }
 
-    void setSoloed (bool s)
+    // -- Helpers -----------------------------------------------------------
+    void setMuted  (bool m) { isMuted  = m; muteBtn.setToggleState (m, juce::dontSendNotification); styleToggleBtn (muteBtn,      juce::Colour (0xffdd8800)); }
+    void setSoloed (bool s) { isSoloed = s; soloBtn.setToggleState (s, juce::dontSendNotification); styleToggleBtn (soloBtn,      juce::Colour (0xff22cc55)); }
+    void setArmed  (bool a) { isArmed  = a; recordArmBtn.setToggleState (a, juce::dontSendNotification); styleToggleBtn (recordArmBtn, juce::Colour (0xffff3333)); }
+
+    // Layout the inner slotsContent (called by addScene / resized)
+    void layoutSlotsContent()
     {
-        isSoloed = s;
-        soloBtn.setToggleState (s, juce::dontSendNotification);
-        styleToggleBtn (soloBtn, juce::Colour (0xff22cc55));
+        int vpW = slotsViewport.getWidth();
+        int barW = slotsViewport.getScrollBarThickness();
+        int w = juce::jmax (4, vpW > 0 ? vpW - barW : getWidth());
+        int contentH = slots.size() * SV_SLOT_H + SV_ADD_SCENE_BTN_H;
+        contentH = juce::jmax (contentH, slotsViewport.getHeight());
+        slotsContent.setSize (w, contentH);
+        int y = 0;
+        for (auto* sl : slots) { sl->setBounds (2, y, w - 4, SV_SLOT_H - 4); y += SV_SLOT_H; }
+        addSceneBtn.setBounds (0, y, w, SV_ADD_SCENE_BTN_H);
     }
 
     void resized() override
     {
+        static constexpr int kKnobH  = 44;
+        static constexpr int kLabelH = 14;
+
         auto b = getLocalBounds();
         header.setBounds (b.removeFromTop (SV_HEADER_H));
-        auto mix = b.removeFromBottom (SV_MIXER_H).reduced (4);
 
-        // M/S button row
+        // Mixer strip: fixed at bottom, grows with each send knob row added.
+        int mixerH = 4 + 22 + 4
+                   + sendKnobs.size() * (kLabelH + kKnobH + 2)
+                   + 4 + 100;                 // min-fader height
+        mixerH = juce::jmax (mixerH, SV_MIXER_H);
+        auto mix = b.removeFromBottom (mixerH).reduced (4);
+
         auto btnRow = mix.removeFromTop (22);
-        int  btnW   = (btnRow.getWidth() - 2) / 2;
+        int  btnW   = (btnRow.getWidth() - 4) / 3;
         muteBtn.setBounds (btnRow.removeFromLeft (btnW));
         btnRow.removeFromLeft (2);
-        soloBtn.setBounds (btnRow);
-
+        soloBtn.setBounds (btnRow.removeFromLeft (btnW));
+        btnRow.removeFromLeft (2);
+        recordArmBtn.setBounds (btnRow);
         mix.removeFromTop (4);
-        mix.removeFromTop (14); // label area
-        sendAKnob.setBounds (mix.removeFromTop (52).withSizeKeepingCentre (44, 44));
-        mix.removeFromTop (2);
+
+        for (auto* k : sendKnobs)
+        {
+            mix.removeFromTop (kLabelH);
+            k->setBounds (mix.removeFromTop (kKnobH).withSizeKeepingCentre (44, 44));
+            mix.removeFromTop (2);
+        }
         volFader.setBounds (mix);
 
-        // Slot rows from top down, then the '+ Scene' add button
-        for (int s = 0; s < slots.size(); ++s)
-            slots[s]->setBounds (b.removeFromTop (SV_SLOT_H).reduced (2));
-
-        // '+ Scene' button sits immediately below the last slot
-        addSceneBtn.setBounds (b.removeFromTop (SV_ADD_SCENE_BTN_H));
+        // Clip viewport fills the rest between header and mixer strip
+        slotsViewport.setBounds (b);
+        layoutSlotsContent();
     }
 
     void paint (juce::Graphics& g) override
@@ -534,68 +580,57 @@ public:
         g.setColour (isSelected ? juce::Colour (0xff555577) : juce::Colour (0xff252540));
         g.drawRect (getLocalBounds(), isSelected ? 2 : 1);
 
-        // ── "Send A" label — sits between M/S buttons and the knob ──────────
+        if (sendKnobs.isEmpty()) return;
+        static constexpr int kKnobH  = 44;
+        static constexpr int kLabelH = 14;
         g.setColour (juce::Colour (0xff8888aa));
         g.setFont (juce::Font (juce::FontOptions (9.5f, juce::Font::bold)));
-        int labelY = getHeight() - SV_MIXER_H + 4 + 22 + 4;
-        g.drawText ("SEND A", 0, labelY, getWidth(), 14, juce::Justification::centred);
+        int labelY = sendKnobs[0]->getY() - kLabelH;
+        for (int i = 0; i < sendKnobs.size(); ++i)
+        {
+            juce::String lbl = "SEND "; lbl += (char)('A' + i);
+            g.drawText (lbl, 0, labelY, getWidth(), kLabelH, juce::Justification::centred);
+            labelY += kLabelH + kKnobH + 2;
+        }
     }
 
-    // paintOverChildren() is called AFTER child components are rendered,
-    // so the gain tint and RMS meter appear on top of the volFader slider.
     void paintOverChildren (juce::Graphics& g) override
     {
         auto fb = volFader.getBounds();
-
-        // The slider component includes a 16px TextBoxBelow — the actual
-        // fader track lives in the region above it.
         static constexpr int kTextBoxH = 16;
         const int   trackTop    = fb.getY();
         const int   trackBottom = fb.getBottom() - kTextBoxH;
         const float trackH      = (float)(trackBottom - trackTop);
         if (trackH < 4.0f) return;
 
-        // ── Gain tint: warm amber bar from thumb down to fader track bottom ───
         if (gainValue > 0.01f)
         {
             float gainNorm = juce::jlimit (0.0f, 1.0f, gainValue);
             float thumbY   = trackTop + trackH * (1.0f - gainNorm);
-            juce::Rectangle<float> gainBar (
-                (float) fb.getCentreX() - 2.0f,
-                thumbY,
-                4.0f,
-                (float) trackBottom - thumbY);
-            juce::ColourGradient grad (
-                juce::Colour (0xffcc8833).withAlpha (0.45f), gainBar.getX(), gainBar.getY(),
-                juce::Colour (0xff995500).withAlpha (0.10f), gainBar.getX(), gainBar.getBottom(),
-                false);
+            juce::Rectangle<float> gainBar ((float)fb.getCentreX() - 2.0f, thumbY, 4.0f, (float)trackBottom - thumbY);
+            juce::ColourGradient grad (juce::Colour (0xffcc8833).withAlpha (0.45f), gainBar.getX(), gainBar.getY(),
+                                       juce::Colour (0xff995500).withAlpha (0.10f), gainBar.getX(), gainBar.getBottom(), false);
             g.setGradientFill (grad);
             g.fillRoundedRectangle (gainBar, 2.0f);
         }
 
-        // ── RMS level meter: bar centered on the fader rail ──────────────────
         if (rmsLevel > 0.002f)
         {
             float lvl    = juce::jlimit (0.0f, 1.0f, rmsLevel);
             float meterH = trackH * lvl;
             float mw     = 5.0f;
-            // Centre on the fader rail (same axis as the gain tint)
-            float mx     = (float) fb.getCentreX() - mw * 0.5f;
-            float my     = (float) trackBottom - meterH;
+            float mx     = (float)fb.getCentreX() - mw * 0.5f;
+            float my     = (float)trackBottom - meterH;
             juce::Colour meterCol = lvl > 0.85f ? juce::Colour (0xffff4444)
                                   : lvl > 0.65f ? juce::Colour (0xffddcc00)
                                                 : juce::Colour (0xff22dd77);
-            juce::ColourGradient mGrad (
-                meterCol.withAlpha (0.90f), mx, my,
-                meterCol.withAlpha (0.30f), mx, (float) trackBottom,
-                false);
+            juce::ColourGradient mGrad (meterCol.withAlpha (0.90f), mx, my,
+                                        meterCol.withAlpha (0.30f), mx, (float)trackBottom, false);
             g.setGradientFill (mGrad);
             g.fillRoundedRectangle (mx, my, mw, meterH, 2.0f);
         }
     }
 
-    // Repaint only the mixer strip at the bottom — avoids redrawing all clip
-    // slots on every timer tick (called from MainComponent::timerCallback).
     void repaintMixerStrip()
     {
         repaint (0, getHeight() - SV_MIXER_H, getWidth(), SV_MIXER_H);
@@ -612,7 +647,6 @@ public:
             });
             return;
         }
-
         if (onSelectTrack) onSelectTrack();
     }
 
@@ -635,7 +669,7 @@ public:
         repaint();
     }
 
-    void setPlayhead(float phase)
+    void setPlayhead (float phase)
     {
         for (auto* sl : slots) {
             sl->playheadPhase = phase;
@@ -643,6 +677,7 @@ public:
         }
     }
 };
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Scene Launch Button
@@ -780,18 +815,22 @@ public:
     std::function<void(int track, int scene)>                          onDuplicateClip;
     std::function<void(int trackIndex)>                                onSelectTrack;
     std::function<void(int trackIndex)>                                onDeleteTrack;
+    std::function<void(int trackIndex, bool soloed)>                   onTrackSoloChanged;
+    std::function<void(int trackIndex, bool armed)>                    onTrackArmChanged;
     std::function<void(int trackIndex, const juce::String& type)>      onInstrumentDropped;
     std::function<void(int trackIndex, const juce::String& type)>      onEffectDropped;
     std::function<void(int trackIndex, float gain)>                    onTrackVolumeChanged;
-    std::function<void(int trackIndex, float level)>                   onTrackSendChanged;
+    // trackIndex, retIdx (0=RetA, 1=RetB…), send level
+    std::function<void(int trackIndex, int retIdx, float level)>       onTrackSendChanged;
     std::function<void(int trackIndex, bool muted)>                    onTrackMuteChanged;
-    std::function<void(int trackIndex, bool soloed)>                   onTrackSoloChanged;
     std::function<void(int track, int scene, const juce::String&)>     onRenameClip;
     std::function<void(int track, int scene, juce::Colour)>            onSetClipColour;
     std::function<void(int trackIndex, const juce::String&)>           onRenameTrack;
     std::function<void(int trackIndex, juce::Colour)>                  onSetTrackColour;
     std::function<void(int trackIndex)>                                onAddScene;
 
+    // Tracks the number of active return buses so that new columns get the right number of knobs.
+    int numReturnTracksCached = 0;
     // ── Track Management ─────────────────────────────────────────────────────
     int addTrack (TrackType type, const juce::String& name)
     {
@@ -806,9 +845,10 @@ public:
         col->onSelectTrack  = [this, idx] () { if (onSelectTrack) onSelectTrack (idx); };
         col->onDeleteTrack  = [this, idx] () { if (onDeleteTrack) onDeleteTrack (idx); };
         col->onVolumeChanged = [this, idx] (float g) { if (onTrackVolumeChanged) onTrackVolumeChanged (idx, g); };
-        col->onSendChanged   = [this, idx] (float l) { if (onTrackSendChanged)   onTrackSendChanged   (idx, l); };
+        col->onSendChanged   = [this, idx] (int r, float l) { if (onTrackSendChanged) onTrackSendChanged (idx, r, l); };
         col->onMuteChanged      = [this, idx] (bool m)  { if (onTrackMuteChanged)   onTrackMuteChanged   (idx, m); };
         col->onSoloChanged      = [this, idx] (bool s)  { if (onTrackSoloChanged)   onTrackSoloChanged   (idx, s); };
+        col->onArmChanged       = [this, idx] (bool a)  { if (onTrackArmChanged)    onTrackArmChanged    (idx, a); };
         col->onRenameTrack      = [this, idx] (const juce::String& n) { if (onRenameTrack)    onRenameTrack    (idx, n); };
         col->onSetTrackColour   = [this, idx] (juce::Colour c)         { if (onSetTrackColour) onSetTrackColour (idx, c); };
         col->onRenameClipAt     = [this, idx] (int s, const juce::String& n) { if (onRenameClip)    onRenameClip    (idx, s, n); };
@@ -818,6 +858,9 @@ public:
         col->header.onDeleteTrack  = col->onDeleteTrack;
         col->header.onRenameTrack  = col->onRenameTrack;
         col->header.onSetTrackColour = col->onSetTrackColour;
+        // Provision one send knob per existing return track
+        for (int r = 0; r < numReturnTracksCached; ++r)
+            col->addSendKnob(r);
         addAndMakeVisible (col);
         columns.add (col);
         // Explicitly re-layout: setSize() in updateContentSize() may not change the
@@ -906,6 +949,14 @@ public:
         // drop zone occupies the last SV_TRACK_W px — no component, painted below
     }
 
+    // Add one send knob to every existing column (called after a new return track is created)
+    void addSendKnobToAllColumns (int retIdx)
+    {
+        for (auto* col : columns)
+            col->addSendKnob (retIdx);
+        numReturnTracksCached = retIdx + 1;
+    }
+
     void paint (juce::Graphics& g) override
     {
         g.fillAll (juce::Colour (0xff0e0e1c));
@@ -967,12 +1018,19 @@ public:
     std::function<void(int sceneIndex)>        onLaunchScene;
     std::function<void(int trackIndex, const juce::String& instrumentType)> onInstrumentDropped;
     std::function<void(int trackIndex, const juce::String& effectType)>     onEffectDropped;
+    // Called by the effect-drop path when no column hit is found (e.g. in Arrangement mode).
+    // Should return the currently selected track index, or -1 if nothing is selected.
+    std::function<int()> getSelectedTrackIndex;
     std::function<void(int trackIndex, float gain)> onTrackVolumeChanged;
-    std::function<void(int trackIndex, float level)> onTrackSendChanged;
+    // trackIndex, retIdx (0=RetA, 1=RetB…), send level
+    std::function<void(int trackIndex, int retIdx, float level)> onTrackSendChanged;
     std::function<void(float gain)>                 onMasterVolumeChanged;
-    std::function<void(float gain)>                 onReturnVolumeChanged;
+    // Fired when a ReturnRackDrag is dropped onto a track; the listener creates a new return bus.
+    std::function<void()>                           onReturnRackDropped;
+    std::function<void(int retIdx, float gain)>     onReturnVolumeChanged;
     std::function<void(int trackIndex, bool muted)>  onTrackMuteChanged;
     std::function<void(int trackIndex, bool soloed)> onTrackSoloChanged;
+    std::function<void(int trackIndex, bool armed)>  onTrackArmChanged;
     std::function<void(int track, int scene, const juce::String&)> onRenameClip;
     std::function<void(int track, int scene, juce::Colour)>        onSetClipColour;
     std::function<void(int trackIndex, const juce::String&)>       onRenameTrack;
@@ -991,6 +1049,8 @@ public:
         gridContent.onDuplicateClip = [this] (int t, int s) { if (onDuplicateClip)   onDuplicateClip(t, s); };
         gridContent.onSelectTrack = [this] (int t)       { if (onSelectTrack)        onSelectTrack(t); };
         gridContent.onDeleteTrack = [this] (int t)       { if (onDeleteTrack)        onDeleteTrack(t); };
+        gridContent.onTrackSoloChanged = [this] (int t, bool s) { if (onTrackSoloChanged) onTrackSoloChanged (t, s); };
+        gridContent.onTrackArmChanged  = [this] (int t, bool a) { if (onTrackArmChanged)  onTrackArmChanged  (t, a); };
         gridContent.onInstrumentDropped = [this] (int t, const juce::String& tp)
         {
             if (onInstrumentDropped) onInstrumentDropped (t, tp);
@@ -1003,9 +1063,9 @@ public:
         {
             if (onTrackVolumeChanged) onTrackVolumeChanged (t, g);
         };
-        gridContent.onTrackSendChanged = [this] (int t, float l)
+        gridContent.onTrackSendChanged = [this] (int t, int r, float l)
         {
-            if (onTrackSendChanged) onTrackSendChanged (t, l);
+            if (onTrackSendChanged) onTrackSendChanged (t, r, l);
         };
         gridContent.onTrackMuteChanged = [this] (int t, bool m)
         {
@@ -1042,12 +1102,14 @@ public:
 
         // Scene launch buttons are added dynamically via addSceneButton().
 
-        returnColumn = std::make_unique<FixedTrackColumn> ("Return A");
+        // Scene launch buttons are added dynamically via addSceneButton().
+
         masterColumn = std::make_unique<FixedTrackColumn> ("Master");
-        returnColumn->onVolumeChanged = [this] (float g) { if (onReturnVolumeChanged) onReturnVolumeChanged (g); };
-        returnColumn->onSelectTrack = [this] () { if (onSelectTrack) onSelectTrack(999); }; // Use 999 for return track index convention
         masterColumn->onVolumeChanged = [this] (float g) { if (onMasterVolumeChanged) onMasterVolumeChanged (g); };
-        addAndMakeVisible (returnColumn.get());
+        
+        addReturnTrack("Return A");
+        
+        addAndMakeVisible (masterColumn.get());
         addAndMakeVisible (masterColumn.get());
     }
 
@@ -1069,6 +1131,22 @@ public:
             gridContent.columns[trackIndex]->resized();
             updateSceneButtons();
         }
+    }
+    
+    void addReturnTrack(const juce::String& name)
+    {
+        int retIdx = returnColumns.size();
+        auto col = std::make_unique<FixedTrackColumn>(name);
+        col->onVolumeChanged = [this, retIdx](float g) {
+            if (onReturnVolumeChanged) onReturnVolumeChanged(retIdx, g); // Need to update signature later
+        };
+        col->onSelectTrack = [this, retIdx]() {
+            if (onSelectTrack) onSelectTrack(1000 + retIdx);
+        };
+        addAndMakeVisible(col.get());
+        returnColumns.push_back(std::move(col));
+        resized();
+        repaint();
     }
 
     // Remove scene slot at sceneIndex from the given track column,
@@ -1133,12 +1211,13 @@ public:
     void setTrackSelected(int t)                          
     { 
         gridContent.setTrackSelected(t); 
-        if (t == 999) {
-            returnColumn->isSelected = true;
-            returnColumn->repaint();
-        } else {
-            returnColumn->isSelected = false;
-            returnColumn->repaint();
+        for (int i = 0; i < returnColumns.size(); ++i) {
+            if (t == 1000 + i) {
+                returnColumns[i]->isSelected = true;
+            } else {
+                returnColumns[i]->isSelected = false;
+            }
+            returnColumns[i]->repaint();
         }
     }
     void setTrackPlayhead(int t, float phase)             { gridContent.setTrackPlayhead(t, phase); }
@@ -1155,10 +1234,12 @@ public:
             { sceneButtons[scene]->isActive = true; sceneButtons[scene]->repaint(); }
     }
 
-    void setReturnRmsLevel (float lvl)
+    void setReturnRmsLevel (int retIdx, float lvl)
     {
-        returnColumn->rmsLevel = lvl;
-        returnColumn->repaintMixerStrip();
+        if (juce::isPositiveAndBelow(retIdx, returnColumns.size())) {
+            returnColumns[retIdx]->rmsLevel = lvl;
+            returnColumns[retIdx]->repaintMixerStrip();
+        }
     }
 
     void setMasterRmsLevel (float lvl)
@@ -1174,16 +1255,40 @@ public:
 
         auto sceneStrip = b.removeFromRight (SV_SCENE_W);
         auto masterB    = b.removeFromRight (SV_MASTER_W);
-        auto returnB    = b.removeFromRight (SV_RETURN_W);
+        
+        for (int i = (int)returnColumns.size() - 1; i >= 0; --i) {
+            returnColumns[i]->setBounds(b.removeFromRight(SV_RETURN_W));
+        }
 
         masterColumn->setBounds (masterB);
-        returnColumn->setBounds (returnB);
 
         for (int s = 0; s < sceneButtons.size(); ++s)
             sceneButtons[s]->setBounds (sceneStrip.getX(), SV_HEADER_H + s * SV_SLOT_H, SV_SCENE_W, SV_SLOT_H);
 
         gridViewport.setBounds (b);
         updateContentSize();
+    }
+
+    public:
+    void updateContentSize()
+    {
+        auto vb = gridViewport.getBounds();
+        if (vb.isEmpty()) return;
+
+        int numCols  = gridContent.columns.size() + 1; // +1 always-visible drop zone
+        int contentW = juce::jmax (vb.getWidth(), numCols * SV_TRACK_W);
+
+        // Height: header + tallest slot area + '+ scene' btn + mixer
+        int maxSlots = 0;
+        for (auto* col : gridContent.columns)
+            maxSlots = juce::jmax (maxSlots, col->slots.size());
+        int contentH = SV_HEADER_H + maxSlots * SV_SLOT_H + SV_ADD_SCENE_BTN_H + SV_MIXER_H;
+        contentH = juce::jmax (contentH, vb.getHeight());
+
+        bool needsHBar = contentW > vb.getWidth();
+        int  barH      = needsHBar ? gridViewport.getScrollBarThickness() : 0;
+
+        gridContent.setSize (contentW, contentH - barH);
     }
 
     void paint (juce::Graphics& g) override
@@ -1216,7 +1321,8 @@ public:
     {
         return d.description.toString().startsWith ("InstrumentDrag:") ||
                d.description.toString().startsWith ("EffectDrag:")     ||
-               d.description.toString().startsWith ("PluginDrag:");
+               d.description.toString().startsWith ("PluginDrag:")     ||
+               d.description.toString().startsWith ("ReturnRackDrag:");
     }
 
     void itemDragEnter (const SourceDetails& d) override { updateContentDrag (d.localPosition, true); }
@@ -1241,43 +1347,35 @@ public:
             // Pass the absolute plugin path — MainComponent detects the prefix.
             juce::String path = d.description.toString().fromFirstOccurrenceOf ("PluginDrag:", false, false);
             if (onInstrumentDropped) onInstrumentDropped (hit, "__PluginPath__:" + path);
+        } else if (d.description.toString().startsWith ("ReturnRackDrag:")) {
+            // Create a new return bus regardless of where on the view it was dropped.
+            if (onReturnRackDropped) onReturnRackDropped();
         } else if (d.description.toString().startsWith ("EffectDrag:")) {
             if (hit == -1) {
                 // Check if it's over Return track
-                if (returnColumn->getBounds().contains(d.localPosition)) {
-                    hit = 999;
+                for (int i = 0; i < returnColumns.size(); ++i) {
+                    if (returnColumns[i]->getBounds().contains(d.localPosition)) {
+                        hit = 1000 + i;
+                        break;
+                    }
+                }
+                if (hit == -1) {
+                    // Fallback: use the currently selected track (works in Arrangement mode
+                    // where column bounds don't match the drop position).
+                    if (getSelectedTrackIndex) hit = getSelectedTrackIndex();
                 }
             }
-            if (onEffectDropped) onEffectDropped (hit, type);
+            if (onEffectDropped && hit >= 0) onEffectDropped (hit, type);
         }
     }
 
 private:
     juce::Viewport                      gridViewport;
     juce::OwnedArray<SceneLaunchButton> sceneButtons;
-    std::unique_ptr<FixedTrackColumn>   returnColumn;
+    std::vector<std::unique_ptr<FixedTrackColumn>> returnColumns;
     std::unique_ptr<FixedTrackColumn>   masterColumn;
 
-    void updateContentSize()
-    {
-        auto vb = gridViewport.getBounds();
-        if (vb.isEmpty()) return;
 
-        int numCols  = gridContent.columns.size() + 1; // +1 always-visible drop zone
-        int contentW = juce::jmax (vb.getWidth(), numCols * SV_TRACK_W);
-
-        // Height: header + tallest slot area + '+ scene' btn + mixer
-        int maxSlots = 0;
-        for (auto* col : gridContent.columns)
-            maxSlots = juce::jmax (maxSlots, col->slots.size());
-        int contentH = SV_HEADER_H + maxSlots * SV_SLOT_H + SV_ADD_SCENE_BTN_H + SV_MIXER_H;
-        contentH = juce::jmax (contentH, vb.getHeight());
-
-        bool needsHBar = contentW > vb.getWidth();
-        int  barH      = needsHBar ? gridViewport.getScrollBarThickness() : 0;
-
-        gridContent.setSize (contentW, contentH - barH);
-    }
 
     // Convert a SessionView-local point into TrackGridContent coordinates
     juce::Point<int> toContentCoords (juce::Point<int> svLocal) const

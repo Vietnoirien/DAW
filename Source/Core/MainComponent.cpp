@@ -1,6 +1,74 @@
 #include "MainComponent.h"
 
 // ════════════════════════════════════════════════════════════════════════════
+//  RecordingThread::run()
+// ════════════════════════════════════════════════════════════════════════════
+void RecordingThread::run()
+{
+    while (!threadShouldExit())
+    {
+        bool isRecording = owner.transportClock.getIsRecording();
+        const int nTracks = owner.numActiveTracks.load(std::memory_order_relaxed);
+        
+        for (int t = 0; t < nTracks; ++t) {
+            auto* track = owner.audioTracks[t].get();
+            bool isArmed = track->isArmedForRecord.load(std::memory_order_relaxed);
+            
+            if (isRecording && isArmed) {
+                // Initialize writer if needed
+                if (!track->wasRecording) {
+                    track->currentRecordingFile = owner.workspaceDirectory.getChildFile("Audio").getChildFile("Recording_Track" + juce::String(t + 1) + "_" + juce::String(juce::Time::currentTimeMillis()) + ".wav");
+                    track->currentRecordingFile.getParentDirectory().createDirectory();
+                    
+                    auto outStream = track->currentRecordingFile.createOutputStream();
+                    if (outStream != nullptr) {
+                        juce::WavAudioFormat wavFormat;
+                        track->recordWriter.reset(wavFormat.createWriterFor(outStream.release(), owner.currentSampleRate, 1, 24, {}, 0));
+                    }
+                    track->recordStartSample = owner.transportClock.getPlayheadPosition();
+                    track->wasRecording = true;
+                }
+                
+                // Drain FIFO to disk
+                if (track->recordFifo != nullptr && track->recordWriter != nullptr) {
+                    int start1, size1, start2, size2;
+                    track->recordFifo->prepareToRead(track->recordFifo->getNumReady(), start1, size1, start2, size2);
+                    
+                    if (size1 > 0) {
+                        const float* data = track->recordBuffer.data() + start1;
+                        track->recordWriter->writeFromFloatArrays(&data, 1, size1);
+                    }
+                    if (size2 > 0) {
+                        const float* data = track->recordBuffer.data() + start2;
+                        track->recordWriter->writeFromFloatArrays(&data, 1, size2);
+                    }
+                    track->recordFifo->finishedRead(size1 + size2);
+                }
+            } else {
+                // Stop recording
+                if (track->wasRecording) {
+                    track->recordWriter.reset();
+                    track->wasRecording = false;
+                    
+                    // Dispatch to message thread to load the recorded file
+                    juce::MessageManager::callAsync([&owner = this->owner, t, f = track->currentRecordingFile]() {
+                        owner.loadAudioFileIntoTrack(t, f);
+                    });
+                }
+                // Flush any remaining data in FIFO so it doesn't build up
+                if (track->recordFifo != nullptr) {
+                    int start1, size1, start2, size2;
+                    track->recordFifo->prepareToRead(track->recordFifo->getNumReady(), start1, size1, start2, size2);
+                    track->recordFifo->finishedRead(size1 + size2);
+                }
+            }
+        }
+        
+        wait(20); // Poll every 20ms
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 //  RenderThread::run()
 //
 //  This is the NON-RT workhorse thread. It does all the heavy DSP:
@@ -209,9 +277,9 @@ void RenderThread::run()
                     inst->processBlock(trackScratch, owner.audioTracks[t]->midiBuffer);
                 }
 
-                for (int e = 0; e < Track::MAX_EFFECTS; ++e) {
-                    if (auto* effect = owner.audioTracks[t]->effectChain[e].load(std::memory_order_acquire)) {
-                        effect->processBlock(trackScratch);
+                if (auto* vec = owner.audioTracks[t]->activeEffectChain.load(std::memory_order_acquire)) {
+                    for (auto* effect : *vec) {
+                        if (effect) effect->processBlock(trackScratch);
                     }
                 }
 
@@ -228,19 +296,30 @@ void RenderThread::run()
                     juce::MessageManager::callAsync ([dead] { delete dead; });
                 }
 
-                const float tSendALevel = audible ? owner.audioTracks[t]->sendALevel.load(std::memory_order_relaxed) : 0.0f;
 
-                // Accumulate track (with effective gain) into master mix and send to return A (post-fader)
-                if (tGain > 0.0f || tSendALevel > 0.0f)
+
+                // Accumulate track (with effective gain) into master mix and send to returns (post-fader)
+                if (tGain > 0.0f || audible)
                 {
                     for (int ch = 0; ch < nCh; ++ch)
                     {
                         auto* dst = owner.renderScratch.getWritePointer(ch);
-                        auto* retDst = returnScratch.getWritePointer(ch);
                         const auto* src = trackScratch.getReadPointer(ch);
                         for (int i = 0; i < bs; ++i) {
                             dst[i] += src[i] * tGain;
-                            retDst[i] += src[i] * tGain * tSendALevel;
+                        }
+                    }
+                    int nReturns = owner.numReturnTracks.load(std::memory_order_relaxed);
+                    for (int r = 0; r < std::min(nReturns, 8); ++r) {
+                        float tSendLevel = owner.audioTracks[t]->sendLevels[r].load(std::memory_order_relaxed);
+                        if (tSendLevel > 0.0f) {
+                            for (int ch = 0; ch < nCh; ++ch) {
+                                auto* retDst = owner.returnScratches[r].getWritePointer(ch);
+                                const auto* src = trackScratch.getReadPointer(ch);
+                                for (int i = 0; i < bs; ++i) {
+                                    retDst[i] += src[i] * tGain * tSendLevel;
+                                }
+                            }
                         }
                     }
                 }
@@ -254,24 +333,28 @@ void RenderThread::run()
             }
 
             // ── Process Return Track Effects & Accumulate to Master ───────
-            for (int e = 0; e < Track::MAX_EFFECTS; ++e) {
-                if (auto* effect = owner.returnTrackA.effectChain[e].load(std::memory_order_acquire)) {
-                    effect->processBlock(returnScratch);
+            int nReturns = owner.numReturnTracks.load(std::memory_order_relaxed);
+            for (int r = 0; r < std::min(nReturns, 8); ++r) {
+                if (auto* vec = owner.returnTracks[r]->activeEffectChain.load(std::memory_order_acquire)) {
+                    for (auto* effect : *vec) {
+                        if (effect) effect->processBlock(owner.returnScratches[r]);
+                    }
                 }
-            }
 
-            const float retGain = owner.returnTrackA.gain.load(std::memory_order_relaxed);
-            float sumRmsReturn = 0.0f;
-            for (int ch = 0; ch < nCh; ++ch) {
-                auto* dst = owner.renderScratch.getWritePointer(ch);
-                const auto* src = returnScratch.getReadPointer(ch);
-                for (int i = 0; i < bs; ++i) {
-                    float s = src[i] * retGain;
-                    dst[i] += s;
-                    if (ch == 0) sumRmsReturn += s * s;
+                const float retGain = owner.returnTracks[r]->gain.load(std::memory_order_relaxed);
+                float sumRmsReturn = 0.0f;
+                for (int ch = 0; ch < nCh; ++ch) {
+                    auto* dst = owner.renderScratch.getWritePointer(ch);
+                    const auto* src = owner.returnScratches[r].getReadPointer(ch);
+                    for (int i = 0; i < bs; ++i) {
+                        float s = src[i] * retGain;
+                        dst[i] += s;
+                        if (ch == 0) sumRmsReturn += s * s;
+                    }
                 }
+                owner.returnTracks[r]->rmsLevel.store(std::sqrt(sumRmsReturn / bs), std::memory_order_relaxed);
+                owner.returnScratches[r].clear(); // clear for next block
             }
-            owner.returnTrackA.rmsLevel.store(std::sqrt(sumRmsReturn / bs), std::memory_order_relaxed);
 
             // ── 5. Plugin processBlock (NO LOCK) ─────────────────────────
             if (owner.activePlugin != nullptr)
@@ -362,7 +445,7 @@ void RenderThread::run()
 // ════════════════════════════════════════════════════════════════════════════
 
 MainComponent::MainComponent()
-    : renderThread(*this)
+    : renderThread(*this), recordingThread(*this)
 {
     // ── Pre-reserve dynamic track storage (128 slots) to prevent reallocation
     // during the session. The render thread accesses audioTracks[] by index
@@ -373,6 +456,8 @@ MainComponent::MainComponent()
     trackInstruments.reserve(128);
     loadedFiles.reserve(128);
     arrangementTracks.reserve(128);
+    returnTracks.push_back(std::make_unique<Track>());
+    numReturnTracks.store(1, std::memory_order_release);
 
     // ── Application Workspace & Settings ───────────────────────────────────────
     initialiseWorkspace();
@@ -1146,9 +1231,17 @@ MainComponent::MainComponent()
                 nullptr, std::memory_order_acq_rel);
         }
 
+        // ── Step 1b: Pre-null the effect chain atomically so the render thread
+        // cannot enter any effect's processBlock after this point.  Without this,
+        // a slow VST3 effect could keep the render thread busy past the 2 s
+        // stopThread timeout, causing a force-kill and corrupted state.
+        if (auto* oldVec = audioTracks[trackIndex]->activeEffectChain.exchange(nullptr, std::memory_order_acq_rel)) {
+            audioTracks[trackIndex]->effectVectorGarbageQueue.push(oldVec);
+        }
+
         // ── Step 2: Stop the render thread with a generous timeout.
-        // Because activeInstrument is already nullptr, the render thread won't
-        // enter processBlock for this track — so 2 s is more than enough.
+        // Both activeInstrument and effectChain slots are already nullptr, so the
+        // render thread skips this track's DSP entirely — 2 s is more than enough.
         bool wasRunning = renderThread.isThreadRunning();
         if (wasRunning) renderThread.stopThread(2000);
 
@@ -1159,8 +1252,23 @@ MainComponent::MainComponent()
             juce::MessageManager::callAsync([deadInst] { delete deadInst; });
 
         // ── Step 4: Drain remaining garbage (patterns, effects) synchronously
-        // now that the render thread is stopped.
+        // now that the render thread is stopped.  Effect slots are already nullptr
+        // (pre-nulled above) so clear() will just drain effectGarbageQueue.
         audioTracks[trackIndex]->clear();
+
+        // ── Step 5: Null any dangling selectedArrangementClip pointer that points
+        // into arrangementTracks[trackIndex] BEFORE we erase that vector entry.
+        // Failing to do this causes a use-after-free crash when subsequent code
+        // (automation overlay, showDeviceEditorForTrack, etc.) dereferences the ptr.
+        if (selectedArrangementClip != nullptr) {
+            for (const auto& clip : arrangementTracks[trackIndex]) {
+                if (&clip == selectedArrangementClip) {
+                    selectedArrangementClip = nullptr;
+                    arrangementView.setSelectedClip(nullptr);
+                    break;
+                }
+            }
+        }
 
         // Erase from all parallel vectors
         audioTracks.erase(audioTracks.begin() + trackIndex);
@@ -1266,6 +1374,7 @@ MainComponent::MainComponent()
             // Instantiate modular instrument
             auto newInst = InstrumentFactory::create(type);
             if (newInst) {
+                newInst->setHostTrack(static_cast<void*>(audioTracks[targetIdx].get()));
                 newInst->prepareToPlay(currentSampleRate);
                 if (auto* old = audioTracks[targetIdx]->activeInstrument.exchange(newInst.release(), std::memory_order_acq_rel)) {
                     audioTracks[targetIdx]->instrumentGarbageQueue.push(old);
@@ -1286,6 +1395,7 @@ MainComponent::MainComponent()
             sessionView.gridContent.columns[targetIdx]->header.hasInstrument = true;
             sessionView.gridContent.columns[targetIdx]->header.instrumentName = type;
             sessionView.gridContent.columns[targetIdx]->header.repaint();
+            syncArrangementFromSession();
             
             if (auto* current = audioTracks[targetIdx]->activeInstrument.load(std::memory_order_acquire)) {
                 current->closeUI();
@@ -1294,6 +1404,7 @@ MainComponent::MainComponent()
             // Instantiate modular instrument
             auto newInst = InstrumentFactory::create(type);
             if (newInst) {
+                newInst->setHostTrack(static_cast<void*>(audioTracks[targetIdx].get()));
                 newInst->prepareToPlay(currentSampleRate);
                 audioTracks[targetIdx]->automationRegistry.clear(); // Prevent dangling pointers
                 newInst->registerAutomationParameters(audioTracks[targetIdx].get());
@@ -1321,8 +1432,11 @@ MainComponent::MainComponent()
         int nTracks = numActiveTracks.load(std::memory_order_relaxed);
         Track* targetTrack = nullptr;
 
-        if (trackIdx == 999) {
-            targetTrack = &returnTrackA;
+        if (trackIdx >= 1000) {
+            int retIdx = trackIdx - 1000;
+            if (retIdx >= 0 && retIdx < numReturnTracks.load()) {
+                targetTrack = returnTracks[retIdx].get();
+            }
         } else if (trackIdx >= 0 && trackIdx < nTracks) {
             targetTrack = audioTracks[trackIdx].get();
         } else {
@@ -1330,22 +1444,24 @@ MainComponent::MainComponent()
         }
 
         auto newEffect = EffectFactory::create(type);
-        if (newEffect) {
+        if (newEffect && targetTrack) {
             newEffect->prepareToPlay(currentSampleRate);
             newEffect->registerAutomationParameters(targetTrack);
 
-            // Find an empty slot
-            for (int i = 0; i < Track::MAX_EFFECTS; ++i) {
-                if (targetTrack->effectChain[i].load(std::memory_order_relaxed) == nullptr) {
-                    targetTrack->effectChain[i].store(newEffect.release(), std::memory_order_release);
-                    break;
-                }
+            std::vector<EffectProcessor*>* newChain = new std::vector<EffectProcessor*>();
+            if (auto* oldVec = targetTrack->activeEffectChain.load(std::memory_order_acquire)) {
+                *newChain = *oldVec;
+            }
+            newChain->push_back(newEffect.release());
+            
+            if (auto* oldVec = targetTrack->activeEffectChain.exchange(newChain, std::memory_order_acq_rel)) {
+                targetTrack->effectVectorGarbageQueue.push(oldVec);
             }
         }
 
         // Always select the track and show its device panel immediately
         selectedTrackIndex = trackIdx;
-        if (trackIdx != 999) selectedSceneIndex = -1;
+        if (trackIdx < 1000) selectedSceneIndex = -1;
         sessionView.setTrackSelected(trackIdx);
         if (trackIdx != 999) sessionView.setClipSelected(trackIdx, -1);
         
@@ -1353,6 +1469,13 @@ MainComponent::MainComponent()
         resized();
         markDirty();
     };
+
+    // ── Effect-drop fallback for Arrangement mode ─────────────────────────────
+    // SessionView is still the DragAndDropTarget even when the Arrangement view is
+    // visible.  Its column hit-test fails in that context because the columns are
+    // not in view.  This callback returns the currently selected track so the drop
+    // can still land on the right track without the user having to be in Session view.
+    sessionView.getSelectedTrackIndex = [this]() -> int { return selectedTrackIndex; };
 
     // ── Mixer Volume Callbacks ────────────────────────────────────────
     // These are the ONLY paths that write to the audio-thread gain atomics.
@@ -1364,11 +1487,38 @@ MainComponent::MainComponent()
         }
     };
 
-    sessionView.onTrackSendChanged = [this](int t, float level) {
-        if (t >= 0 && t < (int)audioTracks.size()) {
-            audioTracks[t]->sendALevel.store(level, std::memory_order_relaxed);
+    sessionView.onTrackSendChanged = [this](int t, int retIdx, float level) {
+        if (t >= 0 && t < (int)audioTracks.size()
+            && retIdx >= 0 && retIdx < 8) {
+            audioTracks[t]->sendLevels[retIdx].store(level, std::memory_order_relaxed);
             markDirty();
         }
+    };
+
+    sessionView.onReturnRackDropped = [this]() {
+        int newRetIdx = numReturnTracks.load(std::memory_order_relaxed);
+        if (newRetIdx >= 8) return; // max 8 return tracks (matches sendLevels array)
+
+        // Create a new return track
+        returnTracks.push_back(std::make_unique<Track>());
+        numReturnTracks.store(newRetIdx + 1, std::memory_order_release);
+
+        // Allocate its scratch buffer
+        returnScratches[newRetIdx].setSize(2, currentBufferSize > 0 ? currentBufferSize : 512);
+        returnScratches[newRetIdx].clear();
+
+        // Name it Return A, B, C…
+        juce::String retName = "Return ";
+        retName += (char)('A' + newRetIdx);
+
+        // Add the return column to the session view
+        sessionView.addReturnTrack(retName);
+
+        // Add a send knob to ALL existing track columns for this new return
+        sessionView.gridContent.addSendKnobToAllColumns(newRetIdx);
+        sessionView.updateContentSize();
+        sessionView.resized();
+        markDirty();
     };
 
     sessionView.onMasterVolumeChanged = [this](float gain) {
@@ -1376,9 +1526,11 @@ MainComponent::MainComponent()
         markDirty();
     };
 
-    sessionView.onReturnVolumeChanged = [this](float gain) {
-        returnTrackA.gain.store(gain, std::memory_order_relaxed);
-        markDirty();
+    sessionView.onReturnVolumeChanged = [this](int retIdx, float gain) {
+        if (retIdx >= 0 && retIdx < numReturnTracks.load()) {
+            returnTracks[retIdx]->gain.store(gain, std::memory_order_relaxed);
+            markDirty();
+        }
     };
 
     sessionView.onTrackMuteChanged = [this](int t, bool muted) {
@@ -1391,6 +1543,13 @@ MainComponent::MainComponent()
     sessionView.onTrackSoloChanged = [this](int t, bool soloed) {
         if (t >= 0 && t < (int)audioTracks.size()) {
             audioTracks[t]->soloed.store(soloed, std::memory_order_relaxed);
+            markDirty();
+        }
+    };
+
+    sessionView.onTrackArmChanged = [this](int t, bool armed) {
+        if (t >= 0 && t < (int)audioTracks.size()) {
+            audioTracks[t]->isArmedForRecord.store(armed, std::memory_order_relaxed);
             markDirty();
         }
     };
@@ -1432,12 +1591,29 @@ MainComponent::MainComponent()
         juce::ignoreUnused(t, c);
     };
 
+    arrangementView.onInstrumentDropped = [this](int trackIdx, const juce::String& type) {
+        if (sessionView.onInstrumentDropped) sessionView.onInstrumentDropped(trackIdx, type);
+    };
+
+    arrangementView.onEffectDropped = [this](int trackIdx, const juce::String& type) {
+        if (sessionView.onEffectDropped) sessionView.onEffectDropped(trackIdx, type);
+    };
+
     arrangementView.onTrackSelected = [this](int trackIdx) {
         if (trackIdx < 0 || trackIdx >= (int)audioTracks.size()) return;
         selectedTrackIndex = trackIdx;
         arrangementView.setSelectedTrack(trackIdx);
         showDeviceEditorForTrack(trackIdx);
         resized(); // re-layout bottom panel if device view changed height
+    };
+
+    arrangementView.onTrackArmChanged = [this](int trackIdx, bool armed) {
+        if (trackIdx >= 0 && trackIdx < (int)audioTracks.size()) {
+            audioTracks[trackIdx]->isArmedForRecord.store(armed, std::memory_order_relaxed);
+            // Also sync the SessionView state
+            sessionView.gridContent.columns[trackIdx]->setArmed(armed);
+            markDirty();
+        }
     };
 
     arrangementView.onClipSelected = [this](ArrangementClip* clip) {
@@ -1580,7 +1756,8 @@ MainComponent::~MainComponent()
     // 1. Destroy plugin editor (no more references to plugin instance).
     pluginWindow = nullptr;
 
-    // 2. Stop the render thread before shutting down the audio device.
+    // 2. Stop the render and recording threads before shutting down the audio device.
+    recordingThread.stopThread(500);
     renderThread.stopThread(500);
 
     // 3. Stop audio device (blocks until last getNextAudioBlock returns).
@@ -1606,6 +1783,11 @@ void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate
     // Pre-allocate the render scratch buffer (2ch × blockSize).
     renderScratch.setSize(2, samplesPerBlockExpected);
     renderScratch.clear();
+    
+    for (auto& buf : returnScratches) {
+        buf.setSize(2, samplesPerBlockExpected);
+        buf.clear();
+    }
 
     // Pre-fill the ring with silence so the first callback never underruns.
     juce::AudioBuffer<float> silence(2, samplesPerBlockExpected);
@@ -1613,11 +1795,23 @@ void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate
     for (int i = 0; i < AppAudioBuffer::RING_CAPACITY_BLOCKS - 1; ++i)
         appBuffer.writeBlock(silence);
 
-    // Start the render thread (it will wait on renderWakeEvent initially).
+    // Start the threads (they will wait on events or loop)
     if (!renderThread.isThreadRunning())
         renderThread.startThread();
+    if (!recordingThread.isThreadRunning())
+        recordingThread.startThread();
         
     for (int t = 0; t < (int)audioTracks.size(); ++t) {
+        if (audioTracks[t]->recordFifo == nullptr) {
+            audioTracks[t]->recordFifo = std::make_unique<juce::AbstractFifo>(currentSampleRate * 2.0);
+            audioTracks[t]->recordBuffer.resize(currentSampleRate * 2.0, 0.0f);
+        }
+        if (audioTracks[t]->monitorFifo == nullptr) {
+            // Monitor buffer can be much smaller (e.g. 50ms) to reduce latency and memory
+            int monitorSize = (int)(currentSampleRate * 0.1);
+            audioTracks[t]->monitorFifo = std::make_unique<juce::AbstractFifo>(monitorSize);
+            audioTracks[t]->monitorBuffer.resize(monitorSize, 0.0f);
+        }
         if (auto* inst = audioTracks[t]->activeInstrument.load(std::memory_order_acquire)) {
             inst->prepareToPlay(sampleRate);
         }
@@ -1646,6 +1840,42 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
     // Advance the global transport clock (atomic — safe here).
     transportClock.advanceBy(numSamples);
 
+    // ── Live Audio Recording Capture ──
+    const bool isRecording = transportClock.getIsRecording();
+    const int nTracks = numActiveTracks.load(std::memory_order_relaxed);
+    
+    for (int t = 0; t < nTracks; ++t) {
+        bool armed = audioTracks[t]->isArmedForRecord.load(std::memory_order_relaxed);
+        bool monitoring = audioTracks[t]->monitorEnabled.load(std::memory_order_relaxed);
+        
+        if ((armed && isRecording) || monitoring) {
+            int inputCh = audioTracks[t]->recordInputChannel.load(std::memory_order_relaxed);
+            // Fallback to channel 0 if out of bounds (or handle stereo later)
+            if (inputCh >= bufferToFill.buffer->getNumChannels()) inputCh = 0;
+            const float* inputData = bufferToFill.buffer->getReadPointer(inputCh, bufferToFill.startSample);
+            
+            if (armed && isRecording && audioTracks[t]->recordFifo != nullptr) {
+                int start1, size1, start2, size2;
+                audioTracks[t]->recordFifo->prepareToWrite(numSamples, start1, size1, start2, size2);
+                
+                if (size1 > 0) std::copy(inputData, inputData + size1, audioTracks[t]->recordBuffer.begin() + start1);
+                if (size2 > 0) std::copy(inputData + size1, inputData + size1 + size2, audioTracks[t]->recordBuffer.begin() + start2);
+                
+                audioTracks[t]->recordFifo->finishedWrite(size1 + size2);
+            }
+            
+            if (monitoring && audioTracks[t]->monitorFifo != nullptr) {
+                int start1, size1, start2, size2;
+                audioTracks[t]->monitorFifo->prepareToWrite(numSamples, start1, size1, start2, size2);
+                
+                if (size1 > 0) std::copy(inputData, inputData + size1, audioTracks[t]->monitorBuffer.begin() + start1);
+                if (size2 > 0) std::copy(inputData + size1, inputData + size1 + size2, audioTracks[t]->monitorBuffer.begin() + start2);
+                
+                audioTracks[t]->monitorFifo->finishedWrite(size1 + size2);
+            }
+        }
+    }
+
     // Signal the render thread to fill more data into the ring.
     // WaitableEvent::signal() is lock-free and safe from the audio thread.
     renderWakeEvent.signal();
@@ -1662,6 +1892,7 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
 
 void MainComponent::releaseResources()
 {
+    recordingThread.stopThread(200);
     renderThread.stopThread(200);
     appBuffer.releaseResources();
     if (activePlugin != nullptr)
@@ -1791,6 +2022,8 @@ void MainComponent::syncArrangementFromSession()
             }
         }
         
+        state.isArmed = audioTracks[t]->isArmedForRecord.load(std::memory_order_relaxed);
+        
         // Gather clips present on this track
         for (int s = 0; s < (int)clipGrid[t].size(); ++s) {
             if (clipGrid[t][s].hasClip) {
@@ -1841,7 +2074,7 @@ void MainComponent::timerCallback()
         }
     };
     gcTrack(masterTrack);
-    gcTrack(returnTrackA);
+    for (int r = 0; r < numReturnTracks.load(); ++r) gcTrack(*returnTracks[r]);
     for (int t = 0; t < nTracks; ++t) gcTrack(*audioTracks[t]);
 
     // ── GC: Instrument internal buffers & Effect garbage ─────────────────────
@@ -1849,9 +2082,9 @@ void MainComponent::timerCallback()
         if (auto* inst = t.activeInstrument.load(std::memory_order_relaxed)) {
             inst->processGarbage();
         }
-        for (int i = 0; i < Track::MAX_EFFECTS; ++i) {
-            if (auto* effect = t.effectChain[i].load(std::memory_order_relaxed)) {
-                effect->processGarbage();
+        if (auto* vec = t.activeEffectChain.load(std::memory_order_relaxed)) {
+            for (auto* effect : *vec) {
+                if (effect) effect->processGarbage();
             }
         }
         // Drain replaced instruments (e.g. PluginInstrumentAdapter with open windows).
@@ -1860,12 +2093,17 @@ void MainComponent::timerCallback()
         while (auto opt = t.effectGarbageQueue.pop()) {
             delete *opt;
         }
+        while (auto opt = t.effectVectorGarbageQueue.pop()) {
+            delete *opt;
+        }
     };
     
     for (int t = 0; t < nTracks; ++t) {
         gcProcessors(*audioTracks[t]);
     }
-    gcProcessors(returnTrackA);
+    for (int r = 0; r < numReturnTracks.load(); ++r) {
+        gcProcessors(*returnTracks[r]);
+    }
     gcProcessors(masterTrack);
 
     // ── GC: Old plugin instances ──────────────────────────────────────────────
@@ -1911,13 +2149,17 @@ void MainComponent::timerCallback()
         }
     }
 
-    // ── Push RMS into Return A and Master faders ──────────────────────────────
+    // ── Push RMS into Return tracks and Master faders ─────────────────────────
     {
-        float retRaw    = returnTrackA.rmsLevel.load (std::memory_order_relaxed);
+        for (int r = 0; r < numReturnTracks.load(); ++r) {
+            float retRaw = returnTracks[r]->rmsLevel.load(std::memory_order_relaxed);
+            // We need a member array of level displays if we have multiple return tracks
+            // For now, let's just push it to SessionView and let it smooth it if it wants,
+            // or just use retRaw directly for multiple tracks since we don't have returnLevelDisplay[8] yet.
+            sessionView.setReturnRmsLevel(r, retRaw);
+        }
         float masterRaw = masterTrack.rmsLevel.load  (std::memory_order_relaxed);
-        applyDecay (returnLevelDisplay, retRaw);
         applyDecay (masterLevelDisplay, masterRaw);
-        sessionView.setReturnRmsLevel (returnLevelDisplay);
         sessionView.setMasterRmsLevel (masterLevelDisplay);
     }
 
@@ -2217,10 +2459,8 @@ void MainComponent::syncUIToProject()
     for (int t = 0; t < (int)audioTracks.size(); ++t) {
         audioTracks[t]->gain.store(1.0f);
         audioTracks[t]->commandQueue.push({ TrackCommand::Type::StopPattern, nullptr, 0 });
-        for (int e = 0; e < Track::MAX_EFFECTS; ++e) {
-            if (auto* old = audioTracks[t]->effectChain[e].exchange(nullptr, std::memory_order_acq_rel)) {
-                audioTracks[t]->effectGarbageQueue.push(old);
-            }
+        if (auto* oldVec = audioTracks[t]->activeEffectChain.exchange(nullptr, std::memory_order_acq_rel)) {
+            audioTracks[t]->effectVectorGarbageQueue.push(oldVec);
         }
     }
     // Wipe all vectors (clips are UI-thread-only, safe here after stop)
@@ -2304,6 +2544,7 @@ void MainComponent::syncUIToProject()
                         
                         auto newInst = InstrumentFactory::create(instrumentType);
                         if (newInst) {
+                            newInst->setHostTrack(static_cast<void*>(audioTracks[tIdx].get()));
                             newInst->prepareToPlay(currentSampleRate);
                             
                             if (auto* old = audioTracks[tIdx]->activeInstrument.exchange(newInst.release(), std::memory_order_acq_rel)) {
@@ -2343,8 +2584,8 @@ void MainComponent::syncUIToProject()
                     // Effects
                     auto effectsNode = trackNode.getChildWithName("Effects");
                     if (effectsNode.isValid()) {
-                        int eIdx = 0;
-                        for (int e = 0; e < effectsNode.getNumChildren() && eIdx < Track::MAX_EFFECTS; ++e) {
+                        std::vector<EffectProcessor*>* newChain = new std::vector<EffectProcessor*>();
+                        for (int e = 0; e < effectsNode.getNumChildren(); ++e) {
                             auto effectNode = effectsNode.getChild(e);
                             if (effectNode.hasType("Effect")) {
                                 juce::String type = effectNode.getProperty("type", "");
@@ -2353,12 +2594,12 @@ void MainComponent::syncUIToProject()
                                     if (effectNode.getNumChildren() > 0) {
                                         effect->loadState(effectNode.getChild(0));
                                     }
-                                    if (auto* old = audioTracks[tIdx]->effectChain[eIdx].exchange(effect.release(), std::memory_order_acq_rel)) {
-                                        audioTracks[tIdx]->effectGarbageQueue.push(old);
-                                    }
-                                    eIdx++;
+                                    newChain->push_back(effect.release());
                                 }
                             }
+                        }
+                        if (auto* oldVec = audioTracks[tIdx]->activeEffectChain.exchange(newChain, std::memory_order_acq_rel)) {
+                            audioTracks[tIdx]->effectVectorGarbageQueue.push(oldVec);
                         }
                     }
 
@@ -2559,34 +2800,35 @@ void MainComponent::syncUIToProject()
         }
     }
 
-    // Return Track A
-    for (int e = 0; e < Track::MAX_EFFECTS; ++e) {
-        if (auto* old = returnTrackA.effectChain[e].exchange(nullptr, std::memory_order_acq_rel)) {
-            returnTrackA.effectGarbageQueue.push(old);
+    // Return Tracks
+    if (numReturnTracks.load() > 0) {
+        auto& returnTrackA = *returnTracks[0];
+        if (auto* oldVec = returnTrackA.activeEffectChain.exchange(nullptr, std::memory_order_acq_rel)) {
+            returnTrackA.effectVectorGarbageQueue.push(oldVec);
         }
-    }
-    auto returnTrackNode = pTree.getChildWithName("ReturnTrackA");
-    if (returnTrackNode.isValid()) {
-        float gain = returnTrackNode.getProperty("gain", 1.0f);
-        returnTrackA.gain.store(gain, std::memory_order_relaxed);
-        
-        auto returnEffectsNode = returnTrackNode.getChildWithName("Effects");
-        if (returnEffectsNode.isValid()) {
-            int eIdx = 0;
-            for (int e = 0; e < returnEffectsNode.getNumChildren() && eIdx < Track::MAX_EFFECTS; ++e) {
-                auto effectNode = returnEffectsNode.getChild(e);
-                if (effectNode.hasType("Effect")) {
-                    juce::String type = effectNode.getProperty("type", "");
-                    if (auto effect = EffectFactory::create(type)) {
-                        effect->prepareToPlay(currentSampleRate);
-                        if (effectNode.getNumChildren() > 0) {
-                            effect->loadState(effectNode.getChild(0));
+        auto returnTrackNode = pTree.getChildWithName("ReturnTrackA");
+        if (returnTrackNode.isValid()) {
+            float gain = returnTrackNode.getProperty("gain", 1.0f);
+            returnTrackA.gain.store(gain, std::memory_order_relaxed);
+            
+            auto returnEffectsNode = returnTrackNode.getChildWithName("Effects");
+            if (returnEffectsNode.isValid()) {
+                std::vector<EffectProcessor*>* newChain = new std::vector<EffectProcessor*>();
+                for (int e = 0; e < returnEffectsNode.getNumChildren(); ++e) {
+                    auto effectNode = returnEffectsNode.getChild(e);
+                    if (effectNode.hasType("Effect")) {
+                        juce::String type = effectNode.getProperty("type", "");
+                        if (auto effect = EffectFactory::create(type)) {
+                            effect->prepareToPlay(currentSampleRate);
+                            if (effectNode.getNumChildren() > 0) {
+                                effect->loadState(effectNode.getChild(0));
+                            }
+                            newChain->push_back(effect.release());
                         }
-                        if (auto* old = returnTrackA.effectChain[eIdx].exchange(effect.release(), std::memory_order_acq_rel)) {
-                            returnTrackA.effectGarbageQueue.push(old);
-                        }
-                        eIdx++;
                     }
+                }
+                if (auto* oldVec = returnTrackA.activeEffectChain.exchange(newChain, std::memory_order_acq_rel)) {
+                    returnTrackA.effectVectorGarbageQueue.push(oldVec);
                 }
             }
         }
@@ -2800,12 +3042,14 @@ void MainComponent::syncProjectToUI()
             
         // Effects
         juce::ValueTree effectsNode("Effects");
-        for (int i = 0; i < Track::MAX_EFFECTS; ++i) {
-            if (auto* effect = audioTracks[t]->effectChain[i].load(std::memory_order_acquire)) {
-                juce::ValueTree effectNode("Effect");
-                effectNode.setProperty("type", effect->getName(), nullptr);
-                effectNode.addChild(effect->saveState(), -1, nullptr);
-                effectsNode.addChild(effectNode, -1, nullptr);
+        if (auto* vec = audioTracks[t]->activeEffectChain.load(std::memory_order_acquire)) {
+            for (auto* effect : *vec) {
+                if (effect) {
+                    juce::ValueTree effectNode("Effect");
+                    effectNode.setProperty("type", effect->getName(), nullptr);
+                    effectNode.addChild(effect->saveState(), -1, nullptr);
+                    effectsNode.addChild(effectNode, -1, nullptr);
+                }
             }
         }
         if (effectsNode.getNumChildren() > 0)
@@ -2814,21 +3058,25 @@ void MainComponent::syncProjectToUI()
         tracksTree.addChild(trackNode, -1, nullptr);
     }
 
-    // Return Track A
-    juce::ValueTree returnTrackNode("ReturnTrackA");
-    returnTrackNode.setProperty("gain", returnTrackA.gain.load(std::memory_order_relaxed), nullptr);
-    juce::ValueTree returnEffectsNode("Effects");
-    for (int i = 0; i < Track::MAX_EFFECTS; ++i) {
-        if (auto* effect = returnTrackA.effectChain[i].load(std::memory_order_acquire)) {
-            juce::ValueTree effectNode("Effect");
-            effectNode.setProperty("type", effect->getName(), nullptr);
-            effectNode.addChild(effect->saveState(), -1, nullptr);
-            returnEffectsNode.addChild(effectNode, -1, nullptr);
+    // Return Tracks (just ReturnTrackA for backwards compatibility)
+    if (numReturnTracks.load() > 0) {
+        juce::ValueTree returnTrackNode("ReturnTrackA");
+        returnTrackNode.setProperty("gain", returnTracks[0]->gain.load(std::memory_order_relaxed), nullptr);
+        juce::ValueTree returnEffectsNode("Effects");
+        if (auto* vec = returnTracks[0]->activeEffectChain.load(std::memory_order_acquire)) {
+            for (auto* effect : *vec) {
+                if (effect) {
+                    juce::ValueTree effectNode("Effect");
+                    effectNode.setProperty("type", effect->getName(), nullptr);
+                    effectNode.addChild(effect->saveState(), -1, nullptr);
+                    returnEffectsNode.addChild(effectNode, -1, nullptr);
+                }
+            }
         }
+        if (returnEffectsNode.getNumChildren() > 0)
+            returnTrackNode.addChild(returnEffectsNode, -1, nullptr);
+        pTree.addChild(returnTrackNode, -1, nullptr);
     }
-    if (returnEffectsNode.getNumChildren() > 0)
-        returnTrackNode.addChild(returnEffectsNode, -1, nullptr);
-    pTree.addChild(returnTrackNode, -1, nullptr);
 }
 
 void MainComponent::loadAudioFileIntoTrack(int trackIdx, const juce::File& file)
@@ -2947,8 +3195,11 @@ void MainComponent::showDeviceEditorForTrack(int trackIdx) {
     deviceView.clear();
 
     Track* track = nullptr;
-    if (trackIdx == 999) {
-        track = &returnTrackA;
+    if (trackIdx >= 1000) {
+        int retIdx = trackIdx - 1000;
+        if (retIdx >= 0 && retIdx < numReturnTracks.load()) {
+            track = returnTracks[retIdx].get();
+        }
     } else if (trackIdx >= 0 && trackIdx < (int)audioTracks.size()) {
         track = audioTracks[trackIdx].get();
     } else {
@@ -2975,38 +3226,50 @@ void MainComponent::showDeviceEditorForTrack(int trackIdx) {
     }
 
     // Add Effect Editors
-    for (int i = 0; i < Track::MAX_EFFECTS; ++i) {
-        if (auto* effect = track->effectChain[i].load(std::memory_order_acquire)) {
-            class EffectWrapper : public juce::Component {
-            public:
-                std::function<void()> onRemove;
-                std::unique_ptr<juce::Component> content;
-                juce::TextButton removeBtn{"X"};
+    if (auto* vec = track->activeEffectChain.load(std::memory_order_acquire)) {
+        for (size_t i = 0; i < vec->size(); ++i) {
+            auto* effect = (*vec)[i];
+            if (effect) {
+                class EffectWrapper : public juce::Component {
+                public:
+                    std::function<void()> onRemove;
+                    std::unique_ptr<juce::Component> content;
+                    juce::TextButton removeBtn{"X"};
 
-                EffectWrapper(std::unique_ptr<juce::Component> ed) : content(std::move(ed)) {
-                    addAndMakeVisible(content.get());
-                    addAndMakeVisible(removeBtn);
-                    removeBtn.setColour(juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
-                    removeBtn.setColour(juce::TextButton::textColourOffId, juce::Colours::grey);
-                    removeBtn.onClick = [this] { if (onRemove) onRemove(); };
-                    setSize(content->getWidth(), content->getHeight());
-                }
+                    EffectWrapper(std::unique_ptr<juce::Component> ed) : content(std::move(ed)) {
+                        addAndMakeVisible(content.get());
+                        addAndMakeVisible(removeBtn);
+                        removeBtn.setColour(juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
+                        removeBtn.setColour(juce::TextButton::textColourOffId, juce::Colours::grey);
+                        removeBtn.onClick = [this] { if (onRemove) onRemove(); };
+                        setSize(content->getWidth(), content->getHeight());
+                    }
 
-                void resized() override {
-                    content->setBounds(getLocalBounds());
-                    removeBtn.setBounds(getWidth() - 20, 2, 16, 16);
-                }
-            };
-            
-            auto wrapper = std::make_unique<EffectWrapper>(effect->createEditor());
-            wrapper->onRemove = [this, track, i, trackIdx]() {
-                if (auto* old = track->effectChain[i].exchange(nullptr, std::memory_order_acq_rel)) {
-                    track->effectGarbageQueue.push(old);
-                }
-                track->refreshAutomationRegistry();
-                showDeviceEditorForTrack(trackIdx);
-            };
-            deviceView.addEditor(std::move(wrapper));
+                    void resized() override {
+                        content->setBounds(getLocalBounds());
+                        removeBtn.setBounds(getWidth() - 20, 2, 16, 16);
+                    }
+                };
+                
+                auto wrapper = std::make_unique<EffectWrapper>(effect->createEditor());
+                wrapper->onRemove = [this, track, i, trackIdx]() {
+                    std::vector<EffectProcessor*>* newChain = new std::vector<EffectProcessor*>();
+                    if (auto* oldVec = track->activeEffectChain.load(std::memory_order_acquire)) {
+                        *newChain = *oldVec;
+                        if (i < newChain->size()) {
+                            auto* oldEff = (*newChain)[i];
+                            newChain->erase(newChain->begin() + i);
+                            track->effectGarbageQueue.push(oldEff);
+                        }
+                    }
+                    if (auto* oldVec = track->activeEffectChain.exchange(newChain, std::memory_order_acq_rel)) {
+                        track->effectVectorGarbageQueue.push(oldVec);
+                    }
+                    track->refreshAutomationRegistry();
+                    showDeviceEditorForTrack(trackIdx);
+                };
+                deviceView.addEditor(std::move(wrapper));
+            }
         }
     }
 
@@ -3099,6 +3362,7 @@ void MainComponent::loadPluginAsTrackInstrument (int trackIdx, const juce::File&
         sessionView.gridContent.columns[targetIdx]->header.hasInstrument = true;
         sessionView.gridContent.columns[targetIdx]->header.instrumentName = "Plugin:" + pluginName;
         sessionView.gridContent.columns[targetIdx]->header.repaint();
+        syncArrangementFromSession();
     }
     else
     {
