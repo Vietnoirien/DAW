@@ -58,7 +58,7 @@ public:
         knobs.add(knob);
     }
 
-    juce::Rectangle<int> getVisualiserBounds() const {
+    virtual juce::Rectangle<int> getVisualiserBounds() const {
         return { 10, 38, getWidth() - 20, getHeight() - 38 - LiBeKnob::kH - 25 };
     }
 
@@ -294,13 +294,62 @@ private:
 // ─── Compressor Editor ───────────────────────────────────────────────────────
 class CompressorEditor : public BespokeEffectEditor {
 public:
+    // Fixed visual metrics shared by constructor and resized()
+    static constexpr int kVisH   = 100;  // fixed visualiser height (px)
+    static constexpr int kComboH = 22;
+    static constexpr int kBotPad = 10;
+    // Knob row y = header(38) + kVisH(100) + gap(15) = 153
+    // Knob row bottom = 153 + kH(56) = 209
+    // Combo y = 209 + 8 = 217
+    // Total height = 217 + kComboH(22) + kBotPad(10) = 249
+    static constexpr int kKnobY  = 38 + kVisH + 15;
+    static constexpr int kComboY = kKnobY + LiBeKnob::kH + 8;
+    static constexpr int kTotalH = kComboY + kComboH + kBotPad;
+    static constexpr int kNumKnobs = 6;
+    static constexpr int kTotalW = 20 + kNumKnobs * (LiBeKnob::kW + 10) - 10;
+
     CompressorEditor(CompressorEffect* fx) : BespokeEffectEditor("Compressor", juce::Colour(0xffFF5252)), effect(fx) {
-        setupKnob(kThresh, "Thresh", &effect->threshold, -60.0f, 0.0f, "Compressor/Threshold");
-        setupKnob(kRatio, "Ratio", &effect->ratio, 1.0f, 20.0f, "Compressor/Ratio");
-        setupKnob(kAttack, "Attack", &effect->attack, 0.1f, 100.0f, "Compressor/Attack");
-        setupKnob(kRelease, "Release", &effect->release, 10.0f, 1000.0f, "Compressor/Release");
-        setSize(20 + 4 * (LiBeKnob::kW + 10) - 10, 220);
+        setupKnob(kThresh,  "Thresh",  &effect->threshold, -60.0f,   0.0f, "Compressor/Threshold");
+        setupKnob(kRatio,   "Ratio",   &effect->ratio,      1.0f,   20.0f, "Compressor/Ratio");
+        setupKnob(kAttack,  "Attack",  &effect->attack,     0.1f,  100.0f, "Compressor/Attack");
+        setupKnob(kRelease, "Release", &effect->release,   10.0f, 1000.0f, "Compressor/Release");
+        setupKnob(kMakeup,  "Makeup",  &effect->makeup,     0.0f,   24.0f, "Compressor/Makeup");
+        setupKnob(kMix,     "Mix %",   &effect->mix,        0.0f,  100.0f, "Compressor/Mix");
+
+        // ── Sidechain source ComboBox ────────────────────────────────────────
+        scCombo.addItem("Self (no sidechain)", 1);
+        scCombo.setSelectedId(1, juce::dontSendNotification);
+        scCombo.setColour(juce::ComboBox::backgroundColourId, juce::Colour(0xff1A1A2A));
+        scCombo.setColour(juce::ComboBox::textColourId, juce::Colours::lightgrey);
+        scCombo.setColour(juce::ComboBox::outlineColourId, accent.withAlpha(0.5f));
+        scCombo.onChange = [this] {
+            int selId    = scCombo.getSelectedId();
+            int srcTrack = selId - 2; // id 1 → -1 (self), id 2 → track 0, etc.
+            if (effect->onSidechainSourceChanged) effect->onSidechainSourceChanged(srcTrack);
+        };
+        addAndMakeVisible(scCombo);
+
+        setSize(kTotalW, kTotalH);
         smoothGr = 0.0f;
+    }
+
+    // ── Override so the base-class knob layout uses the fixed vis height ────
+    juce::Rectangle<int> getVisualiserBounds() const override {
+        return { 10, 38, getWidth() - 20, kVisH };
+    }
+
+    // Called by MainComponent::showDeviceEditorForTrack when opening this editor.
+    void refreshSidechainSources(const juce::StringArray& trackNames, int selfTrackIdx)
+    {
+        scCombo.clear(juce::dontSendNotification);
+        scCombo.addItem("Self (no sidechain)", 1);
+        for (int i = 0; i < trackNames.size(); ++i)
+        {
+            if (i == selfTrackIdx) continue;
+            scCombo.addItem(trackNames[i], i + 2);
+        }
+        int curSrc = effect->sidechainSourceIndex.load(std::memory_order_relaxed);
+        scCombo.setSelectedId((curSrc < 0) ? 1 : (curSrc + 2), juce::dontSendNotification);
     }
 
     void timerCallback() override {
@@ -309,33 +358,45 @@ public:
         repaint();
     }
 
+    void resized() override {
+        BespokeEffectEditor::resized(); // lays knobs starting at getVisualiserBounds().bottom + 15
+        scCombo.setBounds(10, kComboY, getWidth() - 20, kComboH);
+    }
+
     void drawVisualiser(juce::Graphics& g, juce::Rectangle<int> b) override {
-        // Meter background
-        juce::Rectangle<float> meterBg(b.getCentreX() - 15.0f, b.getY() + 10.0f, 30.0f, b.getHeight() - 20.0f);
+        // GR meter — centered narrow bar
+        juce::Rectangle<float> meterBg(b.getCentreX() - 15.0f, b.getY() + 8.0f, 30.0f, b.getHeight() - 16.0f);
         g.setColour(juce::Colour(0xff1A1A2A));
         g.fillRect(meterBg);
         g.setColour(juce::Colour(0xff333344));
         g.drawRect(meterBg, 1.0f);
 
-        // GR Meter fill (draws downwards from top)
-        float maxGr = 24.0f; // Show up to 24dB of GR
-        float grNorm = juce::jlimit(0.0f, 1.0f, smoothGr / maxGr);
-        juce::Rectangle<float> grFill = meterBg.withHeight(meterBg.getHeight() * grNorm);
+        const float maxGr  = 24.0f;
+        const float grNorm = juce::jlimit(0.0f, 1.0f, smoothGr / maxGr);
         g.setColour(accent);
-        g.fillRect(grFill);
+        g.fillRect(meterBg.withHeight(meterBg.getHeight() * grNorm));
 
-        // Lines
-        g.setColour(juce::Colours::white.withAlpha(0.5f));
+        // dB tick marks
+        g.setColour(juce::Colours::white.withAlpha(0.4f));
         for (float db = 0; db <= maxGr; db += 6.0f) {
             float y = meterBg.getY() + meterBg.getHeight() * (db / maxGr);
-            g.drawLine(meterBg.getX() - 5, y, meterBg.getX(), y, 1.0f);
-            g.drawLine(meterBg.getRight(), y, meterBg.getRight() + 5, y, 1.0f);
+            g.drawLine(meterBg.getX() - 4, y, meterBg.getX(), y, 1.0f);
+            g.drawLine(meterBg.getRight(), y, meterBg.getRight() + 4, y, 1.0f);
+        }
+
+        // "SC" badge when sidechain is active
+        if (effect->sidechainSourceIndex.load(std::memory_order_relaxed) >= 0) {
+            g.setColour(accent.brighter(0.4f));
+            g.setFont(juce::Font(juce::FontOptions(9.0f, juce::Font::bold)));
+            g.drawText("SC", b.getRight() - 22, b.getY() + 4, 18, 10, juce::Justification::centred);
         }
     }
+
 private:
     CompressorEffect* effect;
-    float smoothGr;
-    LiBeKnob kThresh, kRatio, kAttack, kRelease;
+    float smoothGr { 0.0f };
+    LiBeKnob kThresh, kRatio, kAttack, kRelease, kMakeup, kMix;
+    juce::ComboBox scCombo;
     void setupKnob(LiBeKnob& k, const juce::String& lbl, std::atomic<float>* ptr, float min, float max, const juce::String& id) {
         k.setup(lbl, ptr->load(), min, max, ptr->load(), id, accent);
         k.slider.onValueChange = [&k, ptr]() {

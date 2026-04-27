@@ -147,17 +147,34 @@ public:
     std::unique_ptr<juce::Component> createEditor() override;
     juce::String getName() const override { return "Compressor"; }
 
+    // ── Sidechain API ─────────────────────────────────────────────────────
+    bool wantsSidechain() const override { return true; }
+    void setSidechainBuffer(const juce::AudioBuffer<float>* scBuf) override { sidechainBuf = scBuf; }
+    // Callback for the editor to wire up a source-change function
+    std::function<void(int)> onSidechainSourceChanged;
+    // Index of selected sidechain source track (-1 = self)
+    std::atomic<int> sidechainSourceIndex { -1 };
+
     std::atomic<float> threshold { -10.0f };
     std::atomic<float> ratio { 4.0f };
     std::atomic<float> attack { 10.0f };
     std::atomic<float> release { 100.0f };
+    std::atomic<float> makeup  { 0.0f };    // dB, applied post-compression
+    std::atomic<float> mix     { 100.0f };  // %, 0=dry, 100=fully compressed
 
     // Real-time level/GR for meter display
     std::atomic<float> inputLevelDb  { -100.0f };
     std::atomic<float> gainReductionDb { 0.0f };
 
 private:
-    juce::dsp::Compressor<float> compressor;
+    // Written by the render thread via setSidechainBuffer(); nullptr = self-keying.
+    // Render-thread only — no atomic needed.
+    const juce::AudioBuffer<float>* sidechainBuf { nullptr };
+    // Stored sample rate (written in prepareToPlay, read in processBlock — both render thread).
+    double currentSampleRate { 44100.0 };
+    // Attack/release envelope state: smoothed detector level in dBFS.
+    // Render-thread only. Reset to silence in clear().
+    float  envLevelDb { -100.0f };
 };
 
 // ─── LimiterEffect ───────────────────────────────────────────────────────────
@@ -389,6 +406,12 @@ public:
     std::unique_ptr<juce::Component> createEditor() override;
     juce::String getName() const override { return "NoiseGate"; }
 
+    // ── Sidechain API ─────────────────────────────────────────────────────
+    bool wantsSidechain() const override { return true; }
+    void setSidechainBuffer(const juce::AudioBuffer<float>* scBuf) override { sidechainBuf = scBuf; }
+    std::function<void(int)> onSidechainSourceChanged;
+    std::atomic<int> sidechainSourceIndex { -1 };
+
     std::atomic<float> threshold { -40.0f }; // dBFS
     std::atomic<float> attackMs  {   5.0f }; // ms
     std::atomic<float> releaseMs { 200.0f }; // ms
@@ -411,4 +434,6 @@ private:
     int    holdCounter = 0;   // samples remaining in hold phase
     float  alphaAttack  = 0.0f;
     float  alphaRelease = 0.0f;
+    // Written by render thread via setSidechainBuffer(); nullptr = self-keying.
+    const juce::AudioBuffer<float>* sidechainBuf { nullptr };
 };

@@ -16,6 +16,19 @@ public:
     // Note: Since effects process audio in-place or from previous stages, 
     // we take the buffer by reference and modify it.
     virtual void processBlock(juce::AudioBuffer<float>& buffer) = 0;
+
+    // Returns the latency introduced by this effect in samples.
+    // Lookahead compressors, linear-phase EQs, etc. should override this.
+    virtual int getLatencySamples() const { return 0; }
+
+    // ── Sidechain API ──────────────────────────────────────────────────────
+    // Override wantsSidechain() to return true to opt in.
+    // The render thread will call setSidechainBuffer() before processBlock()
+    // with the pre-rendered audio of the sidechain source track (read-only).
+    // When no source is selected (or the source was just deleted) the pointer
+    // is null — the effect must handle null gracefully (fall back to self-keying).
+    virtual bool wantsSidechain() const { return false; }
+    virtual void setSidechainBuffer(const juce::AudioBuffer<float>* /*scBuf*/) {}
     
     // Clear internal state (e.g., reverb tails)
     virtual void clear() = 0;

@@ -15,12 +15,12 @@ LiBeDAW is developed and tested on **Linux**. The codebase uses only cross-platf
 ## Features
 
 - 🎛️ **Session View** — Ableton-style clip grid with independent per-track launch control. Track and pattern renaming, color assignment, and mixer strips with live RMS metering.
-- 🎞️ **Arrangement View** — Timeline-based linear sequencing with drag-and-drop clip placement, dynamic horizontal scrolling, and full project persistence.
+- 🎞️ **Arrangement View** — Timeline-based linear sequencing with drag-and-drop clip placement, dynamic horizontal scrolling, warp-marker diamonds, and take-lane expand/collapse.
 - 🥁 **Euclidean Rhythm Sequencer** — Bjorklund's algorithm for polyrhythmic pattern generation with visual circle editor.
-- 🎹 **MIDI Pattern Editor** — Piano-roll style note editing per clip slot with sample-accurate rendering and `allNotesOff` handling for glitch-free transitions.
+- 🎹 **MIDI Pattern Editor** — Piano-roll style note editing per clip slot with sample-accurate rendering, `allNotesOff` glitch-free transitions, and **MPE expression visualization** (pressure colour gradient, pitch-bend indicator).
 - 🎹 **Built-in Instruments**:
-  - **FMSynth**: 4-operator FM synthesizer with all 32 DX7 algorithms, per-operator controls, 8-voice polyphony, and multi-mode filter.
-  - **WavetableSynth**: 2 independent oscillators morphing across 8 waveforms, 8-voice unison, sub oscillator, noise generator, and multi-mode filter.
+  - **FMSynth**: 4-operator FM synthesizer with all 32 DX7 algorithms, per-operator controls, 8-voice polyphony, multi-mode filter, and **MPE mapping panel** (Pressure → Amplitude / Filter, Timbre Depth, Bend Range ±48 st).
+  - **WavetableSynth**: 2 independent oscillators morphing across 8 waveforms, 8-voice unison, sub oscillator, noise generator, multi-mode filter, and **MPE mapping panel** (Pressure → Amplitude / Filter, Timbre → wavetable position, Bend Range ±48 st).
   - **KarplusStrong**: Physical modeling synthesizer via fractional delay-line interpolation.
   - **DrumRack**: Multi-pad sampler for drum programming.
   - **Simpler**: Drag-and-drop single-sample audio playback.
@@ -28,8 +28,15 @@ LiBeDAW is developed and tested on **Linux**. The codebase uses only cross-platf
 - 🎚️ **Modular Audio Effects System**:
   - Full Device Chain with Reverb, Delay, Chorus, Filter, Compressor, Limiter, Phaser, Saturation, and ParametricEQ (with real-time spectrum display).
   - Send/Return routing (post-fader) with dedicated master and return track effect chains.
+  - **Sidechain routing** — select a sidechain source directly in the **Compressor editor** (`Sidechain Source` combo box). Real-time gain-reduction meter. Source index persists in project XML. *(Noise Gate sidechain API is stubbed; DSP not yet wired — v0.2.)*
+  - **Parallel compression** — Compressor `Mix %` knob blends dry and compressed signal. `Makeup` gain applied post-compression.
+- 🗂️ **Group Tracks (Folder Bus)** — Ableton-style inline folder columns in the Session View. Fold/expand arrow hides child tracks and compacts the scroll width. Audio is summed through the group bus effect chain before reaching master. Right-click a track header to assign to a group or create a new one on the fly.
+- 🎙️ **Real-Time Time-Stretching (Warp)** — Audio clips in the Arrangement View can be warp-enabled to follow project tempo using the **Rubber Band Library v3.3.0** (R3 Phase Vocoder engine). Lock-free decoder → input ring → stretcher → output ring pipeline; zero allocations on the render thread. Right-click an audio clip to enable/disable warp, set the clip's original BPM, or add warp markers.
+- 🎵 **Non-Destructive Comping** — Multi-take recording with loop-record support. Up to 8 takes per clip. Right-click a clip in Arrangement View → "Show Take Lanes" to reveal a `TakeLaneOverlay` with waveform thumbnails; swipe across lanes to define comp regions. Equal-power crossfades with background zero-crossing search. Takes and comp regions fully persist in project XML.
+- 🎮 **MPE (MIDI Polyphonic Expression)** — Full MPE zone management via `MpeZoneManager` (RPN auto-detection + permissive multi-channel fallback). Per-note pitch bend (±48 semitones), channel pressure, and CC74 timbre are routed through the lock-free `TrackCommand` FIFO as `MpeExpression` payloads. WavetableSynth and FMSynth apply expression per voice on the render thread without heap allocation.
+- 🔌 **Plugin Delay Compensation (PDC)** — `EffectProcessor::getLatencySamples()` virtual hook; `recalculatePDC()` computes per-track compensation and writes a lock-free `PdcDelayLine` ring-buffer into each track atomically. Any plugin reporting latency is automatically compensated.
 - 📁 **Asset Browser** — Drag-and-drop file browser with persistent folder bookmarks and dynamically generated drag tiles for instruments and effects.
-- 💾 **Project Management** — Full save/load via `juce::ValueTree` serialization (custom `.LBD` project file format).
+- 💾 **Project Management** — Full save/load via `juce::ValueTree` serialization (custom `.LBD` project file format), including warp markers, takes, comp regions, sidechain assignments, group tracks, and MPE config.
 - 📤 **Audio Export** — High-quality offline rendering bounce engine supporting WAV, MP3, FLAC, and OGG formats (via FFmpeg integration).
 - 🔌 **Plugin Hosting (VST3 / LV2 / AU)** — Drag any VST3 plugin (all platforms), LV2 plugin (Linux), or Audio Unit (macOS) from the **Plugins** browser tab directly onto a track. The plugin editor opens in a floating window toggled by a button in the Device View chain. Platform-specific default search paths are seeded automatically; additional directories are persisted across sessions.
   > **CLAP hosting** — The `clap-juce-extensions` submodule (providing the CLAP SDK headers) is included for future readiness. Native CLAP *host* support requires JUCE 9; until then, use the VST3 version of your plugins (e.g. `Vital.vst3`).
@@ -49,7 +56,12 @@ LiBeDAW is built on strict real-time safety principles:
 | Sequencing | Sample-accurate global transport clock |
 | Memory on audio thread | **Zero allocation** — pre-allocated pools only |
 | Plugin hot-swapping | Garbage collection queue on UI thread |
-| Track commands | Lock-free `TrackCommand` FIFO ring buffer |
+| Track commands | Lock-free `TrackCommand` FIFO ring buffer (`PlayPattern`, `FlushNotes`, `MpeExpression`, …) |
+| Plugin Delay Compensation | `PdcDelayLine` lock-free ring buffer per track; `recalculatePDC()` on message thread |
+| Sidechain routing | Pre-render scratch buffer pointer passed to `CompressorEffect::setSidechainBuffer()` — render thread only, no atomics |
+| Audio time-stretching | Rubber Band Library R3 Phase Vocoder; lock-free decoder thread → ring → stretcher → ring → render thread |
+| Multi-take comping | `CompPlayer` owns ≤8 `AudioClipPlayer` instances; equal-power crossfade table; `loopWrapCounter` atomic for seamless loop-record |
+| MPE expression | `MpeZoneManager` on message thread; `MpeExpression` command through FIFO; per-voice state on render thread — no extra atomics |
 | Offline Rendering | Rapid-drain loop over `AppAudioBuffer` bypassing RT hardware limits |
 
 ### Key Components
@@ -61,33 +73,36 @@ Source/
 │   ├── MainComponent.{h,cpp}     # Root component, audio engine, export bounce
 │   ├── AppAudioBuffer.h          # Lock-free audio buffer abstraction
 │   ├── LockFreeQueue.h           # SPSC ring buffer implementation
-│   ├── TrackCommand.h            # Audio-thread command message types
+│   ├── TrackCommand.h            # Audio-thread command types (incl. MpeExpression)
 │   ├── GlobalTransport.h         # Sample-accurate BPM clock
 │   ├── ProjectManager.h          # ValueTree save/load serialization
-│   └── ClipData.h                # Clip state data model
+│   ├── ClipData.h                # Clip, WarpMarker, Take, CompRegion data models
+│   ├── AudioClipPlayer.{h,cpp}   # Lock-free warp-enabled audio file player (RBL)
+│   ├── CompPlayer.{h,cpp}        # Multi-take comp player with equal-power crossfades
+│   └── MpeZoneManager.h          # MPE zone detection & per-note expression routing
 ├── Instruments/
 │   ├── Instrument.h              # Base InstrumentProcessor interface
 │   ├── InstrumentFactory.h       # Dynamic instrument instantiation
-│   ├── FMSynthProcessor.cpp      # FM Synthesizer DSP engine
-│   ├── WavetableSynthProcessor.cpp # Wavetable Synth DSP engine
+│   ├── FMSynthProcessor.h        # FM Synthesizer DSP engine (MPE-aware)
+│   ├── WavetableSynthProcessor.h # Wavetable Synth DSP engine (MPE-aware)
 │   ├── KarplusStrongProcessor.cpp # Physical modeling DSP engine
 │   ├── DrumRackProcessor.cpp     # Drum machine DSP engine
 │   ├── SimplerProcessor.cpp      # Sampler DSP engine
 │   └── OscProcessor.cpp          # Synthesizer DSP engine
 ├── Effects/
-│   ├── EffectProcessor.h         # Base Effect interface
+│   ├── EffectProcessor.h         # Base Effect interface (getLatencySamples, sidechain API)
 │   ├── EffectFactory.h           # Modular effect instantiation
-│   └── BuiltInEffects.cpp        # All DSP algorithms (Reverb, Comp, etc)
+│   └── BuiltInEffects.cpp        # All DSP algorithms (Reverb, Comp+sidechain, etc)
 ├── Sequencing/
 │   ├── EuclideanPattern.h        # Bjorklund Euclidean rhythm generator
 │   ├── MidiPattern.h             # MIDI note sequence container
 │   ├── Pattern.h                 # Polymorphic pattern base
 │   ├── PatternEditor.h           # Piano-roll / step editor UI
-│   ├── PianoRollEditor.h         # Dedicated piano roll UI components
+│   ├── PianoRollEditor.h         # Piano roll UI (MPE pressure colour + bend indicator)
 │   └── PatternPool.h             # Pre-allocated pattern memory pool
 └── UI/
-    ├── SessionView.h             # Clip grid UI (Track columns, clip slots)
-    ├── ArrangementView.h         # Timeline sequencer with horizontal scrolling
+    ├── SessionView.h             # Clip grid UI (TrackColumn, GroupColumn, sidechain menu)
+    ├── ArrangementView.h         # Timeline (TakeLaneOverlay, warp-marker UI, comp menu)
     ├── BrowserComponent.h        # Asset file browser with bookmarks
     ├── DeviceView.h              # Bottom device rack & effect chains
     └── TopBarComponent.h         # Transport controls & project management
@@ -276,12 +291,17 @@ cmake --build build --config Release
 3. **Add effects** — Switch to the Effects tab in the Browser and drag any effect into the Device View chain at the bottom of the screen.
 4. **Program a pattern** — Click a clip slot to open the Pattern Editor. Toggle steps or use the Euclidean circle to generate rhythms.
 5. **Organize** — Right-click track headers or clips to assign custom names and colors.
-6. **Timeline Sequencing** — Switch to the **Arrangement View** to lay out clips along a continuous horizontal timeline.
-7. **Launch clips** — Press ▶ on any clip slot to queue it for launch on the next bar.
-8. **Play** — Hit the global Transport Play button. All queued clips launch sample-accurately.
-9. **Export Audio** — Click `Export Audio` in the top bar to render your composition to WAV, MP3, FLAC, or OGG format.
-10. **Load a VST3 plugin** — Switch to the **Plugins** tab in the browser, click **Add Folder…** to point it at your VST3 directory (e.g. `/usr/lib/vst3` or the Vital installer folder), then drag a plugin tile onto a track. Click **Show / Hide Editor** in the Device View to open its native GUI.
-11. **Save** — `File → Save Project` to serialize the full session as an `.LBD` file.
+6. **Group tracks** — Right-click any track header → *Assign to Group ▸* to route it into an inline folder bus. Fold/expand the group column with the ▶/▼ arrow.
+7. **Sidechain compression** — Right-click a track header → *Set Sidechain Source ▸*, select any other track. Open the Compressor editor in the Device View to adjust Threshold, Ratio, Makeup, Mix, and monitor the gain-reduction meter.
+8. **Timeline Sequencing** — Switch to the **Arrangement View** to lay out clips along a continuous horizontal timeline.
+9. **Warp audio to tempo** — Right-click an audio clip in Arrangement View → *Enable Warp* → *Set Clip BPM*. The Rubber Band Library will stretch the clip to follow the project tempo in real time.
+10. **Non-destructive comping** — Record multiple takes in loop mode. Right-click a clip → *Show Take Lanes (N takes)* to open the TakeLaneOverlay. Swipe across lanes to define your comp; crossfades are computed automatically.
+11. **MPE expression** — Connect an MPE-capable controller. Expression is automatically routed per-note to the armed track's WavetableSynth or FMSynth. Use the **MPE MAPPING** panel on the instrument to route Pressure to Amplitude or Filter Cutoff, adjust Timbre Depth, and set the Bend Range.
+12. **Launch clips** — Press ▶ on any clip slot to queue it for launch on the next bar.
+13. **Play** — Hit the global Transport Play button. All queued clips launch sample-accurately.
+14. **Export Audio** — Click `Export Audio` in the top bar to render your composition to WAV, MP3, FLAC, or OGG format.
+15. **Load a VST3 plugin** — Switch to the **Plugins** tab in the browser, click **Add Folder…** to point it at your VST3 directory (e.g. `/usr/lib/vst3` or the Vital installer folder), then drag a plugin tile onto a track. Click **Show / Hide Editor** in the Device View to open its native GUI.
+16. **Save** — `File → Save Project` to serialize the full session as an `.LBD` file.
 
 ---
 
@@ -291,10 +311,17 @@ cmake --build build --config Release
 - [x] VST3 plugin rack in Device View (Plugins browser tab, per-track, show/hide editor)
 - [x] Piano Roll — keyboard stays fixed when scrolling horizontally; vertical scroll syncs
 - [x] Euclidean Sequencer — configurable pattern duration (1 / 2 / 4 bars)
+- [x] Plugin Delay Compensation (PDC) — lock-free `PdcDelayLine` per track
+- [x] Sidechain routing — Compressor editor with source selector, makeup gain, parallel mix, GR meter
+- [x] Group tracks (inline folder bus, Ableton-style fold/expand)
+- [x] Real-time audio warping — Rubber Band Library R3 Phase Vocoder, warp-marker UI
+- [x] Non-destructive comping — `TakeLaneOverlay`, 8-take cap, loop-record, crossfade
+- [x] MPE engine integration — `MpeZoneManager`, per-note expression in WavetableSynth & FMSynth, Piano Roll visualization
 - [ ] CLAP plugin hosting (pending JUCE 9 native support)
 - [ ] Piano-roll quantization & velocity editing
-- [ ] MIDI controller mapping
-- [ ] Audio clip recording
+- [ ] MIDI controller mapping (CC mapping panel)
+- [ ] MIDI recording with per-note MPE snapshot capture
+- [ ] Audio clip recording (non-MPE tracks)
 
 ---
 

@@ -277,69 +277,146 @@ std::unique_ptr<juce::Component> FilterEffect::createEditor() {
 }
 
 // ─── CompressorEffect ────────────────────────────────────────────────────────
-CompressorEffect::CompressorEffect() {
-    compressor.setThreshold(threshold.load());
-    compressor.setRatio(ratio.load());
-    compressor.setAttack(attack.load());
-    compressor.setRelease(release.load());
-}
+CompressorEffect::CompressorEffect() {}
 
 void CompressorEffect::prepareToPlay(double sampleRate) {
-    juce::dsp::ProcessSpec spec;
-    spec.sampleRate = sampleRate;
-    spec.maximumBlockSize = 8192;
-    spec.numChannels = 2;
-    compressor.prepare(spec);
+    currentSampleRate = sampleRate;
+    envLevelDb = -100.0f;
 }
 
 void CompressorEffect::processBlock(juce::AudioBuffer<float>& buffer) {
-    // Measure input RMS before compression
-    float sumSq = 0.0f;
-    int total = buffer.getNumChannels() * buffer.getNumSamples();
-    for (int ch = 0; ch < buffer.getNumChannels(); ++ch) {
-        auto* d = buffer.getReadPointer(ch);
-        for (int i = 0; i < buffer.getNumSamples(); ++i) sumSq += d[i] * d[i];
+    // ── Determine detector buffer (sidechain or self) ──────────────────────
+    const juce::AudioBuffer<float>& detBuf = (sidechainBuf != nullptr) ? *sidechainBuf : buffer;
+    const int detCh  = detBuf.getNumChannels();
+    const int detN   = detBuf.getNumSamples();
+    const int numCh  = buffer.getNumChannels();
+    const int numN   = buffer.getNumSamples();
+
+    const float thrDb  = threshold.load(std::memory_order_relaxed);
+    const float rat    = ratio.load(std::memory_order_relaxed);
+    const float attMs  = attack.load(std::memory_order_relaxed);   // ms
+    const float relMs  = release.load(std::memory_order_relaxed);  // ms
+    const float sr     = (float)(currentSampleRate > 0.0 ? currentSampleRate : 44100.0);
+
+    // Compute per-sample attack/release smoothing coefficients.
+    // One-pole IIR: coeff = exp(-1 / (sr * time_s))
+    const float alphaA = std::exp(-1.0f / (sr * attMs * 0.001f));
+    const float alphaR = std::exp(-1.0f / (sr * relMs * 0.001f));
+
+    float sumSqIn = 0.0f;
+    float peakGr  = 0.0f;
+
+    for (int i = 0; i < numN; ++i)
+    {
+        // ── 1. Measure instantaneous peak from detector ──────────────────
+        float peak = 0.0f;
+        int   di   = juce::jmin(i, detN - 1);
+        for (int ch = 0; ch < detCh; ++ch)
+            peak = std::max(peak, std::abs(detBuf.getReadPointer(ch)[di]));
+
+        // Convert to dBFS (floor -100 dB)
+        float peakDb = juce::Decibels::gainToDecibels(peak, -100.0f);
+
+        // ── 2. Attack / release envelope on the detector level ───────────
+        // Use log-domain smoothing so the envelope tracks loudness correctly.
+        float alpha = (peakDb > envLevelDb) ? (1.0f - alphaA) : (1.0f - alphaR);
+        envLevelDb += alpha * (peakDb - envLevelDb);
+
+        // ── 3. Gain computer (knee-less, hard-knee) ──────────────────────
+        float grDb = 0.0f;
+        if (envLevelDb > thrDb && rat > 1.0f)
+            grDb = (envLevelDb - thrDb) * (1.0f - 1.0f / rat);
+
+        // ── 4. Apply gain reduction to program audio ─────────────────────
+        float gain = juce::Decibels::decibelsToGain(-grDb);
+        for (int ch = 0; ch < numCh; ++ch)
+            buffer.getWritePointer(ch)[i] *= gain;
+
+        // Accumulate for meters
+        if (numCh > 0)
+            sumSqIn += buffer.getReadPointer(0)[i] * buffer.getReadPointer(0)[i];
+        peakGr = std::max(peakGr, grDb);
     }
-    float rms = (total > 0) ? std::sqrt(sumSq / total) : 0.0f;
-    float inDb = juce::Decibels::gainToDecibels(rms, -100.0f);
-    inputLevelDb.store(inDb, std::memory_order_relaxed);
 
-    compressor.setThreshold(threshold.load(std::memory_order_relaxed));
-    compressor.setRatio(ratio.load(std::memory_order_relaxed));
-    compressor.setAttack(attack.load(std::memory_order_relaxed));
-    compressor.setRelease(release.load(std::memory_order_relaxed));
+    // ── 5. Update display atomics ────────────────────────────────────────
+    float rms = (numN > 0) ? std::sqrt(sumSqIn / numN) : 0.0f;
+    inputLevelDb.store(juce::Decibels::gainToDecibels(rms, -100.0f), std::memory_order_relaxed);
+    gainReductionDb.store(peakGr, std::memory_order_relaxed);
 
-    juce::dsp::AudioBlock<float> block(buffer);
-    juce::dsp::ProcessContextReplacing<float> context(block);
-    compressor.process(context);
+    // ── 6. Make-up gain + parallel compression mix ───────────────────────
+    const float makeupGain = juce::Decibels::decibelsToGain(makeup.load(std::memory_order_relaxed));
+    const float wetMix     = juce::jlimit(0.0f, 1.0f, mix.load(std::memory_order_relaxed) * 0.01f);
 
-    // Compute gain reduction analytically from input level
-    float thr = threshold.load(std::memory_order_relaxed);
-    float rat = ratio.load(std::memory_order_relaxed);
-    float gr  = (inDb > thr && rat > 1.0f)
-                ? (inDb - thr) * (1.0f - 1.0f / rat)
-                : 0.0f;
-    gainReductionDb.store(gr, std::memory_order_relaxed);
+    if (wetMix >= 1.0f - 1e-4f)
+    {
+        // Full wet — just apply makeup gain in-place
+        if (makeupGain != 1.0f)
+            for (int ch = 0; ch < numCh; ++ch)
+                juce::FloatVectorOperations::multiply(buffer.getWritePointer(ch), makeupGain, numN);
+    }
+    else
+    {
+        // Parallel compression: blend dry with compressed.
+        // Reconstruct per-sample gain from envLevelDb replay (recompute envelope from detector).
+        const float dryMix = 1.0f - wetMix;
+        float tmpEnv = -100.0f;
+        for (int i = 0; i < numN; ++i)
+        {
+            float peak = 0.0f;
+            int   di   = juce::jmin(i, detN - 1);
+            for (int ch2 = 0; ch2 < detCh; ++ch2)
+                peak = std::max(peak, std::abs(detBuf.getReadPointer(ch2)[di]));
+
+            float peakDb2 = juce::Decibels::gainToDecibels(peak, -100.0f);
+            float alpha2  = (peakDb2 > tmpEnv) ? (1.0f - alphaA) : (1.0f - alphaR);
+            tmpEnv += alpha2 * (peakDb2 - tmpEnv);
+
+            float grDb2 = 0.0f;
+            if (tmpEnv > thrDb && rat > 1.0f)
+                grDb2 = (tmpEnv - thrDb) * (1.0f - 1.0f / rat);
+
+            float compGain = juce::Decibels::decibelsToGain(-grDb2); // gain applied in pass 1
+            for (int ch = 0; ch < numCh; ++ch)
+            {
+                float wet = buffer.getReadPointer(ch)[i] * makeupGain;
+                // dry = what the sample was before compression = wet / compGain
+                float dry = (compGain > 1e-6f) ? (buffer.getReadPointer(ch)[i] / compGain) : buffer.getReadPointer(ch)[i];
+                buffer.getWritePointer(ch)[i] = dry * dryMix + wet * wetMix;
+            }
+        }
+    }
+
+    // Reset sidechain pointer so it doesn't dangle into the next block.
+    sidechainBuf = nullptr;
 }
 
 void CompressorEffect::clear() {
-    compressor.reset();
+    envLevelDb = -100.0f;
+    gainReductionDb.store(0.0f, std::memory_order_relaxed);
+    inputLevelDb.store(-100.0f, std::memory_order_relaxed);
 }
 
 juce::ValueTree CompressorEffect::saveState() const {
     juce::ValueTree state("CompressorState");
-    state.setProperty("threshold", threshold.load(), nullptr);
-    state.setProperty("ratio", ratio.load(), nullptr);
-    state.setProperty("attack", attack.load(), nullptr);
-    state.setProperty("release", release.load(), nullptr);
+    state.setProperty("threshold",          threshold.load(),          nullptr);
+    state.setProperty("ratio",              ratio.load(),              nullptr);
+    state.setProperty("attack",             attack.load(),             nullptr);
+    state.setProperty("release",            release.load(),            nullptr);
+    state.setProperty("makeup",             makeup.load(),             nullptr);
+    state.setProperty("mix",                mix.load(),                nullptr);
+    state.setProperty("sidechainSourceIdx", sidechainSourceIndex.load(), nullptr);
     return state;
 }
 
 void CompressorEffect::loadState(const juce::ValueTree& tree) {
-    if (tree.hasProperty("threshold")) threshold.store(tree.getProperty("threshold"), std::memory_order_relaxed);
-    if (tree.hasProperty("ratio")) ratio.store(tree.getProperty("ratio"), std::memory_order_relaxed);
-    if (tree.hasProperty("attack")) attack.store(tree.getProperty("attack"), std::memory_order_relaxed);
-    if (tree.hasProperty("release")) release.store(tree.getProperty("release"), std::memory_order_relaxed);
+    if (tree.hasProperty("threshold"))  threshold.store(tree.getProperty("threshold"),  std::memory_order_relaxed);
+    if (tree.hasProperty("ratio"))      ratio.store    (tree.getProperty("ratio"),      std::memory_order_relaxed);
+    if (tree.hasProperty("attack"))     attack.store   (tree.getProperty("attack"),     std::memory_order_relaxed);
+    if (tree.hasProperty("release"))    release.store  (tree.getProperty("release"),    std::memory_order_relaxed);
+    if (tree.hasProperty("makeup"))     makeup.store   (tree.getProperty("makeup"),     std::memory_order_relaxed);
+    if (tree.hasProperty("mix"))        mix.store      ((float)tree.getProperty("mix"),  std::memory_order_relaxed);
+    if (tree.hasProperty("sidechainSourceIdx"))
+        sidechainSourceIndex.store((int)tree.getProperty("sidechainSourceIdx"), std::memory_order_relaxed);
 }
 
 void CompressorEffect::registerAutomationParameters(AutomationRegistry* registry) {
@@ -348,6 +425,8 @@ void CompressorEffect::registerAutomationParameters(AutomationRegistry* registry
     registry->registerParameter("Compressor/Ratio",     &ratio,       1.0f,   20.0f);
     registry->registerParameter("Compressor/Attack",    &attack,      0.1f,  100.0f);
     registry->registerParameter("Compressor/Release",   &release,    10.0f, 1000.0f);
+    registry->registerParameter("Compressor/Makeup",    &makeup,      0.0f,   24.0f);
+    registry->registerParameter("Compressor/Mix",       &mix,         0.0f,  100.0f);
 }
 
 std::unique_ptr<juce::Component> CompressorEffect::createEditor() {
@@ -1124,6 +1203,10 @@ void NoiseGateEffect::processBlock(juce::AudioBuffer<float>& buffer) {
     const float range = juce::Decibels::decibelsToGain(rangeDb.load(std::memory_order_relaxed));
     const int   hold  = int(holdMs.load(std::memory_order_relaxed) * 0.001f * currentSampleRate);
 
+    // Determine detector buffer (sidechain or self)
+    const juce::AudioBuffer<float>& detectorBuf = (sidechainBuf != nullptr) ? *sidechainBuf : buffer;
+    const int detCh = detectorBuf.getNumChannels();
+
     // Recompute smoothing coefficients from current parameters
     auto msToCoeff = [&](float ms) {
         return std::exp(-1.0f / float(currentSampleRate * ms * 0.001f));
@@ -1132,10 +1215,11 @@ void NoiseGateEffect::processBlock(juce::AudioBuffer<float>& buffer) {
     alphaRelease = msToCoeff(releaseMs.load(std::memory_order_relaxed));
 
     for (int i = 0; i < numSamp; ++i) {
-        // Compute peak across all channels
+        // Compute peak from detector buffer
         float peak = 0.0f;
-        for (int ch = 0; ch < numCh; ++ch)
-            peak = std::max(peak, std::abs(buffer.getReadPointer(ch)[i]));
+        int di = juce::jmin(i, detectorBuf.getNumSamples() - 1);
+        for (int ch = 0; ch < detCh; ++ch)
+            peak = std::max(peak, std::abs(detectorBuf.getReadPointer(ch)[di]));
 
         bool aboveThr = (peak >= thr);
         float targetGain;
@@ -1153,6 +1237,7 @@ void NoiseGateEffect::processBlock(juce::AudioBuffer<float>& buffer) {
         float alpha = (targetGain > envGain) ? (1.0f - alphaAttack) : (1.0f - alphaRelease);
         envGain += alpha * (targetGain - envGain);
 
+        // Apply gain envelope to the program audio
         for (int ch = 0; ch < numCh; ++ch)
             buffer.getWritePointer(ch)[i] *= envGain;
     }
@@ -1162,6 +1247,9 @@ void NoiseGateEffect::processBlock(juce::AudioBuffer<float>& buffer) {
 
     if (buffer.getNumChannels() > 0)
         pushToFifo<4096>(audioFifo, audioFifoData, buffer.getReadPointer(0), numSamp);
+
+    // Reset sidechain pointer so it doesn't dangle into the next block.
+    sidechainBuf = nullptr;
 }
 
 void NoiseGateEffect::clear() {

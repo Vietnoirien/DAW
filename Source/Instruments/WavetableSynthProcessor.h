@@ -92,6 +92,14 @@ struct WTParams {
 
     std::atomic<float> ampA{0.001f}, ampD{0.1f}, ampS{1.0f}, ampR{0.2f};
     std::atomic<float> filtA{0.01f}, filtD{0.2f}, filtS{0.5f}, filtR{0.3f};
+
+    // ── MPE mapping configuration (4.1) ─────────────────────────────────
+    // mpePressureTarget: 0 = Amplitude, 1 = Filter Cutoff
+    std::atomic<int>   mpePressureTarget { 0 };
+    // mpeTimbreDepth: how many WT-position slots the timbre slide travels (0-7)
+    std::atomic<float> mpeTimbreDepth    { 2.0f };
+    // mpeBendRange: maximum pitch-bend range in semitones (default ±48)
+    std::atomic<float> mpeBendRange      { 48.0f };
 };
 
 // ============================================================
@@ -106,8 +114,12 @@ public:
         filter.prepare(spec);
         active = false;
     }
-    void noteOn(int note, float vel, const WTParams& p) {
-        currentNote=note; currentVelocity=vel; active=true;
+    void noteOn(int note, float vel, int mpeCh, const WTParams& p) {
+        currentNote = note; currentVelocity = vel; active = true;
+        mpeChannel            = mpeCh;
+        mpePitchBendSemitones = 0.0f;
+        mpePressure           = 1.0f;
+        mpeTimbre             = 0.5f;
         for(auto& ph:phaseA) ph=0.0f;
         for(auto& ph:phaseB) ph=0.0f;
         subPhase=0.0f;
@@ -116,25 +128,34 @@ public:
         juce::ADSR::Parameters fp{p.filtA,p.filtD,p.filtS,p.filtR};
         filtAdsr.setParameters(fp); filtAdsr.noteOn();
     }
+    // Legacy noteOn without MPE channel (defaults to channel 1)
+    void noteOn(int note, float vel, const WTParams& p) { noteOn(note, vel, 1, p); }
     void noteOff() { ampAdsr.noteOff(); filtAdsr.noteOff(); }
-    bool isActive() const { return active; }
-    int  getNote()  const { return currentNote; }
+    bool isActive()    const { return active; }
+    int  getNote()     const { return currentNote; }
+    int  getMpeChannel() const { return mpeChannel; }
 
     void renderNextBlock(juce::AudioBuffer<float>& out, int startSample, int numSamples, const WTParams& p) {
         if (!active) return;
         const float sr = (float)sampleRate;
-        const float bf = (float)juce::MidiMessage::getMidiNoteInHertz(currentNote);
+        // Base frequency — MPE pitch bend is applied multiplicatively
+        const float bendRatio = std::pow(2.0f, mpePitchBendSemitones / 12.0f);
+        const float bf = (float)juce::MidiMessage::getMidiNoteInHertz(currentNote) * bendRatio;
         {
             juce::ADSR::Parameters ap{p.ampA,p.ampD,p.ampS,p.ampR}; ampAdsr.setParameters(ap);
             juce::ADSR::Parameters fp{p.filtA,p.filtD,p.filtS,p.filtR}; filtAdsr.setParameters(fp);
         }
-        const float wtA=p.oscA.wtPos.load(), wtB=p.oscB.wtPos.load();
+        // MPE timbre: offset wavetable position proportionally to slide
+        const float timbreOffset = (mpeTimbre - 0.5f) * p.mpeTimbreDepth.load();
+        const float wtA = juce::jlimit(0.0f,(float)(kWTCount-1), p.oscA.wtPos.load() + timbreOffset);
+        const float wtB = juce::jlimit(0.0f,(float)(kWTCount-1), p.oscB.wtPos.load() + timbreOffset);
         const bool aEn=p.oscA.enabled.load(), bEn=p.oscB.enabled.load();
         const float aLvl=p.oscA.level.load(), bLvl=p.oscB.level.load();
         const float aPan=p.oscA.pan.load(),   bPan=p.oscB.pan.load();
         const float ml=p.masterLevel.load();
         const bool fOn=p.filterEnabled.load();
         const float fEnv=p.filterEnvAmt.load(), fKt=p.filterKeytrack.load();
+        const int pressureTarget = p.mpePressureTarget.load();
         auto freq=[&](const WTParams::Osc& o){ return bf*std::pow(2.0f,o.octave.load()+o.coarse.load()/12.0f+o.fine.load()/1200.0f); };
         const float fA=freq(p.oscA), fB=freq(p.oscB);
         const int uA=p.oscA.unisonVoices.load(), uB=p.oscB.unisonVoices.load();
@@ -173,14 +194,29 @@ public:
             if(fOn){
                 float kt=(currentNote-60)*fKt;
                 float ev=fEnv*4.0f*fe*12.0f;
-                float co=p.filterCutoff.load()*std::pow(2.0f,(kt+ev)/12.0f);
+                float baseCutoff = p.filterCutoff.load();
+                // MPE pressure can modulate filter cutoff when pressureTarget == 1
+                if (pressureTarget == 1)
+                    baseCutoff *= (0.2f + mpePressure * 0.8f + (mpePressure - 0.5f) * 4000.0f);
+                float co=baseCutoff*std::pow(2.0f,(kt+ev)/12.0f);
                 filter.setCutoffFrequency(juce::jlimit(20.0f,20000.0f,co));
                 L=filter.processSample(0,L); R=filter.processSample(1,R);
             }
-            out.addSample(0,startSample+s,L*ae*currentVelocity*ml);
-            out.addSample(1,startSample+s,R*ae*currentVelocity*ml);
+            // MPE amplitude modulation
+            const float ampMpe = (pressureTarget == 0) ? mpePressure : 1.0f;
+            out.addSample(0,startSample+s,L*ae*currentVelocity*ml*ampMpe);
+            out.addSample(1,startSample+s,R*ae*currentVelocity*ml*ampMpe);
         }
     }
+
+    // ── MPE per-voice expression state ─────────────────────────────────────
+    // Public so WavetableSynthProcessor::processBlock can update them directly
+    // from the MIDI event loop (all on the render thread — no atomics needed).
+    int   mpeChannel            {1};    // MPE member channel owning this voice
+    float mpePitchBendSemitones {0.0f}; // additive bend in semitones
+    float mpePressure           {1.0f}; // 0-1; 1 = full amplitude
+    float mpeTimbre             {0.5f}; // 0-1; 0.5 = no wavetable offset
+
 private:
     double sampleRate{44100.0}; bool active{false};
     int currentNote{0}; float currentVelocity{0.0f};
@@ -205,9 +241,30 @@ public:
         for(const auto m:midi){
             auto msg=m.getMessage(); int sp=m.samplePosition;
             if(sp>pos){renderVoices(out,pos,sp-pos);pos=sp;}
-            if(msg.isNoteOn())       handleNoteOn(msg.getNoteNumber(),msg.getFloatVelocity());
+            if(msg.isNoteOn())       handleNoteOn(msg.getNoteNumber(), msg.getChannel(), msg.getFloatVelocity());
             else if(msg.isNoteOff()) handleNoteOff(msg.getNoteNumber());
             else if(msg.isAllNotesOff()){for(auto& v:voices)v.noteOff();}
+            // ── 4.1 MPE expression handlers ─────────────────────────────────
+            else if(msg.isPitchWheel()) {
+                // ±48 semitones (MpeZoneManager always encodes at ±48)
+                float semitones = ((msg.getPitchWheelValue() - 8192) / 8192.0f)
+                                  * params.mpeBendRange.load();
+                for(auto& v:voices)
+                    if(v.isActive() && v.getMpeChannel() == msg.getChannel())
+                        v.mpePitchBendSemitones = semitones;
+            }
+            else if(msg.isChannelPressure()) {
+                float p = msg.getChannelPressureValue() / 127.0f;
+                for(auto& v:voices)
+                    if(v.isActive() && v.getMpeChannel() == msg.getChannel())
+                        v.mpePressure = p;
+            }
+            else if(msg.isController() && msg.getControllerNumber() == 74) {
+                float t = msg.getControllerValue() / 127.0f;
+                for(auto& v:voices)
+                    if(v.isActive() && v.getMpeChannel() == msg.getChannel())
+                        v.mpeTimbre = t;
+            }
         }
         if(pos<n) renderVoices(out,pos,n-pos);
     }
@@ -235,7 +292,11 @@ public:
         t.setProperty("aA",params.ampA.load(),nullptr);  t.setProperty("aD",params.ampD.load(),nullptr);
         t.setProperty("aS",params.ampS.load(),nullptr);  t.setProperty("aR",params.ampR.load(),nullptr);
         t.setProperty("fA",params.filtA.load(),nullptr); t.setProperty("fD",params.filtD.load(),nullptr);
-        t.setProperty("fS",params.filtS.load(),nullptr); t.setProperty("fRR",params.filtR.load(),nullptr);
+        t.setProperty("fS",params.filtS.load(),nullptr);  t.setProperty("fRR",params.filtR.load(),nullptr);
+        // MPE config (4.1)
+        t.setProperty("mpePT",  params.mpePressureTarget.load(), nullptr);
+        t.setProperty("mpeTD",  params.mpeTimbreDepth.load(),    nullptr);
+        t.setProperty("mpeBR",  params.mpeBendRange.load(),      nullptr);
         return t;
     }
 
@@ -259,6 +320,10 @@ public:
         params.ampS.store((float)t.getProperty("aS",1.0f));   params.ampR.store((float)t.getProperty("aR",0.2f));
         params.filtA.store((float)t.getProperty("fA",0.01f)); params.filtD.store((float)t.getProperty("fD",0.2f));
         params.filtS.store((float)t.getProperty("fS",0.5f));  params.filtR.store((float)t.getProperty("fRR",0.3f));
+        // MPE config (4.1)
+        params.mpePressureTarget.store((int)  t.getProperty("mpePT", 0));
+        params.mpeTimbreDepth.store   ((float)t.getProperty("mpeTD", 2.0f));
+        params.mpeBendRange.store     ((float)t.getProperty("mpeBR", 48.0f));
     }
 
     void registerAutomationParameters(AutomationRegistry* registry) override {
@@ -303,11 +368,14 @@ public:
     juce::String getName() const override { return "WavetableSynth"; }
 
 private:
-    void handleNoteOn(int n,float v){
-        for(auto& vo:voices){if(!vo.isActive()){vo.noteOn(n,v,params);return;}}
-        for(auto& vo:voices){if(vo.getNote()==n){vo.noteOn(n,v,params);return;}}
-        voices[0].noteOn(n,v,params);
+    void handleNoteOn(int n, int ch, float v){
+        // MPE: try to find a free voice; if not, steal the oldest
+        for(auto& vo:voices){if(!vo.isActive()){vo.noteOn(n,v,ch,params);return;}}
+        for(auto& vo:voices){if(vo.getNote()==n){vo.noteOn(n,v,ch,params);return;}}
+        voices[0].noteOn(n,v,ch,params);
     }
+    // Overload without channel for non-MPE callers
+    void handleNoteOn(int n, float v){ handleNoteOn(n, 1, v); }
     void handleNoteOff(int n){for(auto& v:voices)if(v.isActive()&&v.getNote()==n)v.noteOff();}
     void renderVoices(juce::AudioBuffer<float>& b,int s,int n){for(auto& v:voices)if(v.isActive())v.renderNextBlock(b,s,n,params);}
     std::array<WTVoice,8> voices;

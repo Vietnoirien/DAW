@@ -308,6 +308,208 @@ private:
     }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// TakeLaneOverlay (Phase 3.2)
+// Drawn as a transparent, fully-interactive component placed beneath a single
+// track row inside ArrangementContent (mirroring ArrangementAutomationOverlay).
+// Displays N take rows (one row per take) with swipe-to-comp gesture support.
+// ─────────────────────────────────────────────────────────────────────────────
+static constexpr int ARR_TAKE_LANE_H = 22; // height per take row in pixels
+
+class TakeLaneOverlay : public juce::Component
+{
+public:
+    TakeLaneOverlay()
+    {
+        setInterceptsMouseClicks(true, true);
+        // Thumbnail cache shared across all take lanes (4 MB)
+        thumbCache = std::make_unique<juce::AudioThumbnailCache>(128);
+    }
+
+    // ── Data model ────────────────────────────────────────────────────────────
+    // trackClips: the ArrangementClip vector for the track being displayed.
+    // clipIdx:    which clip in the vector to show takes for.
+    // totalBars / pixelsPerBar: layout scale matching ArrangementContent.
+    void setData(std::vector<ArrangementClip>* trackClips,
+                 int                           clipIdx,
+                 double                        totalBars,
+                 double                        pixelsPerBar)
+    {
+        clips   = trackClips;
+        clipIdx_ = clipIdx;
+        lenBars = totalBars;
+        ppb     = pixelsPerBar;
+        rebuildThumbnails();
+        repaint();
+    }
+
+    void clearData()
+    {
+        clips   = nullptr;
+        clipIdx_ = -1;
+        thumbnails.clear();
+        repaint();
+    }
+
+    void updateScale(double totalBars, double pixelsPerBar)
+    {
+        lenBars = totalBars;
+        ppb     = pixelsPerBar;
+        repaint();
+    }
+
+    // Returns the total height this overlay needs (numTakes × ARR_TAKE_LANE_H).
+    int requiredHeight() const
+    {
+        if (clips == nullptr || clipIdx_ < 0 || clipIdx_ >= (int)clips->size()) return 0;
+        return (int)(*clips)[clipIdx_].takes.size() * ARR_TAKE_LANE_H;
+    }
+
+    // ── Callbacks ─────────────────────────────────────────────────────────────
+    // Called on mouseUp after swipe; wired to MainComponent::onCompRegionSwiped.
+    std::function<void(int /*clipIdx*/, int /*takeIdx*/, double /*startBeat*/, double /*endBeat*/)> onCompRegionSwiped;
+
+    // ── Paint ─────────────────────────────────────────────────────────────────
+    void paint(juce::Graphics& g) override
+    {
+        if (clips == nullptr || clipIdx_ < 0 || clipIdx_ >= (int)clips->size()) return;
+        const auto& clip = (*clips)[clipIdx_];
+        if (clip.takes.empty()) return;
+
+        const int numTakes = (int)clip.takes.size();
+        const float w = static_cast<float>(getWidth());
+
+        for (int ti = 0; ti < numTakes; ++ti)
+        {
+            const juce::Rectangle<float> rowR(0.0f, static_cast<float>(ti * ARR_TAKE_LANE_H),
+                                              w, static_cast<float>(ARR_TAKE_LANE_H));
+
+            // Row background
+            g.setColour(juce::Colour(0xff0a0f18));
+            g.fillRect(rowR);
+
+            // Take label strip (left 18 px)
+            g.setColour(juce::Colour(0xff1a2233));
+            g.fillRect(rowR.withWidth(18.0f));
+            g.setColour(juce::Colour(0xff8899aa));
+            g.setFont(juce::Font(9.0f, juce::Font::bold));
+            g.drawText("T" + juce::String(ti + 1), 1, ti * ARR_TAKE_LANE_H, 16, ARR_TAKE_LANE_H,
+                       juce::Justification::centred, false);
+
+            // Determine active regions for this take
+            for (const auto& cr : clip.compRegions)
+            {
+                if (cr.takeIndex != ti) continue;
+                float rx = beatToX(cr.startBeat);
+                float rw = beatToX(cr.endBeat) - rx;
+                if (rw <= 0.0f) continue;
+
+                // Active region fill (teal)
+                juce::Rectangle<float> crRect(rx, static_cast<float>(ti * ARR_TAKE_LANE_H) + 1.0f,
+                                              rw, static_cast<float>(ARR_TAKE_LANE_H) - 2.0f);
+                g.setColour(juce::Colour(0xff00c8a0).withAlpha(0.75f));
+                g.fillRect(crRect);
+                g.setColour(juce::Colour(0xff00e5c0));
+                g.drawRect(crRect, 1.0f);
+
+                // Waveform thumbnail (if loaded)
+                if (ti < (int)thumbnails.size() && thumbnails[ti] != nullptr)
+                {
+                    g.setColour(juce::Colours::white.withAlpha(0.55f));
+                    thumbnails[ti]->drawChannels(g, crRect.toNearestInt(), 0.0, thumbnails[ti]->getTotalLength(), 1.0f);
+                }
+            }
+
+            // Draw muted regions (greyed out) — regions on OTHER takes that overlap this row's beat range
+            // (simple visual: just draw the row background dimly where no active region exists)
+            // Row separator line
+            g.setColour(juce::Colour(0xff1c2a3c));
+            g.drawHorizontalLine((ti + 1) * ARR_TAKE_LANE_H - 1, 18.0f, w);
+        }
+
+        // Swipe preview overlay
+        if (isSwiping_)
+        {
+            float sx = beatToX(std::min(swipeStartBeat_, swipeEndBeat_));
+            float sw = beatToX(std::max(swipeStartBeat_, swipeEndBeat_)) - sx;
+            float sy = static_cast<float>(swipeTake_ * ARR_TAKE_LANE_H) + 1.0f;
+            g.setColour(juce::Colour(0xffffffff).withAlpha(0.18f));
+            g.fillRect(sx, sy, sw, static_cast<float>(ARR_TAKE_LANE_H) - 2.0f);
+        }
+    }
+
+    // ── Mouse ─────────────────────────────────────────────────────────────────
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        swipeStartBeat_ = xToBeat(static_cast<float>(e.x));
+        swipeEndBeat_   = swipeStartBeat_;
+        swipeTake_      = juce::jlimit(0, 99, e.y / ARR_TAKE_LANE_H);
+        isSwiping_      = true;
+        repaint();
+    }
+
+    void mouseDrag(const juce::MouseEvent& e) override
+    {
+        if (!isSwiping_) return;
+        swipeEndBeat_ = xToBeat(static_cast<float>(e.x));
+        repaint();
+    }
+
+    void mouseUp(const juce::MouseEvent& e) override
+    {
+        if (!isSwiping_) return;
+        isSwiping_ = false;
+        double startB = std::min(swipeStartBeat_, swipeEndBeat_);
+        double endB   = std::max(swipeStartBeat_, swipeEndBeat_);
+        if (endB - startB > 0.01 && onCompRegionSwiped)
+            onCompRegionSwiped(clipIdx_, swipeTake_, startB, endB);
+        repaint();
+    }
+
+private:
+    std::vector<ArrangementClip>* clips   = nullptr;
+    int                           clipIdx_ = -1;
+    double                        lenBars = 32.0;
+    double                        ppb     = 40.0;
+
+    // Swipe gesture state
+    bool   isSwiping_     = false;
+    int    swipeTake_     = 0;
+    double swipeStartBeat_ = 0.0;
+    double swipeEndBeat_   = 0.0;
+
+    std::unique_ptr<juce::AudioThumbnailCache>          thumbCache;
+    juce::OwnedArray<juce::AudioThumbnail>              thumbnails;
+    juce::AudioFormatManager                            fmtMgr;
+
+    float beatToX(double beat) const noexcept
+    {
+        return static_cast<float>(beat * ppb + 18.0); // 18 = label strip width
+    }
+
+    double xToBeat(float x) const noexcept
+    {
+        return std::max(0.0, (static_cast<double>(x) - 18.0) / ppb);
+    }
+
+    void rebuildThumbnails()
+    {
+        thumbnails.clear();
+        if (clips == nullptr || clipIdx_ < 0 || clipIdx_ >= (int)clips->size()) return;
+        fmtMgr.registerBasicFormats();
+        const auto& clip = (*clips)[clipIdx_];
+        for (const auto& take : clip.takes)
+        {
+            auto* thumb = new juce::AudioThumbnail(512, fmtMgr, *thumbCache);
+            juce::File f(take.audioFilePath);
+            if (f.existsAsFile()) thumb->setSource(new juce::FileInputSource(f));
+            thumbnails.add(thumb);
+        }
+    }
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TakeLaneOverlay)
+};
+
 class ArrangementView : public juce::Component
 {
 public:
@@ -327,6 +529,16 @@ public:
         content.addChildComponent(automationOverlay);
         // Ensure the overlay is always painted on top of clip blocks
         automationOverlay.setAlwaysOnTop(true);
+
+        // Take Lane overlay (3.2) — lives at the same level as the automation overlay.
+        content.addChildComponent(takeLaneOverlay);
+        takeLaneOverlay.setAlwaysOnTop(true);
+        takeLaneOverlay.onCompRegionSwiped = [this](int clipIdx, int takeIdx,
+                                                    double startBeat, double endBeat)
+        {
+            if (onCompRegionSwiped)
+                onCompRegionSwiped(activeTakeLaneTrack, clipIdx, takeIdx, startBeat, endBeat);
+        };
     }
 
     void resized() override
@@ -335,6 +547,7 @@ public:
         gridViewport.setBounds(b);
         updateContentSize();
         positionAutomationOverlay();
+        positionTakeLaneOverlay();
     }
 
     void paint(juce::Graphics& g) override
@@ -377,7 +590,8 @@ public:
 
     void setTracksAndClips(const std::vector<TrackState>& tracks, const std::vector<ArrangementClip>* tracksClips) {
         content.setTracksAndClips(tracks, tracksClips);
-        positionAutomationOverlay(); // reposition if track count changed
+        positionAutomationOverlay();  // reposition if track count changed
+        positionTakeLaneOverlay();
     }
 
     void repaintPlayhead() {
@@ -429,7 +643,38 @@ public:
     // Forward the callback so MainComponent can re-sync the render engine
     std::function<void()> onArrangementAutomationChanged;
 
+    // ── Take Lane Overlay API (3.2) ───────────────────────────────────────────
+    // Show take lanes for the clip at clipIdx on trackIndex.
+    // trackClips must remain valid for as long as the overlay is visible.
+    void setTakeLane(int trackIndex, int clipIdx, std::vector<ArrangementClip>* trackClips)
+    {
+        activeTakeLaneTrack = trackIndex;
+        double totalBars = computeTotalBars();
+        takeLaneOverlay.setData(trackClips, clipIdx, totalBars, content.pixelsPerBar);
+        takeLaneOverlay.setVisible(true);
+        updateContentSize();
+        positionTakeLaneOverlay();
+    }
+
+    void clearTakeLane()
+    {
+        activeTakeLaneTrack = -1;
+        takeLaneOverlay.clearData();
+        takeLaneOverlay.setVisible(false);
+        updateContentSize();
+    }
+
+    // Fired by TakeLaneOverlay on swipe completion.
+    // Signature: (trackIdx, clipIdx, takeIdx, startBeat, endBeat)
+    std::function<void(int, int, int, double, double)> onCompRegionSwiped;
+
+    // (3.2) Fired when the user clicks "Show Take Lanes" on a clip block.
+    // Signature: (trackIdx, ArrangementClip* clip)
+    // MainComponent handles this by calling setTakeLane with the correct trackClips ptr.
+    std::function<void(int, ArrangementClip*)> onShowTakeLanes;
+
     ArrangementAutomationOverlay automationOverlay;
+    TakeLaneOverlay              takeLaneOverlay;
 
 private:
     class ArrangementContent; // Forward declaration
@@ -935,6 +1180,7 @@ private:
     juce::Viewport     gridViewport;
     ArrangementContent content;
     int activeAutomationTrack = -1;
+    int activeTakeLaneTrack   = -1;  // (3.2)
 
     double computeTotalBars() const
     {
@@ -960,6 +1206,21 @@ private:
         automationOverlay.toFront(false);
     }
 
+    // (3.2) Place the take lane overlay below the track row (or below automation lane).
+    void positionTakeLaneOverlay()
+    {
+        if (activeTakeLaneTrack < 0 || !takeLaneOverlay.isVisible()) return;
+        int baseY = ARR_HEADER_H + activeTakeLaneTrack * ARR_SLOT_H + ARR_SLOT_H;
+        // If automation overlay is open on the same track, stack beneath it
+        if (activeAutomationTrack == activeTakeLaneTrack && automationOverlay.isVisible())
+            baseY += ARR_AUTO_H;
+        int h = takeLaneOverlay.requiredHeight();
+        if (h <= 0) h = ARR_TAKE_LANE_H; // show at least one row height
+        takeLaneOverlay.setBounds(ARR_TRACK_W, baseY, content.getWidth() - ARR_TRACK_W, h);
+        takeLaneOverlay.updateScale(computeTotalBars(), content.pixelsPerBar);
+        takeLaneOverlay.toFront(false);
+    }
+
     void updateContentSize()
     {
         auto vb = gridViewport.getBounds();
@@ -970,10 +1231,14 @@ private:
         int numTracks = content.trackStates.empty() ? 1 : (int)content.trackStates.size();
         // When the automation lane is open, add its height so it doesn't get clipped
         int autoExtra  = (activeAutomationTrack >= 0 && automationOverlay.isVisible()) ? ARR_AUTO_H : 0;
+        // (3.2) When take lane is open, add its height
+        int takeExtra  = (activeTakeLaneTrack >= 0 && takeLaneOverlay.isVisible())
+                             ? takeLaneOverlay.requiredHeight() : 0;
         int contentW = juce::jmax(vb.getWidth(), content.barToPixel(maxBars));
-        int contentH = juce::jmax(vb.getHeight(), ARR_HEADER_H + numTracks * ARR_SLOT_H + autoExtra + 20);
+        int contentH = juce::jmax(vb.getHeight(), ARR_HEADER_H + numTracks * ARR_SLOT_H + autoExtra + takeExtra + 20);
         content.setSize(contentW, contentH);
         positionAutomationOverlay();
+        positionTakeLaneOverlay();
     }
 
     // ─── ArrClipBlock Implementation ──────────────────────────────────────────
@@ -1024,6 +1289,38 @@ inline void ArrangementView::ArrClipBlock::paint(juce::Graphics& g)
             g.setColour(juce::Colour(0xff00e5ff));
             g.drawRoundedRectangle(b.reduced(1.5f), 3.0f, 2.0f);
         }
+
+    // ── Warp indicators (3.1) ───────────────────────────────────────────────
+    if (clip.warpEnabled)
+    {
+        // Orange "W" badge in the top-right corner
+        g.setColour(juce::Colour(0xffff9900));
+        g.setFont(juce::Font(juce::FontOptions(9.0f)).boldened());
+        g.drawText("W", getWidth() - 14, 2, 12, 12, juce::Justification::centred);
+
+        // Draw warp marker diamonds along the top edge
+        if (!clip.warpMarkers.empty())
+        {
+            g.setColour(juce::Colour(0xffffdd00));
+            const double clipLenBeats = clip.lengthBars * 4.0;
+            for (const auto& wm : clip.warpMarkers)
+            {
+                // Map targetBeat (0-based within clip) → pixel x
+                double frac = (clipLenBeats > 0.0) ? (wm.targetBeat / clipLenBeats) : 0.0;
+                float mx    = static_cast<float>(frac * getWidth());
+                float my    = 4.0f;
+                float sz    = 5.0f;
+                juce::Path diamond;
+                diamond.addTriangle(mx, my - sz, mx + sz, my, mx, my + sz);
+                diamond.addTriangle(mx, my - sz, mx - sz, my, mx, my + sz);
+                g.fillPath(diamond);
+                // Vertical dashed tick line
+                g.setColour(juce::Colour(0xffffdd00).withAlpha(0.4f));
+                g.drawVerticalLine(static_cast<int>(mx), 0.0f, static_cast<float>(getHeight()));
+                g.setColour(juce::Colour(0xffffdd00));
+            }
+        }
+    }
 }
 
 inline ArrangementView::ArrClipBlock::DragMode ArrangementView::ArrClipBlock::getDragModeForPosition(int x) const
@@ -1054,10 +1351,124 @@ inline void ArrangementView::ArrClipBlock::mouseDown(const juce::MouseEvent& e)
     if (e.mods.isPopupMenu()) {
         juce::PopupMenu m;
         m.addItem(1, "Delete Clip");
-        m.showMenuAsync(juce::PopupMenu::Options(), [this](int result) {
-            if (result == 1) {
-                if (auto* parent = owner.findParentComponentOfClass<ArrangementView>()) {
+        m.addSeparator();
+
+        // ── Warp section (3.1) ──────────────────────────────────────────────
+        if (clip.warpEnabled)
+            m.addItem(10, "Disable Warp");
+        else
+            m.addItem(11, "Enable Warp");
+
+        m.addItem(12, "Set Clip BPM\u2026");
+
+        // Warp Mode sub-menu (Complex active; Beats/Tones stubbed for v0.2)
+        {
+            juce::PopupMenu modeMenu;
+            modeMenu.addItem(20, "Complex (Phase Vocoder)",  true,
+                             clip.warpMode == ArrangementClip::WarpMode::Complex);
+            modeMenu.addItem(21, "Beats (v0.2)" , false, false);
+            modeMenu.addItem(22, "Tones (v0.2)" , false, false);
+            m.addSubMenu("Warp Mode \u25b8", modeMenu);
+        }
+
+        m.addItem(13, "Add Warp Marker Here");
+        m.addItem(14, "Clear Warp Markers");
+        m.addSeparator();
+
+        // ── Comping (3.2) ────────────────────────────────────────────────
+        if (clip.takes.empty())
+            m.addItem(30, "Show Take Lanes (no takes yet)", false);
+        else
+            m.addItem(30, "Show Take Lanes ("
+                        + juce::String(clip.takes.size()) + " takes)");
+
+        // Store the x position for marker placement
+        float clickX = (float)e.x;
+
+        m.showMenuAsync(juce::PopupMenu::Options(), [this, clickX](int result)
+        {
+            auto notify = [&]() {
+                if (auto* parent = owner.findParentComponentOfClass<ArrangementView>())
+                    if (parent->onClipMoved) parent->onClipMoved(&clip);
+            };
+
+            if (result == 1)
+            {
+                if (auto* parent = owner.findParentComponentOfClass<ArrangementView>())
                     if (parent->onClipDeleted) parent->onClipDeleted(&clip);
+            }
+            else if (result == 10) // Disable Warp
+            {
+                clip.warpEnabled = false;
+                repaint();
+                notify();
+            }
+            else if (result == 11) // Enable Warp
+            {
+                clip.warpEnabled = true;
+                repaint();
+                notify();
+            }
+            else if (result == 12) // Set Clip BPM
+            {
+                auto* alertWindow = new juce::AlertWindow(
+                    "Set Clip BPM",
+                    "Enter the original BPM of the audio material:",
+                    juce::MessageBoxIconType::QuestionIcon);
+                alertWindow->addTextEditor("bpm",
+                    clip.clipBpm > 0.0 ? juce::String(clip.clipBpm, 2) : "120.0",
+                    "BPM:");
+                alertWindow->addButton("OK",     1, juce::KeyPress(juce::KeyPress::returnKey));
+                alertWindow->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+                alertWindow->enterModalState(true, juce::ModalCallbackFunction::create(
+                    [alertWindow, this, notify_copy = std::function<void()>(notify)](int btnResult) mutable
+                    {
+                        if (btnResult == 1)
+                        {
+                            double bpm = alertWindow->getTextEditorContents("bpm").getDoubleValue();
+                            if (bpm > 0.0)
+                            {
+                                clip.clipBpm = bpm;
+                                notify_copy();
+                            }
+                        }
+                        delete alertWindow;
+                    }), true);
+            }
+            else if (result == 20) // Warp Mode: Complex
+            {
+                clip.warpMode = ArrangementClip::WarpMode::Complex;
+                notify();
+            }
+            else if (result == 13) // Add Warp Marker Here
+            {
+                // Convert click x to a beat position within the clip
+                double clipLenBeats = clip.lengthBars * 4.0;
+                double frac         = static_cast<double>(clickX) / getWidth();
+                double targetBeat   = juce::jlimit(0.0, clipLenBeats, frac * clipLenBeats);
+                // Place sourcePositionSeconds proportionally (will be adjusted by user later)
+                double sourceSec    = (clip.clipBpm > 0.0)
+                    ? (targetBeat / (clip.clipBpm / 60.0))
+                    : (targetBeat * 0.5); // fallback: assume 120 BPM
+                clip.warpMarkers.push_back({ sourceSec, targetBeat });
+                std::sort(clip.warpMarkers.begin(), clip.warpMarkers.end(),
+                    [](const WarpMarker& a, const WarpMarker& b) { return a.targetBeat < b.targetBeat; });
+                repaint();
+                notify();
+            }
+            else if (result == 14) // Clear Warp Markers
+            {
+                clip.warpMarkers.clear();
+                repaint();
+                notify();
+            }
+            else if (result == 30) // Show Take Lanes
+            {
+                if (auto* av = owner.findParentComponentOfClass<ArrangementView>())
+                {
+                    int trackIdx = clip.trackIndex;
+                    if (trackIdx >= 0 && av->onShowTakeLanes)
+                        av->onShowTakeLanes(trackIdx, &clip);
                 }
             }
         });

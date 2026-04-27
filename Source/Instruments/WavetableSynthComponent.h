@@ -167,7 +167,26 @@ public:
         filterTypeCombo.setSelectedId(p.filterType.load() + 1, juce::dontSendNotification);
         filterTypeCombo.onChange = [&p,this]{ p.filterType.store(filterTypeCombo.getSelectedId()-1); };
 
-        setSize(760, 320);
+        // ── MPE Mapping panel (4.1) ───────────────────────────────────────────────
+        addAndMakeVisible(mpePressureCombo);
+        mpePressureCombo.addItem("Amplitude",   1);
+        mpePressureCombo.addItem("Filter Cutoff", 2);
+        mpePressureCombo.setSelectedId(p.mpePressureTarget.load() + 1, juce::dontSendNotification);
+        mpePressureCombo.onChange = [&p, this] {
+            p.mpePressureTarget.store(mpePressureCombo.getSelectedId() - 1);
+        };
+
+        sk(kMpeTimbre, "Timbre\nDepth", p.mpeTimbreDepth.load(), 0.0, 7.0, 2.0, "WT/MPE/TimbreDepth");
+        kMpeTimbre.slider.onValueChange = [&p, this] {
+            p.mpeTimbreDepth.store((float)kMpeTimbre.slider.getValue());
+        };
+
+        sk(kMpeBend, "Bend\nRange", p.mpeBendRange.load(), 1.0, 48.0, 48.0, "WT/MPE/BendRange");
+        kMpeBend.slider.onValueChange = [&p, this] {
+            p.mpeBendRange.store((float)kMpeBend.slider.getValue());
+        };
+
+        setSize(760, 345); // extra 25px for MPE row
     }
 
     ~WavetableSynthComponent() override { setLookAndFeel(nullptr); }
@@ -191,6 +210,7 @@ public:
         sl("FILTER ENV", rx, kFltA.getY() - 13);
         sl("FILTER",     rx, filterEnabled.getY() - 13);
         sl("MASTER",     rx, kMast.getY() - 13);
+        sl("MPE MAPPING", rx, mpePressureCombo.getY() - 13);
     }
 
     void resized() override {
@@ -218,6 +238,15 @@ public:
         layoutRow(right.removeFromTop(LiBeKnob::kH), { &kCut, &kRes, &kEnv });
         right.removeFromTop(8);
         layoutRow(right.removeFromTop(LiBeKnob::kH), { &kMast });
+        right.removeFromTop(8);
+        // MPE Mapping row
+        auto mr = right.removeFromTop(20);
+        auto mpeLabel = mr.removeFromLeft(66);
+        juce::ignoreUnused(mpeLabel);
+        mpePressureCombo.setBounds(mr.removeFromLeft(100)); mr.removeFromLeft(4);
+        layoutRow(juce::Rectangle<int>(mr.getX(), mr.getY() - (LiBeKnob::kH - 20)/2,
+                                       mr.getWidth(), LiBeKnob::kH),
+                  { &kMpeTimbre, &kMpeBend });
     }
 
 private:
@@ -237,6 +266,9 @@ private:
     LiBeKnob kCut, kRes, kEnv, kMast;
     juce::ToggleButton filterEnabled;
     juce::ComboBox filterTypeCombo;
+    // MPE mapping controls (4.1)
+    juce::ComboBox mpePressureCombo;
+    LiBeKnob kMpeTimbre, kMpeBend;
 };
 
 inline std::unique_ptr<juce::Component> WavetableSynthProcessor::createEditor() {

@@ -7,6 +7,7 @@
 
 #include "LockFreeQueue.h"
 #include "TrackCommand.h"
+#include "MpeZoneManager.h"
 #include "GlobalTransport.h"
 #include "PatternPool.h"
 #include "MidiPattern.h"
@@ -28,6 +29,52 @@
 #include "ClipData.h"
 #include "AppAudioBuffer.h"
 #include "ProjectManager.h"
+#include "AudioClipPlayer.h"
+#include "CompPlayer.h"
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PdcDelayLine — lock-free stereo ring-buffer delay used by the render thread
+// to time-align tracks that have lower latency than the slowest effect chain.
+// Written by the message thread (setDelay), read/processed by the render thread.
+// ─────────────────────────────────────────────────────────────────────────────
+struct PdcDelayLine
+{
+    // 8 192 samples ≈ 170 ms @ 48 kHz — well beyond any real plugin lookahead.
+    static constexpr int kMaxDelay = 8192;
+    std::array<float, kMaxDelay> bufL {}, bufR {};
+    int writePos      = 0;
+    int delaySamples  = 0;
+
+    void setDelay (int d)
+    {
+        delaySamples = juce::jlimit (0, kMaxDelay - 1, d);
+        bufL.fill (0.0f);
+        bufR.fill (0.0f);
+        writePos = 0;
+    }
+
+    void process (juce::AudioBuffer<float>& buf)
+    {
+        if (delaySamples == 0) return;
+        const int n  = buf.getNumSamples();
+        float*    L  = buf.getWritePointer (0);
+        float*    R  = buf.getNumChannels() > 1 ? buf.getWritePointer (1) : nullptr;
+        for (int i = 0; i < n; ++i)
+        {
+            const int readPos = (writePos - delaySamples + kMaxDelay) % kMaxDelay;
+            const float outL  = bufL[readPos];
+            bufL[writePos]    = L[i];
+            L[i]              = outL;
+            if (R)
+            {
+                const float outR = bufR[readPos];
+                bufR[writePos]   = R[i];
+                R[i]             = outR;
+            }
+            writePos = (writePos + 1) % kMaxDelay;
+        }
+    }
+};
 
 struct Track : public AutomationRegistry
 {
@@ -41,6 +88,21 @@ struct Track : public AutomationRegistry
     std::atomic<bool>  muted    { false };
     std::atomic<bool>  soloed   { false };
 
+    // ── Plugin Delay Compensation ──
+    // Written by the message thread (recalculatePDC), read lock-free by render.
+    std::atomic<int> pdcDelaySamples { 0 };
+    PdcDelayLine     pdcLine;
+
+    // ── Sidechain source (2.1) ──────────────────────────────────────────────
+    // Index into audioTracks[] whose pre-rendered output is used as the
+    // sidechain key for any sidechain-capable effect on THIS track.
+    // −1 = no sidechain.
+    std::atomic<int> sidechainSourceTrack { -1 };
+
+    // ── Group bus routing (2.2) ─────────────────────────────────────────────
+    // Index into groupTracks[]. −1 = route to master (default).
+    // Written by the message thread (right-click routing), read by render thread.
+    std::atomic<int> groupBusIndex { -1 };
     // ── Recording ──
     std::atomic<bool>  isArmedForRecord { false };
     std::atomic<int>   recordInputChannel { 0 };
@@ -52,6 +114,19 @@ struct Track : public AutomationRegistry
     std::atomic<float> monitorGain { 1.0f };
     std::unique_ptr<juce::AbstractFifo> monitorFifo;
     std::vector<float> monitorBuffer;
+
+    // ── Audio clip playback + warping (3.1) ──────────────────────────────────
+    // Owned entirely on the message thread (load/unload). The render thread
+    // calls fillBlock() which is fully lock-free.
+    std::unique_ptr<AudioClipPlayer> clipPlayer;
+    std::atomic<bool> clipPlayerActive { false };
+
+    // ── Comping (3.2) ────────────────────────────────────────────────────────
+    // Owned on the message thread; render thread calls fillBlock() lock-free.
+    // Active when compPlayerActive == true AND the clip has takes.size() > 0.
+    // Takes priority over clipPlayer / warpEnabled when active.
+    std::unique_ptr<CompPlayer> compPlayer;
+    std::atomic<bool>           compPlayerActive { false };
 
     juce::File         currentRecordingFile;
     std::unique_ptr<juce::AudioFormatWriter> recordWriter;
@@ -141,6 +216,25 @@ struct Track : public AutomationRegistry
                 midiBuffer.addEvent(juce::MidiMessage::noteOn(1, cmd.note, (juce::uint8)cmd.velocity), 0);
             } else if (cmd.type == TrackCommand::Type::AuditionNoteOff) {
                 midiBuffer.addEvent(juce::MidiMessage::noteOff(1, cmd.note, (juce::uint8)0), 0);
+            } else if (cmd.type == TrackCommand::Type::MpeExpression) {
+                // ── 4.1 MPE: inject per-note expression as standard MIDI ────────
+                // Using the member channel from the payload so per-voice filtering
+                // inside the instrument's processBlock works without modification.
+                const auto& mpe = cmd.mpe;
+                const int ch = juce::jlimit(1, 15, mpe.channel);
+
+                // Pitch bend: ±48 semitones → 0..16383 (centre = 8192)
+                int pbRaw = (int)((mpe.pitchBendSemitones / 48.0f * 0.5f + 0.5f) * 16383.0f);
+                pbRaw = juce::jlimit(0, 16383, pbRaw);
+                midiBuffer.addEvent(juce::MidiMessage::pitchWheel(ch, pbRaw), 0);
+
+                // Channel pressure (0-1 → 0-127)
+                int cp = juce::jlimit(0, 127, (int)(mpe.pressure * 127.0f));
+                midiBuffer.addEvent(juce::MidiMessage::channelPressureChange(ch, cp), 0);
+
+                // Timbre / slide: CC 74 (0-1 → 0-127)
+                int cc74 = juce::jlimit(0, 127, (int)(mpe.timbre * 127.0f));
+                midiBuffer.addEvent(juce::MidiMessage::controllerEvent(ch, 74, cc74), 0);
             }
         }
 
@@ -198,6 +292,8 @@ struct Track : public AutomationRegistry
         muted.store(false, std::memory_order_relaxed);
         soloed.store(false, std::memory_order_relaxed);
         isArmedForRecord.store(false, std::memory_order_relaxed);
+        sidechainSourceTrack.store(-1, std::memory_order_relaxed);
+        groupBusIndex.store(-1, std::memory_order_relaxed);
         currentPattern = nullptr;
         pendingPattern = nullptr;
         switchSample = -1.0;
@@ -232,6 +328,8 @@ struct Track : public AutomationRegistry
         monitorEnabled.store(other.monitorEnabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
         monitorGain.store(other.monitorGain.load(std::memory_order_relaxed), std::memory_order_relaxed);
         recordInputChannel.store(other.recordInputChannel.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        sidechainSourceTrack.store(other.sidechainSourceTrack.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        groupBusIndex.store(other.groupBusIndex.load(std::memory_order_relaxed), std::memory_order_relaxed);
         recordFifo = std::move(other.recordFifo);
         recordBuffer = std::move(other.recordBuffer);
         monitorFifo = std::move(other.monitorFifo);
@@ -370,6 +468,44 @@ private:
     void updateWindowTitle();
     void markDirty();
 
+    // ── Plugin Delay Compensation ─────────────────────────────────────────────
+    // Scans all track effect chains, computes per-track compensation delay, and
+    // atomically writes it into each Track::pdcDelaySamples + pdcLine.
+    // Must be called on the message thread after any effect chain change.
+    void recalculatePDC();
+
+    // ── Audio Clip Warping (3.1) ──────────────────────────────────────────────
+    // Called from loadAudioFileIntoTrack and from project load to initialise the
+    // AudioClipPlayer for a warp-enabled arrangement clip.
+    void loadAudioClipForTrack(int trackIdx, const juce::File& file);
+    // Called whenever the global BPM changes so all warp-enabled clip players
+    // get their stretch ratio updated in real time.
+    void syncWarpRatiosToTempo();
+
+    // ── Comping (3.2) ─────────────────────────────────────────────────────
+    // Called from RecordingThread (via callAsync) after each take is finalised.
+    // Appends a new Take to clips[0] on trackIdx, enforces the 8-take cap,
+    // and calls loadCompPlayerForTrack.
+    void registerNewTake(int trackIdx, const juce::File& file, int64_t startSample);
+    // Creates/reloads the CompPlayer for trackIdx from arrangementTracks data.
+    void loadCompPlayerForTrack(int trackIdx);
+    // Called from the swipe-to-comp gesture (TakeLaneOverlay callback).
+    void onCompRegionSwiped(int trackIdx, int clipIdx, int takeIdx,
+                            double startBeat, double endBeat);
+    // loopWrapCounter: incremented by the render thread on every loop-wrap event.
+    // RecordingThread polls this to detect when to start a new take file.
+    std::atomic<int> loopWrapCounter { 0 };
+
+    // ── Sidechain Routing (2.1) ───────────────────────────────────────────────
+    // Sets the sidechain source for the track at targetTrackIdx.
+    // sourceTrackIdx == −1 clears the sidechain.
+    void setSidechainSource(int targetTrackIdx, int sourceTrackIdx);
+
+    // ── Group Track Management (2.2) ─────────────────────────────────────────
+    void addGroupTrack();
+    void deleteGroupTrack(int groupIdx);
+    void refreshGroupBadges();  // syncs group badge text/colour on all audio track headers
+
     // ── Audio Graph Elements ─────────────────────────────────────────────────
     // Tracks are heap-allocated (Track has non-movable std::atomic members).
     // Pre-reserved to 128 so no reallocation occurs during the session
@@ -379,6 +515,16 @@ private:
     std::atomic<int> numReturnTracks {0};
     std::vector<std::unique_ptr<Track>> audioTracks; // indexed 0..numActiveTracks-1
     std::atomic<int> numActiveTracks {0}; // written UI, read audio+render thread
+
+    // ── Group Tracks (2.2) ────────────────────────────────────────────────────
+    // Parallel to returnTracks. Audio tracks route into a group bus instead of
+    // the master when their groupBusIndex is >= 0. The group bus then runs its
+    // own effect chain and accumulates into the master after all audio tracks.
+    std::vector<std::unique_ptr<Track>> groupTracks;
+    std::atomic<int> numGroupTracks { 0 };
+    std::array<juce::AudioBuffer<float>, 8> groupScratches;
+    // UI-thread names for group tracks (parallel to groupTracks[])
+    std::vector<juce::String> groupTrackNames;
 
     // ── Clip Grid State (UI thread only) ─────────────────────────────────────
     // clipGrid[t][s] — each track has its own dynamic scene list
@@ -484,6 +630,14 @@ private:
 
     // ── Lock-Free Hardware MIDI Input ────────────────────────────────────────
     juce::MidiMessageCollector midiCollector;
+
+    // ── MPE (4.1) ─────────────────────────────────────────────────────────────
+    // mpeZone: message-thread-only zone detector + per-channel note tracker.
+    // mpeTargetTrack: which audio track receives live MPE expression events.
+    //   Updated whenever the user arms/selects a track.
+    //   Written on the message thread; read inside handleIncomingMidiMessage.
+    MpeZoneManager      mpeZone;
+    std::atomic<int>    mpeTargetTrack { 0 };
 
     // ── Application-Level Pre-Render Buffer ─────────────────────────────────
     // Decouples DSP work from the hard RT deadline of the hardware callback.

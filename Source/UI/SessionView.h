@@ -217,8 +217,16 @@ public:
     juce::String instrumentName;
     bool         isSelected    = false;
 
+    // ── Group membership badge ────────────────────────────────────────────────
+    juce::String groupBadgeText;          // e.g. "G1", empty = no group
+    juce::Colour groupBadgeColour { juce::Colour(0xff44aa88) };
+
     std::function<void(const juce::String&)> onRenameTrack;
     std::function<void(juce::Colour)>        onSetTrackColour;
+    // Returns [ "No Group", "Group 1", …, "New Group…" ] for the submenu
+    std::function<juce::StringArray()>       getGroupNames;
+    // groupIdx: -1 = remove from group, 0..N-1 = existing group, N = create new
+    std::function<void(int groupIdx)>        onAssignToGroup;
 
     void paint (juce::Graphics& g) override
     {
@@ -282,6 +290,17 @@ public:
             g.setFont (juce::Font (juce::FontOptions (8.5f, juce::Font::bold)));
             g.drawText (shortName, tag.toNearestInt(), juce::Justification::centred);
         }
+
+        // ── Group membership badge (top-right pill) ───────────────────────────
+        if (groupBadgeText.isNotEmpty())
+        {
+            auto pill = juce::Rectangle<float> ((float)(getWidth() - 26), 3.0f, 22.0f, 12.0f);
+            g.setColour (groupBadgeColour.withAlpha (0.85f));
+            g.fillRoundedRectangle (pill, 3.0f);
+            g.setColour (juce::Colours::white);
+            g.setFont   (juce::Font (juce::FontOptions (8.0f, juce::Font::bold)));
+            g.drawText  (groupBadgeText, pill.toNearestInt(), juce::Justification::centred);
+        }
     }
 
     std::function<void()> onSelectTrack;
@@ -295,6 +314,23 @@ public:
             m.addItem (1, "Rename Track");
             m.addItem (2, "Delete Track");
             ClipSlot::addColourSubmenu (m, onSetTrackColour);
+
+            // ── Assign to Group submenu ───────────────────────────────────────
+            if (getGroupNames)
+            {
+                juce::PopupMenu groupSub;
+                auto names = getGroupNames();
+                // item 300 = "No Group", 301..N = existing groups, last = "New Group…"
+                groupSub.addItem (300, "No Group",   true, groupBadgeText.isEmpty());
+                groupSub.addSeparator();
+                for (int gi = 1; gi < names.size() - 1; ++gi)    // skip index 0 ("No Group") and last ("New Group…")
+                    groupSub.addItem (300 + gi, names[gi], true, groupBadgeText == "G" + juce::String(gi));
+                groupSub.addSeparator();
+                groupSub.addItem (300 + names.size() - 1, "New Group\u2026");
+                m.addSeparator();
+                m.addSubMenu ("Assign to Group", groupSub);
+            }
+
             m.showMenuAsync (juce::PopupMenu::Options(), [this](int result) {
                 if (result == 1)
                 {
@@ -317,6 +353,11 @@ public:
                     }), true);
                 }
                 else if (result == 2 && onDeleteTrack) onDeleteTrack();
+                else if (result >= 300 && onAssignToGroup)
+                {
+                    // 300 = "No Group" → -1, 301..N = group index 0..N-1, 300+N = "New Group"
+                    onAssignToGroup (result - 301); // -1 means "No Group"
+                }
                 else if (result >= 200)
                 {
                     juce::Colour c = ClipSlot::colourFromMenuResult (result);
@@ -516,6 +557,29 @@ public:
         sendKnobs.add (k);
         resized();
         repaint();
+    }
+
+    // -- Remove the send knob at retIdx (called when a return track is deleted)
+    void removeSendKnob (int retIdx)
+    {
+        if (juce::isPositiveAndBelow (retIdx, sendKnobs.size()))
+        {
+            removeChildComponent (sendKnobs[retIdx]);
+            sendKnobs.remove (retIdx);
+            resized();
+            repaint();
+        }
+    }
+
+    // -- Returns the actual mixer strip height given the current send-knob count
+    int computeMixerHeight() const
+    {
+        static constexpr int kKnobH  = 44;
+        static constexpr int kLabelH = 14;
+        int h = 4 + 22 + 4
+              + sendKnobs.size() * (kLabelH + kKnobH + 2)
+              + 4 + 100;
+        return juce::jmax (h, SV_MIXER_H);
     }
 
     // -- Helpers -----------------------------------------------------------
@@ -784,9 +848,54 @@ public:
     }
 
     std::function<void()> onSelectTrack;
+    std::function<void()> onDeleteTrack;
+    // Group-specific (only used when isGroupColumn == true)
+    bool isGroupColumn = false;
+    std::function<void(const juce::String&)> onRenameGroup;
+    std::function<void()>                    onUngroupAll;
 
-    void mouseDown (const juce::MouseEvent&) override
+    void mouseDown (const juce::MouseEvent& e) override
     {
+        if (e.mods.isPopupMenu())
+        {
+            juce::PopupMenu m;
+            if (isGroupColumn)
+            {
+                m.addItem (1, "Rename Group");
+                m.addItem (2, "Delete Group");
+                m.addSeparator();
+                m.addItem (3, "Ungroup All");
+                m.showMenuAsync (juce::PopupMenu::Options(), [this](int result) {
+                    if (result == 1 && onRenameGroup)
+                    {
+                        auto* box = new juce::AlertWindow ("Rename Group", "Enter new name:",
+                                                          juce::AlertWindow::NoIcon);
+                        box->addTextEditor ("name", trackName);
+                        box->addButton ("OK",     1, juce::KeyPress (juce::KeyPress::returnKey));
+                        box->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+                        box->enterModalState (true,
+                            juce::ModalCallbackFunction::create ([this, box](int r) {
+                                if (r == 1)
+                                {
+                                    juce::String n = box->getTextEditorContents ("name").trim();
+                                    if (n.isNotEmpty()) { trackName = n; repaint(); if (onRenameGroup) onRenameGroup (n); }
+                                }
+                                delete box;
+                            }), true);
+                    }
+                    else if (result == 2 && onDeleteTrack) onDeleteTrack();
+                    else if (result == 3 && onUngroupAll) onUngroupAll();
+                });
+            }
+            else
+            {
+                m.addItem (1, "Delete Return Track");
+                m.showMenuAsync (juce::PopupMenu::Options(), [this](int result) {
+                    if (result == 1 && onDeleteTrack) onDeleteTrack();
+                });
+            }
+            return;
+        }
         if (onSelectTrack) onSelectTrack();
     }
 
@@ -797,6 +906,139 @@ public:
         volFader.setBounds (b.reduced (6));
     }
 };
+// \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// GroupColumn  \u2013  Inline group bus / folder track (Ableton-style)
+// \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+class GroupColumn : public juce::Component
+{
+public:
+    int          groupIndex = -1;
+    bool         folded     = false;
+    int          childCount = 0;
+    juce::String groupName;
+    juce::Colour groupColour { juce::Colour(0xff44aa88) };
+    bool         isSelected = false;
+    float        rmsLevel   = 0.0f;
+    juce::Slider volFader;
+
+    std::function<void()>                    onToggleFold;
+    std::function<void()>                    onDeleteGroup;
+    std::function<void()>                    onUngroupAll;
+    std::function<void(const juce::String&)> onRenameGroup;
+    std::function<void(float)>               onVolumeChanged;
+    std::function<void()>                    onSelectGroup;
+
+    explicit GroupColumn (int idx, const juce::String& name, juce::Colour col)
+        : groupIndex(idx), groupName(name), groupColour(col)
+    {
+        volFader.setSliderStyle (juce::Slider::LinearVertical);
+        volFader.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 50, 16);
+        volFader.setRange (0.0, 1.0);
+        volFader.setValue (1.0, juce::dontSendNotification);
+        volFader.setDoubleClickReturnValue (true, 1.0);
+        volFader.onValueChange = [this] {
+            if (onVolumeChanged) onVolumeChanged ((float) volFader.getValue());
+        };
+        addAndMakeVisible (volFader);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (isSelected ? juce::Colour(0xff1a2420) : juce::Colour(0xff131a18));
+        g.setColour (groupColour);
+        g.fillRect (0, 0, 6, getHeight());
+        g.setColour (juce::Colour(0xff252540));
+        g.drawHorizontalLine (SV_HEADER_H, 6.0f, (float)getWidth());
+
+        // Fold toggle button
+        auto btnR = juce::Rectangle<float>(8.0f, (SV_HEADER_H - 16) * 0.5f, 16.0f, 16.0f);
+        g.setColour (groupColour.withAlpha(0.25f));
+        g.fillRoundedRectangle (btnR, 3.0f);
+        g.setColour (groupColour);
+        {
+            juce::Path arrow;
+            float ax = btnR.getCentreX(), ay = btnR.getCentreY();
+            if (folded)
+                arrow.addTriangle (ax - 4, ay - 5, ax - 4, ay + 5, ax + 5, ay);
+            else
+                arrow.addTriangle (ax - 5, ay - 3, ax + 5, ay - 3, ax, ay + 5);
+            g.fillPath (arrow);
+        }
+
+        // "G" badge
+        auto bBox = juce::Rectangle<int>(28, (SV_HEADER_H - 16) / 2, 16, 16);
+        g.setColour (groupColour.withAlpha(0.25f));
+        g.fillRoundedRectangle (bBox.toFloat(), 3.0f);
+        g.setColour (groupColour);
+        g.setFont (juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
+        g.drawText ("G", bBox, juce::Justification::centred);
+
+        // Group name
+        g.setColour (isSelected ? juce::Colours::white : juce::Colours::lightgrey);
+        g.setFont (juce::Font(juce::FontOptions(12.0f, juce::Font::bold)));
+        g.drawText (groupName, 48, 0, getWidth() - 52, SV_HEADER_H, juce::Justification::centredLeft);
+
+        // Middle slot area: coloured band + label
+        int slotTop = SV_HEADER_H;
+        int slotH   = getHeight() - SV_HEADER_H - SV_MIXER_H;
+        if (slotH > 0)
+        {
+            g.setColour (groupColour.withAlpha(0.10f));
+            g.fillRect (6, slotTop, getWidth() - 6, slotH);
+            g.setColour (groupColour.withAlpha(0.45f));
+            g.setFont (juce::Font(juce::FontOptions(10.0f)));
+            juce::String lbl = childCount > 0
+                ? juce::String(childCount) + (childCount != 1 ? " tracks" : " track")
+                    + (folded ? "  \u25b6" : "  \u25bc")
+                : "empty";
+            g.drawText (lbl, 6, slotTop, getWidth() - 12, slotH, juce::Justification::centred);
+        }
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        auto btnR = juce::Rectangle<int>(8, (SV_HEADER_H - 16) / 2, 16, 16);
+        if (e.getPosition().y < SV_HEADER_H && btnR.contains(e.getPosition()) && !e.mods.isPopupMenu())
+            { if (onToggleFold) onToggleFold(); return; }
+
+        if (e.mods.isPopupMenu())
+        {
+            juce::PopupMenu m;
+            m.addItem (1, "Rename Group");
+            m.addItem (2, "Delete Group");
+            m.addSeparator();
+            m.addItem (3, "Ungroup All");
+            m.showMenuAsync (juce::PopupMenu::Options(), [this](int result) {
+                if (result == 1)
+                {
+                    auto* box = new juce::AlertWindow ("Rename Group", "Enter new name:", juce::AlertWindow::NoIcon);
+                    box->addTextEditor ("name", groupName);
+                    box->addButton ("OK",     1, juce::KeyPress(juce::KeyPress::returnKey));
+                    box->addButton ("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+                    box->enterModalState (true, juce::ModalCallbackFunction::create([this, box](int r) {
+                        if (r == 1) {
+                            juce::String n = box->getTextEditorContents("name").trim();
+                            if (n.isNotEmpty()) { groupName = n; repaint(); if (onRenameGroup) onRenameGroup(n); }
+                        }
+                        delete box;
+                    }), true);
+                }
+                else if (result == 2 && onDeleteGroup) onDeleteGroup();
+                else if (result == 3 && onUngroupAll)  onUngroupAll();
+            });
+            return;
+        }
+        if (onSelectGroup) onSelectGroup();
+    }
+
+    void resized() override
+    {
+        int mixerTop = getHeight() - SV_MIXER_H;
+        volFader.setBounds (juce::Rectangle<int>(0, mixerTop, getWidth(), SV_MIXER_H).reduced(6));
+    }
+};
+
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TrackGridContent  –  the scrollable inner layer
@@ -805,7 +1047,27 @@ class TrackGridContent : public juce::Component
 {
 public:
     juce::OwnedArray<TrackColumn> columns;
+    juce::OwnedArray<GroupColumn> groupCols;  // inline group bus columns
     bool isDragOver = false; // controlled by SessionView DnD
+
+    // \u2500\u2500 Display Order (Ableton-style folder model) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    struct DisplayEntry {
+        bool isGroup;       // true = GroupColumn, false = audio TrackColumn
+        int  engineIdx;     // index into groupCols[] or columns[]
+        int  parentGroup;   // -1 if top-level or IS a group
+    };
+    std::vector<DisplayEntry> displayOrder;
+    std::vector<int>          trackParentGroup;  // per audio track, -1 = ungrouped
+    bool                      groupFolded[8] = {};
+
+    // Group-level callbacks (forwarded to SessionView)
+    std::function<void(int groupIdx, float gain)>    onGroupVolumeChanged;
+    std::function<void(int groupIdx)>                onDeleteGroupInGrid;
+    std::function<void(int groupIdx)>                onUngroupAllInGrid;
+    std::function<void(int groupIdx, const juce::String&)> onRenameGroupInGrid;
+    std::function<void(int groupIdx)>                onToggleGroupFold;
+    std::function<void(int groupIdx)>                onSelectGroup;
+
 
     std::function<void(int track, int scene)>                          onCreateClip;
     std::function<void(int track, int scene)>                          onSelectClip;
@@ -828,6 +1090,9 @@ public:
     std::function<void(int trackIndex, const juce::String&)>           onRenameTrack;
     std::function<void(int trackIndex, juce::Colour)>                  onSetTrackColour;
     std::function<void(int trackIndex)>                                onAddScene;
+    // Group routing
+    std::function<juce::StringArray()>                                 getGroupNames;  // for submenu
+    std::function<void(int trackIdx, int groupIdx)>                    onAssignToGroup;
 
     // Tracks the number of active return buses so that new columns get the right number of knobs.
     int numReturnTracksCached = 0;
@@ -854,10 +1119,16 @@ public:
         col->onRenameClipAt     = [this, idx] (int s, const juce::String& n) { if (onRenameClip)    onRenameClip    (idx, s, n); };
         col->onSetClipColourAt  = [this, idx] (int s, juce::Colour c)         { if (onSetClipColour) onSetClipColour (idx, s, c); };
         col->onAddScene         = [this, idx] () { if (onAddScene) onAddScene (idx); };
-        col->header.onSelectTrack  = col->onSelectTrack;
-        col->header.onDeleteTrack  = col->onDeleteTrack;
-        col->header.onRenameTrack  = col->onRenameTrack;
+        col->header.onSelectTrack   = col->onSelectTrack;
+        col->header.onDeleteTrack   = col->onDeleteTrack;
+        col->header.onRenameTrack   = col->onRenameTrack;
         col->header.onSetTrackColour = col->onSetTrackColour;
+        col->header.getGroupNames   = [this]() -> juce::StringArray {
+            return getGroupNames ? getGroupNames() : juce::StringArray();
+        };
+        col->header.onAssignToGroup = [this, idx](int groupIdx) {
+            if (onAssignToGroup) onAssignToGroup(idx, groupIdx);
+        };
         // Provision one send knob per existing return track
         for (int r = 0; r < numReturnTracksCached; ++r)
             col->addSendKnob(r);
@@ -866,6 +1137,8 @@ public:
         // Explicitly re-layout: setSize() in updateContentSize() may not change the
         // total size (if the viewport is wide enough), so resized() would never fire
         // and the new column would get zero bounds. Always force the layout here.
+        trackParentGroup.push_back(-1);
+        rebuildDisplayOrder();
         resized();
         repaint();
         return idx;
@@ -905,6 +1178,8 @@ public:
     {
         if (juce::isPositiveAndBelow (index, columns.size()))
         {
+            if (index < (int)trackParentGroup.size())
+                trackParentGroup.erase(trackParentGroup.begin() + index);
             columns.remove (index);
             for (int i = index; i < columns.size(); ++i)
             {
@@ -944,10 +1219,102 @@ public:
     void resized() override
     {
         int h = getHeight();
-        for (int i = 0; i < columns.size(); ++i)
-            columns[i]->setBounds (i * SV_TRACK_W, 0, SV_TRACK_W, h);
-        // drop zone occupies the last SV_TRACK_W px — no component, painted below
+        for (auto* c : columns)   c->setVisible(false);
+        for (auto* g : groupCols) g->setVisible(false);
+        int x = 0;
+        for (auto& e : displayOrder)
+        {
+            bool childHidden = !e.isGroup && e.parentGroup >= 0 && e.parentGroup < 8 && groupFolded[e.parentGroup];
+            if (e.isGroup) { auto* gc = groupCols[e.engineIdx]; gc->setBounds(x, 0, SV_TRACK_W, h); gc->setVisible(true); x += SV_TRACK_W; }
+            else if (!childHidden) { auto* col = columns[e.engineIdx]; col->setBounds(x, 0, SV_TRACK_W, h); col->setVisible(true); x += SV_TRACK_W; }
+        }
     }
+
+    void rebuildDisplayOrder()
+    {
+        displayOrder.clear();
+        int nG = groupCols.size(), nT = columns.size();
+        for (int g = 0; g < nG; ++g)
+        {
+            displayOrder.push_back({ true, g, -1 });
+            for (int t = 0; t < nT; ++t)
+                if (t < (int)trackParentGroup.size() && trackParentGroup[t] == g)
+                    displayOrder.push_back({ false, t, g });
+        }
+        for (int t = 0; t < nT; ++t)
+            if (t >= (int)trackParentGroup.size() || trackParentGroup[t] < 0)
+                displayOrder.push_back({ false, t, -1 });
+        for (int g = 0; g < nG; ++g)
+        {
+            int cnt = 0;
+            for (int t = 0; t < nT; ++t)
+                if (t < (int)trackParentGroup.size() && trackParentGroup[t] == g) ++cnt;
+            groupCols[g]->childCount = cnt; groupCols[g]->repaint();
+        }
+    }
+
+    void setTrackParent(int trackIdx, int groupIdx)
+    {
+        if (juce::isPositiveAndBelow(trackIdx, (int)trackParentGroup.size()))
+            trackParentGroup[trackIdx] = groupIdx;
+        rebuildDisplayOrder(); resized(); repaint();
+    }
+
+    void setGroupFolded(int groupIdx, bool folded)
+    {
+        if (groupIdx < 0 || groupIdx >= 8) return;
+        groupFolded[groupIdx] = folded;
+        if (juce::isPositiveAndBelow(groupIdx, groupCols.size()))
+            { groupCols[groupIdx]->folded = folded; groupCols[groupIdx]->repaint(); }
+        resized(); repaint();
+    }
+
+    int visibleColumnCount() const
+    {
+        int n = 0;
+        for (auto& e : displayOrder)
+        {
+            if (e.isGroup) { ++n; continue; }
+            if (e.parentGroup >= 0 && e.parentGroup < 8 && groupFolded[e.parentGroup]) continue;
+            ++n;
+        }
+        return n;
+    }
+
+    int addGroupCol(int engineGroupIdx, const juce::String& name, juce::Colour col)
+    {
+        auto* gc = new GroupColumn(engineGroupIdx, name, col);
+        gc->onToggleFold   = [this, engineGroupIdx]() { setGroupFolded(engineGroupIdx, !groupFolded[engineGroupIdx]); if (onToggleGroupFold) onToggleGroupFold(engineGroupIdx); };
+        gc->onDeleteGroup  = [this, engineGroupIdx]() { if (onDeleteGroupInGrid) onDeleteGroupInGrid(engineGroupIdx); };
+        gc->onUngroupAll   = [this, engineGroupIdx]() { if (onUngroupAllInGrid) onUngroupAllInGrid(engineGroupIdx); };
+        gc->onRenameGroup  = [this, engineGroupIdx](const juce::String& n) { if (onRenameGroupInGrid) onRenameGroupInGrid(engineGroupIdx, n); };
+        gc->onVolumeChanged= [this, engineGroupIdx](float v) { if (onGroupVolumeChanged) onGroupVolumeChanged(engineGroupIdx, v); };
+        gc->onSelectGroup  = [this, engineGroupIdx]() { if (onSelectGroup) onSelectGroup(engineGroupIdx); };
+        addAndMakeVisible(gc); groupCols.add(gc);
+        rebuildDisplayOrder(); resized(); repaint();
+        return groupCols.size() - 1;
+    }
+
+    void removeGroupCol(int engineGroupIdx)
+    {
+        if (!juce::isPositiveAndBelow(engineGroupIdx, groupCols.size())) return;
+        for (auto& pg : trackParentGroup) { if (pg == engineGroupIdx) pg = -1; else if (pg > engineGroupIdx) --pg; }
+        for (int i = engineGroupIdx; i < 7; ++i) groupFolded[i] = groupFolded[i + 1];
+        groupFolded[7] = false;
+        for (int g = engineGroupIdx; g < groupCols.size() - 1; ++g)
+        {
+            int ng = g;
+            groupCols[g + 1]->groupIndex    = g;
+            groupCols[g + 1]->onToggleFold  = [this,ng]() { setGroupFolded(ng,!groupFolded[ng]); if (onToggleGroupFold) onToggleGroupFold(ng); };
+            groupCols[g + 1]->onDeleteGroup = [this,ng]() { if (onDeleteGroupInGrid) onDeleteGroupInGrid(ng); };
+            groupCols[g + 1]->onUngroupAll  = [this,ng]() { if (onUngroupAllInGrid)  onUngroupAllInGrid(ng); };
+            groupCols[g + 1]->onRenameGroup = [this,ng](const juce::String& n) { if (onRenameGroupInGrid) onRenameGroupInGrid(ng,n); };
+            groupCols[g + 1]->onVolumeChanged= [this,ng](float v) { if (onGroupVolumeChanged) onGroupVolumeChanged(ng,v); };
+        }
+        groupCols.remove(engineGroupIdx);
+        rebuildDisplayOrder(); resized(); repaint();
+    }
+
 
     // Add one send knob to every existing column (called after a new return track is created)
     void addSendKnobToAllColumns (int retIdx)
@@ -1028,6 +1395,7 @@ public:
     // Fired when a ReturnRackDrag is dropped onto a track; the listener creates a new return bus.
     std::function<void()>                           onReturnRackDropped;
     std::function<void(int retIdx, float gain)>     onReturnVolumeChanged;
+    std::function<void(int retIdx)>                 onDeleteReturnTrack;
     std::function<void(int trackIndex, bool muted)>  onTrackMuteChanged;
     std::function<void(int trackIndex, bool soloed)> onTrackSoloChanged;
     std::function<void(int trackIndex, bool armed)>  onTrackArmChanged;
@@ -1037,6 +1405,51 @@ public:
     std::function<void(int trackIndex, juce::Colour)>              onSetTrackColour;
     std::function<void()>                                          onSceneLabelClicked;
     std::function<void(int trackIndex)> onAddScene;
+
+    // ── Group Track Callbacks (2.2) ─────────────────────────────────────────────────
+    std::function<void()>                        onAddGroupTrack;
+    std::function<void(int groupIdx)>            onDeleteGroupTrack;
+    // trackIdx, groupIdx (-1 = route to master)
+    std::function<void(int trackIdx, int groupIdx)> onRouteTrackToGroup;
+    std::function<void(int groupIdx, float gain)>   onGroupVolumeChanged;
+    // trackIdx, groupIdx (-1 = remove from group)
+    std::function<void(int trackIdx, int groupIdx)> onAssignToGroup;
+    // groupIdx to clear all members
+    std::function<void(int groupIdx)>               onUngroupAll;
+    // groupIdx, new name
+    std::function<void(int groupIdx, const juce::String&)> onRenameGroupTrack;
+
+    // Update the group badge on an audio track header column.
+    // groupIdx == -1 clears the badge.
+    void setTrackGroupBadge (int trackIdx, int groupIdx,
+                             const juce::String& groupName, juce::Colour groupColour)
+    {
+        if (!juce::isPositiveAndBelow (trackIdx, gridContent.columns.size())) return;
+        auto& hdr = gridContent.columns[trackIdx]->header;
+        if (groupIdx < 0) {
+            hdr.groupBadgeText = {};
+        } else {
+            hdr.groupBadgeText   = groupName.isEmpty() ? ("G" + juce::String(groupIdx + 1)) : groupName;
+            hdr.groupBadgeColour = groupColour;
+        }
+        hdr.repaint();
+    }
+
+    // Build the dynamic group names list used by the TrackHeader "Assign to Group" submenu.
+    // Returns: [ "No Group", "Group 1", "Group 2", ..., "New Group..." ]
+    juce::StringArray buildGroupNamesList() const
+    {
+        juce::StringArray names;
+        names.add ("No Group");
+        for (int i = 0; i < gridContent.groupCols.size(); ++i)
+            names.add (gridContent.groupCols[i]->groupName);
+        names.add ("New Group\u2026");
+        return names;
+    }
+
+    // ── Sidechain Source Callback (2.1) ────────────────────────────────────────────────
+    // targetTrackIdx, sourceTrackIdx (-1 = clear sidechain)
+    std::function<void(int targetTrackIdx, int sourceTrackIdx)> onSidechainSourceChanged;
 
     SessionView()
     {
@@ -1092,6 +1505,14 @@ public:
             if (onSetTrackColour) onSetTrackColour (t, c);
         };
         gridContent.onAddScene = [this] (int t) { if (onAddScene) onAddScene (t); };
+        gridContent.getGroupNames   = [this]() { return buildGroupNamesList(); };
+        gridContent.onAssignToGroup = [this] (int t, int g) { if (onAssignToGroup) onAssignToGroup (t, g); };
+        gridContent.onGroupVolumeChanged = [this](int g, float v) { if (onGroupVolumeChanged) onGroupVolumeChanged(g, v); };
+        gridContent.onDeleteGroupInGrid  = [this](int g) { deleteGroupTrackInline(g); if (onDeleteGroupTrack) onDeleteGroupTrack(g); };
+        gridContent.onUngroupAllInGrid   = [this](int g) { if (onUngroupAll) onUngroupAll(g); };
+        gridContent.onRenameGroupInGrid  = [this](int g, const juce::String& n) { if (onRenameGroupTrack) onRenameGroupTrack(g, n); };
+        gridContent.onToggleGroupFold    = [this](int g) { /* fold state already handled in gridContent */ };
+        gridContent.onSelectGroup        = [this](int g) { if (onSelectTrack) onSelectTrack(2000 + g); };
 
         // Viewport – horizontal scroll only
         gridViewport.setViewedComponent (&gridContent, false);
@@ -1109,7 +1530,6 @@ public:
         
         addReturnTrack("Return A");
         
-        addAndMakeVisible (masterColumn.get());
         addAndMakeVisible (masterColumn.get());
     }
 
@@ -1135,18 +1555,108 @@ public:
     
     void addReturnTrack(const juce::String& name)
     {
-        int retIdx = returnColumns.size();
+        int retIdx = (int) returnColumns.size();
         auto col = std::make_unique<FixedTrackColumn>(name);
         col->onVolumeChanged = [this, retIdx](float g) {
-            if (onReturnVolumeChanged) onReturnVolumeChanged(retIdx, g); // Need to update signature later
+            if (onReturnVolumeChanged) onReturnVolumeChanged(retIdx, g);
         };
         col->onSelectTrack = [this, retIdx]() {
             if (onSelectTrack) onSelectTrack(1000 + retIdx);
         };
+        col->onDeleteTrack = [this, retIdx]() {
+            deleteReturnTrack(retIdx);
+        };
         addAndMakeVisible(col.get());
         returnColumns.push_back(std::move(col));
+        // Keep numReturnTracksCached in sync so new track columns created
+        // after this point are provisioned with the correct number of send knobs.
+        gridContent.numReturnTracksCached = (int) returnColumns.size();
         resized();
         repaint();
+    }
+
+    // Fired after the engine side has already removed the return track.
+    // Removes the column and the matching send knob from every track column.
+    void deleteReturnTrack (int retIdx)
+    {
+        if (!juce::isPositiveAndBelow (retIdx, (int) returnColumns.size())) return;
+
+        // Remove the FixedTrackColumn from the view
+        removeChildComponent (returnColumns[retIdx].get());
+        returnColumns.erase (returnColumns.begin() + retIdx);
+
+        // Remove the matching send knob from every regular track column
+        for (auto* col : gridContent.columns)
+            col->removeSendKnob (retIdx);
+
+        gridContent.numReturnTracksCached = (int) returnColumns.size();
+
+        // Re-wire onDeleteTrack closures for columns that shifted down
+        for (int i = retIdx; i < (int) returnColumns.size(); ++i)
+        {
+            int newIdx = i;
+            returnColumns[i]->onVolumeChanged = [this, newIdx](float g) {
+                if (onReturnVolumeChanged) onReturnVolumeChanged(newIdx, g);
+            };
+            returnColumns[i]->onSelectTrack = [this, newIdx]() {
+                if (onSelectTrack) onSelectTrack(1000 + newIdx);
+            };
+            returnColumns[i]->onDeleteTrack = [this, newIdx]() {
+                deleteReturnTrack(newIdx);
+            };
+        }
+
+        if (onDeleteReturnTrack) onDeleteReturnTrack (retIdx);
+
+        resized();
+        repaint();
+    }
+
+    // ── Group Track UI Methods (2.2) ─────────────────────────────────────────
+    // \u2500\u2500 Inline group track API (Ableton-style) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    static const juce::Colour kGroupColours[8];
+
+    void addGroupTrackInline (int engineGroupIdx, const juce::String& name)
+    {
+        static const juce::Colour pal[8] = {
+            juce::Colour(0xff44aa88), juce::Colour(0xff8844aa),
+            juce::Colour(0xffaa8844), juce::Colour(0xff4488aa),
+            juce::Colour(0xffaa4488), juce::Colour(0xff88aa44),
+            juce::Colour(0xff4444aa), juce::Colour(0xffaa4444),
+        };
+        juce::Colour col = pal[engineGroupIdx % 8];
+        gridContent.addGroupCol(engineGroupIdx, name, col);
+        updateContentSize();
+    }
+
+    void deleteGroupTrackInline (int engineGroupIdx)
+    {
+        gridContent.removeGroupCol(engineGroupIdx);
+        if (onDeleteGroupTrack) onDeleteGroupTrack(engineGroupIdx);
+        updateContentSize();
+    }
+
+    void setTrackParentGroup (int trackIdx, int groupIdx)
+    {
+        gridContent.setTrackParent(trackIdx, groupIdx);
+        updateContentSize();
+    }
+
+    void setGroupFolded (int groupIdx, bool folded)
+    {
+        gridContent.setGroupFolded(groupIdx, folded);
+        updateContentSize();
+    }
+
+    // Legacy stub kept for backwards compatibility with existing call sites.
+    // Routes to inline implementation.
+    void addGroupTrack (const juce::String& name)
+    {
+        addGroupTrackInline((int)groupColumns.size(), name);
+    }
+    void deleteGroupTrack (int grpIdx)
+    {
+        deleteGroupTrackInline(grpIdx);
     }
 
     // Remove scene slot at sceneIndex from the given track column,
@@ -1255,10 +1765,13 @@ public:
 
         auto sceneStrip = b.removeFromRight (SV_SCENE_W);
         auto masterB    = b.removeFromRight (SV_MASTER_W);
-        
+
+        // Return columns (right-most, after master)
         for (int i = (int)returnColumns.size() - 1; i >= 0; --i) {
             returnColumns[i]->setBounds(b.removeFromRight(SV_RETURN_W));
         }
+
+        // Group columns are now INLINE in gridContent (Ableton-style) - no right-panel space needed
 
         masterColumn->setBounds (masterB);
 
@@ -1275,20 +1788,18 @@ public:
         auto vb = gridViewport.getBounds();
         if (vb.isEmpty()) return;
 
-        int numCols  = gridContent.columns.size() + 1; // +1 always-visible drop zone
+        int numCols  = gridContent.visibleColumnCount() + 1; // +1 always-visible drop zone
         int contentW = juce::jmax (vb.getWidth(), numCols * SV_TRACK_W);
 
-        // Height: header + tallest slot area + '+ scene' btn + mixer
-        int maxSlots = 0;
-        for (auto* col : gridContent.columns)
-            maxSlots = juce::jmax (maxSlots, col->slots.size());
-        int contentH = SV_HEADER_H + maxSlots * SV_SLOT_H + SV_ADD_SCENE_BTN_H + SV_MIXER_H;
-        contentH = juce::jmax (contentH, vb.getHeight());
-
+        // Height is always pinned to the viewport height so each TrackColumn
+        // has a fixed size.  The clip area scrolls internally via the
+        // per-column slotsViewport; the mixer strip is always visible at the
+        // bottom.  Growing contentH with slot count would defeat the viewport.
         bool needsHBar = contentW > vb.getWidth();
         int  barH      = needsHBar ? gridViewport.getScrollBarThickness() : 0;
+        int  contentH  = vb.getHeight() - barH;
 
-        gridContent.setSize (contentW, contentH - barH);
+        gridContent.setSize (contentW, contentH);
     }
 
     void paint (juce::Graphics& g) override
@@ -1351,19 +1862,27 @@ public:
             // Create a new return bus regardless of where on the view it was dropped.
             if (onReturnRackDropped) onReturnRackDropped();
         } else if (d.description.toString().startsWith ("EffectDrag:")) {
+            // 1) Check group columns (2000+ indices) using content coords
             if (hit == -1) {
-                // Check if it's over Return track
+                for (int i = 0; i < gridContent.groupCols.size(); ++i) {
+                    if (gridContent.groupCols[i]->getBounds().contains (contPos)) {
+                        hit = 2000 + i;
+                        break;
+                    }
+                }
+            }
+            // 2) Check return columns (1000+ indices)
+            if (hit == -1) {
                 for (int i = 0; i < returnColumns.size(); ++i) {
                     if (returnColumns[i]->getBounds().contains(d.localPosition)) {
                         hit = 1000 + i;
                         break;
                     }
                 }
-                if (hit == -1) {
-                    // Fallback: use the currently selected track (works in Arrangement mode
-                    // where column bounds don't match the drop position).
-                    if (getSelectedTrackIndex) hit = getSelectedTrackIndex();
-                }
+            }
+            // 3) Fallback: currently selected track (Arrangement mode)
+            if (hit == -1) {
+                if (getSelectedTrackIndex) hit = getSelectedTrackIndex();
             }
             if (onEffectDropped && hit >= 0) onEffectDropped (hit, type);
         }
@@ -1374,6 +1893,12 @@ private:
     juce::OwnedArray<SceneLaunchButton> sceneButtons;
     std::vector<std::unique_ptr<FixedTrackColumn>> returnColumns;
     std::unique_ptr<FixedTrackColumn>   masterColumn;
+
+public:
+    // Exposed so MainComponent can update names after project load
+    std::vector<std::unique_ptr<FixedTrackColumn>> groupColumns;
+
+private:
 
 
 

@@ -219,7 +219,21 @@ public:
         filterTypeCombo.setSelectedId(proc->params.filterType.load() + 1, juce::dontSendNotification);
         filterTypeCombo.onChange = [this] { processor->params.filterType.store(filterTypeCombo.getSelectedId() - 1); };
 
-        setSize(760, 320);
+        // ── MPE Mapping panel (4.1) ─────────────────────────────────────────────
+        addAndMakeVisible(mpePressureCombo);
+        mpePressureCombo.addItem("Amplitude",    1);
+        mpePressureCombo.addItem("Filter Cutoff", 2);
+        mpePressureCombo.setSelectedId(proc->params.mpePressureTarget.load() + 1, juce::dontSendNotification);
+        mpePressureCombo.onChange = [this] {
+            processor->params.mpePressureTarget.store(mpePressureCombo.getSelectedId() - 1);
+        };
+
+        setupK(kMpeBend, "Bend\nRange", proc->params.mpeBendRange.load(), 1.0, 48.0, 48.0, "FM/MPE/BendRange");
+        kMpeBend.slider.onValueChange = [this] {
+            processor->params.mpeBendRange.store((float)kMpeBend.slider.getValue());
+        };
+
+        setSize(760, 355); // extra 35px for MPE row
     }
 
     ~FMSynthComponent() override { setLookAndFeel(nullptr); }
@@ -242,9 +256,10 @@ public:
             g.setFont(juce::FontOptions(9.0f, juce::Font::bold));
             g.drawText(txt, x, y, 160, 12, juce::Justification::centredLeft);
         };
-        sectionLabel("MASTER",  kPad, kMaster.getY() - 13);
-        sectionLabel("AMP ENV", kPad, kAtkAmp.getY() - 13);
-        sectionLabel("FILTER",  kPad, filterEnabled.getY() - 13);
+        sectionLabel("MASTER",      kPad, kMaster.getY() - 13);
+        sectionLabel("AMP ENV",     kPad, kAtkAmp.getY() - 13);
+        sectionLabel("FILTER",      kPad, filterEnabled.getY() - 13);
+        sectionLabel("MPE MAPPING", kPad, mpePressureCombo.getY() - 13);
     }
 
     void resized() override {
@@ -270,6 +285,13 @@ public:
 
         left.removeFromTop(2);
         layoutLeft(left.removeFromTop(kLKH), { &kCutoff, &kRes });
+
+        left.removeFromTop(8);
+        // MPE Mapping row
+        auto mpeRow = left.removeFromTop(20);
+        mpePressureCombo.setBounds(mpeRow.removeFromLeft(kLeftW - kPad * 2 - kLKW - 4));
+        mpeRow.removeFromLeft(4);
+        kMpeBend.setBounds(mpeRow.getX(), mpeRow.getY() - (kLKH - 20)/2, kLKW, kLKH);
 
         b.reduce(4, 4);
         int opW = b.getWidth() / 4;
@@ -302,6 +324,9 @@ private:
     LiBeKnob kMaster, kAtkAmp, kDecAmp, kSusAmp, kRelAmp, kCutoff, kRes;
     juce::ToggleButton filterEnabled;
     juce::ComboBox     filterTypeCombo;
+    // MPE mapping controls (4.1)
+    juce::ComboBox  mpePressureCombo;
+    LiBeKnob        kMpeBend;
 };
 
 inline std::unique_ptr<juce::Component> FMSynthProcessor::createEditor() {

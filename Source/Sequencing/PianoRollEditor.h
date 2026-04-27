@@ -113,9 +113,18 @@ public:
             bool isSelected = (selectedIndices.count(ni) > 0);
             bool isResizing = (dragMode == DragMode::Resize && dragNoteIndex == ni);
 
+            // ── 4.1 MPE: colour note by pressure (blue = soft → red = hard) ──
+            // Only when the note has MPE snapshot data; otherwise default blue.
+            juce::Colour mpeBase = juce::Colour(0xff2d89ef); // default blue
+            if (note.hasMpe)
+            {
+                float p = juce::jlimit(0.0f, 1.0f, note.pressure);
+                mpeBase = juce::Colour(0xff2d89ef).interpolatedWith(juce::Colour(0xffef2d2d), p);
+            }
+
             juce::Colour base = isSelected  ? juce::Colour(0xffff9d00)
                               : isResizing  ? juce::Colour(0xff50aaff)
-                                            : juce::Colour(0xff2d89ef);
+                                            : mpeBase;
 
             juce::ColourGradient grad(base.brighter(0.3f), nr.getX(), nr.getY(),
                                       base.darker(0.2f), nr.getX(), nr.getBottom(), false);
@@ -131,6 +140,20 @@ public:
                 juce::Rectangle<float> handle(nr.getRight() - 6.0f, nr.getY(), 6.0f, nr.getHeight());
                 g.setColour(juce::Colours::white.withAlpha(0.25f));
                 g.fillRect(handle);
+            }
+
+            // ── 4.1 MPE: pitch-bend indicator beneath note block ─────────────
+            // A short yellow line + dot showing the direction of the stored bend.
+            if (note.hasMpe && std::abs(note.pitchBend) > 0.05f)
+            {
+                const float bendY   = nr.getBottom() + 2.0f;
+                const float centreX = nr.getCentreX();
+                // Scale: full note width = full ±48-semitone range
+                const float bendDx  = (note.pitchBend / 48.0f) * (nr.getWidth() * 0.5f);
+                const float endX    = centreX + bendDx;
+                g.setColour(juce::Colours::yellow.withAlpha(0.75f));
+                g.drawLine(centreX, bendY, endX, bendY, 1.5f);
+                g.fillEllipse(endX - 2.0f, bendY - 2.0f, 4.0f, 4.0f);
             }
         }
 

@@ -10,6 +10,32 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(juce)
 
+# ── Rubber Band Library (time-stretching / warping) ───────────────────────────
+# GPL-2.0-or-later — compatible with LiBeDAW's open-source licence.
+# RBL does not ship a CMakeLists.txt; we use the official single-file amalgam
+# (single/RubberBandSingle.cpp) to build a static library with plain CMake.
+FetchContent_Declare(
+    rubberband
+    GIT_REPOSITORY https://github.com/breakfastquay/rubberband.git
+    GIT_TAG        v3.3.0
+    GIT_SHALLOW    TRUE
+)
+FetchContent_Populate(rubberband)   # downloads only; does NOT call add_subdirectory
+
+add_library(rubberband STATIC
+    ${rubberband_SOURCE_DIR}/single/RubberBandSingle.cpp)
+
+target_include_directories(rubberband PUBLIC
+    ${rubberband_SOURCE_DIR})          # exposes <rubberband/RubberBandStretcher.h>
+
+target_compile_definitions(rubberband PRIVATE
+    NOMINMAX                           # prevent min/max macro pollution on Windows
+    _USE_MATH_DEFINES)
+
+# Suppress noisy warnings from the vendored DSP code
+target_compile_options(rubberband PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-w>)
+
 # ── clap-juce-extensions (submodule at libs/clap-juce-extensions) ─────────────
 # NOTE: This library is included for future CLAP plugin hosting support.
 # JUCE 8 natively supports VST3/LV2 hosting only; CLAP host support is
@@ -38,7 +64,9 @@ target_sources(LiBeDAW PRIVATE
     Source/Instruments/DrumMachineProcessor.cpp
     Source/Instruments/AudioInputProcessor.cpp
     Source/Instruments/PluginInstrumentAdapter.cpp
-    Source/Effects/BuiltInEffects.cpp)
+    Source/Effects/BuiltInEffects.cpp
+    Source/Core/AudioClipPlayer.cpp
+    Source/Core/CompPlayer.cpp)
 
 target_include_directories(LiBeDAW PRIVATE
     Source/Core
@@ -74,7 +102,8 @@ target_link_libraries(LiBeDAW PRIVATE
     juce::juce_audio_formats
     juce::juce_audio_processors
     juce::juce_audio_utils
-    juce::juce_dsp)
+    juce::juce_dsp
+    rubberband)
 
 # ── Post-build: create a symlink at LiBeDAW_artefacts/LiBeDAW ─────────────────
 # JUCE places the binary under LiBeDAW_artefacts/<Config>/LiBeDAW (e.g. Debug/

@@ -117,6 +117,14 @@ struct FMParams {
     std::atomic<int>   filterType      { 0 };
     std::atomic<float> filterCutoff    { 8000.0f };
     std::atomic<float> filterResonance { 1.0f };
+
+    // ── MPE mapping configuration (4.1) ─────────────────────────────────
+    // mpePressureTarget: 0 = Amplitude, 1 = Filter Cutoff
+    std::atomic<int>   mpePressureTarget { 0 };
+    // mpeTimbreRange: multiplier range for Op1 ratio modulation via slide
+    std::atomic<float> mpeTimbreRange    { 0.5f };
+    // mpeBendRange: maximum pitch-bend range in semitones (default ±48)
+    std::atomic<float> mpeBendRange      { 48.0f };
 };
 
 // ============================================================
@@ -133,11 +141,15 @@ public:
         active = false;
     }
 
-    void noteOn(int note, float vel, const FMParams& p) {
+    void noteOn(int note, float vel, int mpeCh, const FMParams& p) {
         currentNote     = note;
         currentVelocity = vel;
         active          = true;
         feedbackSample  = 0.0f;
+        mpeChannel            = mpeCh;
+        mpePitchBendSemitones = 0.0f;
+        mpePressure           = 1.0f;
+        mpeTimbre             = 0.5f;
         for (auto& ph : opPhase) ph = 0.0;
 
         juce::ADSR::Parameters ampP { p.ampAttack, p.ampDecay, p.ampSustain, p.ampRelease };
@@ -150,6 +162,8 @@ public:
             opAdsr[i].noteOn();
         }
     }
+    // Legacy overload without MPE channel
+    void noteOn(int note, float vel, const FMParams& p) { noteOn(note, vel, 1, p); }
 
     void noteOff() {
         ampAdsr.noteOff();
@@ -158,6 +172,14 @@ public:
 
     bool isActive() const { return active; }
     int  getNote()  const { return currentNote; }
+    int  getMpeChannel() const { return mpeChannel; }
+
+    // MPE per-voice state — written from processBlock, read in renderNextBlock.
+    // All on the render thread, no atomics needed.
+    int   mpeChannel            {1};
+    float mpePitchBendSemitones {0.0f};
+    float mpePressure           {1.0f};
+    float mpeTimbre             {0.5f};
 
     void renderNextBlock(juce::AudioBuffer<float>& out, int startSample, int numSamples,
                          const FMParams& p) {
@@ -165,7 +187,9 @@ public:
 
         const int algoIdx   = juce::jlimit(0, 31, p.algorithm.load());
         const auto& algo    = kDX7Algorithms[algoIdx];
-        const float baseFreq = (float)juce::MidiMessage::getMidiNoteInHertz(currentNote);
+        // MPE pitch bend applied to baseFreq
+        const float bendRatio = std::pow(2.0f, mpePitchBendSemitones / 12.0f);
+        const float baseFreq = (float)juce::MidiMessage::getMidiNoteInHertz(currentNote) * bendRatio;
         const float sr       = (float)sampleRate;
 
         // Cache atomic params once per block
@@ -248,10 +272,16 @@ public:
                     audioOut += sample;
             }
 
+            // MPE timbre modulates Op0 (carrier) ratio offset
+            const float timbreRatioMod = (mpeTimbre - 0.5f) * p.mpeTimbreRange.load();
+
             // Update feedback state from carrier output
             feedbackSample = audioOut;
 
-            audioOut *= ampEnv * currentVelocity * masterLvl;
+            // MPE amplitude: pressure scales output if pressureTarget == 0
+            const float ampMpe = (p.mpePressureTarget.load() == 0) ? mpePressure : 1.0f;
+            audioOut *= ampEnv * currentVelocity * masterLvl * ampMpe;
+            juce::ignoreUnused(timbreRatioMod); // used as hint; full Op ratio modulation in v0.2
 
             if (filterOn)
                 audioOut = filter.processSample(0, audioOut);
@@ -298,9 +328,29 @@ public:
             int sp   = meta.samplePosition;
             if (sp > pos) { renderVoices(outBuffer, pos, sp - pos); pos = sp; }
 
-            if      (msg.isNoteOn())       handleNoteOn (msg.getNoteNumber(), msg.getFloatVelocity());
+            if      (msg.isNoteOn())       handleNoteOn (msg.getNoteNumber(), msg.getChannel(), msg.getFloatVelocity());
             else if (msg.isNoteOff())      handleNoteOff(msg.getNoteNumber());
             else if (msg.isAllNotesOff())  { for (auto& v : voices) v.noteOff(); }
+            // ── 4.1 MPE expression handlers ─────────────────────────────────
+            else if (msg.isPitchWheel()) {
+                float semitones = ((msg.getPitchWheelValue() - 8192) / 8192.0f)
+                                  * params.mpeBendRange.load();
+                for (auto& v : voices)
+                    if (v.isActive() && v.getMpeChannel() == msg.getChannel())
+                        v.mpePitchBendSemitones = semitones;
+            }
+            else if (msg.isChannelPressure()) {
+                float p = msg.getChannelPressureValue() / 127.0f;
+                for (auto& v : voices)
+                    if (v.isActive() && v.getMpeChannel() == msg.getChannel())
+                        v.mpePressure = p;
+            }
+            else if (msg.isController() && msg.getControllerNumber() == 74) {
+                float t = msg.getControllerValue() / 127.0f;
+                for (auto& v : voices)
+                    if (v.isActive() && v.getMpeChannel() == msg.getChannel())
+                        v.mpeTimbre = t;
+            }
         }
         if (pos < numSamples) renderVoices(outBuffer, pos, numSamples - pos);
     }
@@ -319,6 +369,10 @@ public:
         tree.setProperty("filterType",    params.filterType.load(),     nullptr);
         tree.setProperty("filterCutoff",  params.filterCutoff.load(),   nullptr);
         tree.setProperty("filterRes",     params.filterResonance.load(),nullptr);
+        // MPE config (4.1)
+        tree.setProperty("mpePT",   params.mpePressureTarget.load(), nullptr);
+        tree.setProperty("mpeTR",   params.mpeTimbreRange.load(),    nullptr);
+        tree.setProperty("mpeBR",   params.mpeBendRange.load(),      nullptr);
         for (int i = 0; i < 4; ++i) {
             juce::ValueTree opN("Op" + juce::String(i));
             opN.setProperty("ratio",    params.ops[i].ratio.load(),    nullptr);
@@ -345,6 +399,10 @@ public:
         params.filterType.store   ((int)  tree.getProperty("filterType",    0));
         params.filterCutoff.store ((float)tree.getProperty("filterCutoff",  8000.0f));
         params.filterResonance.store((float)tree.getProperty("filterRes",   1.0f));
+        // MPE config (4.1)
+        params.mpePressureTarget.store((int)  tree.getProperty("mpePT", 0));
+        params.mpeTimbreRange.store   ((float)tree.getProperty("mpeTR", 0.5f));
+        params.mpeBendRange.store     ((float)tree.getProperty("mpeBR", 48.0f));
         for (int i = 0; i < 4; ++i) {
             auto n = tree.getChildWithName("Op" + juce::String(i));
             if (n.isValid()) {
@@ -390,15 +448,17 @@ public:
     juce::String getName() const override { return "FMSynth"; }
 
 private:
-    void handleNoteOn(int note, float vel) {
+    void handleNoteOn(int note, int ch, float vel) {
         for (auto& v : voices) {
-            if (!v.isActive()) { v.noteOn(note, vel, params); return; }
+            if (!v.isActive()) { v.noteOn(note, vel, ch, params); return; }
         }
         for (auto& v : voices) {
-            if (v.getNote() == note) { v.noteOn(note, vel, params); return; }
+            if (v.getNote() == note) { v.noteOn(note, vel, ch, params); return; }
         }
-        voices[0].noteOn(note, vel, params);
+        voices[0].noteOn(note, vel, ch, params);
     }
+    // Legacy overload without channel
+    void handleNoteOn(int note, float vel) { handleNoteOn(note, 1, vel); }
     void handleNoteOff(int note) {
         for (auto& v : voices)
             if (v.isActive() && v.getNote() == note) v.noteOff();

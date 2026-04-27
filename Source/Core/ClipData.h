@@ -19,6 +19,14 @@ struct MidiNote {
     double startBeat;    // beat offset from pattern start
     double lengthBeats;  // note duration in beats
     float  velocity;     // 0.0–1.0
+
+    // ── MPE expression snapshot (populated when recorded from an MPE controller) ──
+    // hasMpe == false → all expression fields are meaningless and the Piano Roll
+    // renders the note in the default blue colour (backward-compatible default).
+    bool   hasMpe      = false; // true if any MPE data was recorded for this note
+    float  pressure    = 0.0f;  // 0-1; used for Piano Roll pressure colour
+    float  pitchBend   = 0.0f;  // semitones additive bend at note-on (snapshot)
+    float  timbre      = 0.5f;  // 0-1; CC74 slide value at note-on (0.5 = centre)
 };
 
 // ─── Automation Models ────────────────────────────────────────────────────────
@@ -71,6 +79,46 @@ struct ClipData
     std::list<AutomationLane> automationLanes;
 };
 
+// ─── Warp Marker (3.1) ────────────────────────────────────────────────────────
+// A beat-anchor that pins a position in the raw audio file (source) to a
+// specific position on the project timeline (target).  A sorted list of these
+// inside ArrangementClip drives the per-segment stretch ratio calculation.
+struct WarpMarker {
+    double sourcePositionSeconds = 0.0; // absolute time inside the raw audio file
+    double targetBeat            = 0.0; // 0-based beat on the project timeline
+                                         // (relative to clip start in beats)
+};
+
+// ─── Take (3.2) ───────────────────────────────────────────────────────────────
+// One recorded pass of audio.  All takes inside an ArrangementClip share the
+// same timeline position as the clip itself.
+//
+// LIMIT: A maximum of kMaxTakesPerClip (8) takes is supported per clip.
+// Each take requires one decoder thread (AudioClipPlayer::DecoderThread).
+// Exceeding 8 takes causes the oldest take to be dropped at record time.
+struct Take {
+    static constexpr int kMaxTakesPerClip = 8;
+
+    juce::String audioFilePath;          // absolute path to recorded WAV on disk
+    double       recordedStartSec = 0.0; // transport position (seconds) of sample 0
+    double       lengthSec        = 0.0; // duration of the raw audio file
+    int          takeIndex        = 0;   // 0-based slot (determines player index)
+};
+
+// ─── CompRegion (3.2) ────────────────────────────────────────────────────────
+// A contiguous time slice inside an ArrangementClip where a specific take is
+// active.  CompRegions must be sorted by startBeat and non-overlapping.
+// An empty compRegions vector means take[0] plays for the full clip extent.
+struct CompRegion {
+    int    takeIndex      = 0;    // index into ArrangementClip::takes (0-based)
+    double startBeat      = 0.0;  // clip-relative beat offset (0 = clip start)
+    double endBeat        = 0.0;  // clip-relative beat offset (exclusive)
+    // Crossfade half-lengths in samples, determined by background zero-crossing
+    // search at comp-edit time.  Defaults to ~10 ms @ 48 kHz.
+    int    fadeInSamples  = 480;
+    int    fadeOutSamples = 480;
+};
+
 // ─── Arrangement Placement ────────────────────────────────────────────────
 struct ArrangementClip {
     int         trackIndex   = -1;
@@ -81,6 +129,38 @@ struct ArrangementClip {
     
     // Arrangement-level parameter automation (overrides clip automation if present)
     std::list<AutomationLane> automationLanes;
+
+    // ── Warp / time-stretch data (3.1) ────────────────────────────────────────
+    // audioFilePath: absolute path to a WAV/FLAC/AIFF on disk.  Empty = MIDI clip.
+    juce::String audioFilePath;
+
+    // clipBpm: the original tempo of the audio material.  0.0 = unknown (manual).
+    // When > 0, the render thread derives the stretch ratio from projectBPM / clipBpm.
+    double clipBpm = 0.0;
+
+    // warpEnabled: if false the clip is played at native speed (no stretching).
+    bool warpEnabled = false;
+
+    // WarpMode: which DSP algorithm to use.  Complex = Phase Vocoder (R3 engine).
+    // Beats and Tones are UI-stubbed; they map to future RBL option flags (v0.2).
+    enum class WarpMode { Complex, Beats, Tones };
+    WarpMode warpMode = WarpMode::Complex;
+
+    // warpMarkers: sorted list of beat-anchor pairs.  When non-empty, the stretch
+    // ratio is computed segment-by-segment between consecutive markers.
+    std::vector<WarpMarker> warpMarkers;
+
+    // ── Comping (3.2) ─────────────────────────────────────────────────────────
+    // takes: all recorded passes for this clip position.  Empty = legacy
+    //   single-file mode (audioFilePath + warpEnabled path is used instead).
+    // compRegions: sorted, non-overlapping active-take time slices.
+    //   Empty compRegions + non-empty takes → take[0] plays for the full clip.
+    //
+    // NOTE: warpEnabled and non-empty takes are mutually exclusive in v0.1.
+    //   When takes.size() > 0, the CompPlayer is used regardless of warpEnabled.
+    //   Full warp-inside-comp support is deferred to v0.2 (see ideas_for_v0.2.md).
+    std::vector<Take>       takes;
+    std::vector<CompRegion> compRegions;
 };
 
 // ─── Thread-Safe Arrangement Timeline ─────────────────────────────────────

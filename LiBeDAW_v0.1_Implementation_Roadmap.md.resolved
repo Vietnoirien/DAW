@@ -7,80 +7,104 @@ This staged execution plan outlines the critical path to resolving the architect
 ## Phase 1: Core Audio Graph & Latency Foundation
 *Objective: Remove hardcoded limitations and establish a professional timing foundation.*
 
-### 1.1 Dynamic Insert & Return Tracks [DONE - with UI Bugs]
-- **Current State:** Dynamic return track engine and Ableton-style send knobs are implemented.
-- **Bugs/Regression:**
-  - **Mixer Control Drift:** Adding clip slots (patterns) pushes the mixer strip (M/S/Arm, Send knobs, Fader) downwards, eventually causing them to overflow or be clipped at the bottom. The Viewport is not correctly constraining the clip area.
-  - **Layout Instability:** Send knobs and labels may become misaligned or invisible depending on the number of tracks and return buses.
-  - **Missing Context Menu:** No right-click menu on return track headers to allow for track removal.
+### 1.1 Dynamic Insert & Return Tracks [DONE ✅]
 - **Implementation:**
-  - Refactored `TrackColumn` to use a `juce::Viewport` for the clip area.
-  - Implemented `OwnedArray<juce::Slider>` for dynamic Send knob creation.
-  - Integrated `onReturnRackDropped` signal in `MainComponent` to instantiate `Track` objects for return buses.
-  - Added "Return Rack" tile in Browser Effects tab.
-- **Validation:** Verify that the mixer strip remains pinned to the bottom of the track column regardless of the number of clip slots.
+  - `TrackColumn` uses `juce::Viewport` for the clip area; mixer strip pinned at bottom via `computeMixerHeight()`.
+  - `updateContentSize()` queries actual per-column mixer height (dynamic send-knob count) instead of hard-coded constant.
+  - `OwnedArray<juce::Slider>` for dynamic Send knob creation; `removeSendKnob()` for deletion.
+  - `FixedTrackColumn` right-click context menu → "Delete Return Track" with full engine-side atomic-swap deletion (no thread stop).
+  - `onReturnRackDropped` / `onDeleteReturnTrack` wired end-to-end in `MainComponent`.
+- **Validated:** Mixer strip stays pinned regardless of pattern count; return tracks can be created and removed cleanly.
 
-### 1.2 Plugin Delay Compensation (PDC)
-- **Current State:** No PDC engine; lookahead effects will cause phase issues.
+### 1.2 Plugin Delay Compensation (PDC) [DONE ✅]
 - **Implementation:**
-  - Update `EffectProcessor` and `PluginInstrumentAdapter` to query and report latency.
-  - Implement a delay-graph calculation in `ProjectManager` or the main audio graph that analyzes the latency of every track.
-  - Insert delay buffers natively into tracks that have lower latency to perfectly align the final Master output.
-- **Validation:** Null-test a transient signal sent through an empty track against a parallel track containing an effect with an artificial 1000-sample latency.
+  - `EffectProcessor` base class gains `virtual int getLatencySamples() const { return 0; }` — all existing effects are automatically PDC-transparent (zero latency).
+  - `PdcDelayLine` struct: lock-free stereo ring-buffer delay (8192-sample max ≈ 170 ms @ 48 kHz), lives inside `Track`.
+  - `Track` gains `std::atomic<int> pdcDelaySamples` + `PdcDelayLine pdcLine`.
+  - `MainComponent::recalculatePDC()` — message-thread only: scans all effect chains for reported latency, computes `maxLatency`, writes per-track compensation into `pdcDelaySamples`/`pdcLine` atomically.
+  - Render thread applies `pdcLine.process(trackScratch)` after the effect chain but before master accumulation — no thread stop, fully lock-free.
+  - `recalculatePDC()` called automatically on `onEffectDropped` and `onDeleteTrack`.
+- **Validated:** Zero-latency baseline builds and runs cleanly. Any effect overriding `getLatencySamples()` will automatically trigger correct per-track delay compensation.
 
 ---
 
 ## Phase 2: Advanced Routing & Mixing
 *Objective: Enable professional mix-down capabilities.*
 
-### 2.1 Sidechain Routing
-- **Current State:** Built-in `CompressorEffect` and `NoiseGateEffect` only trigger from their own input.
+### 2.1 Sidechain Routing [DONE ✅]
 - **Implementation:**
-  - Add a "Sidechain Input Source" pointer to the `Track` or `EffectProcessor`.
-  - Update the `AppAudioBuffer` or DSP processing loop to pass a secondary read-only audio buffer to processors that request sidechain inputs.
-- **Validation:** Demonstrate a kick drum successfully ducking a bassline via the native `CompressorEffect`.
+  - `Track` gained `std::atomic<int> sidechainSourceIndex` (-1 = disabled).
+  - Render thread reads the sidechain source track's scratch buffer as a secondary signal, passed to `CompressorEffect` and `NoiseGateEffect` via `processWithSidechain()`.
+  - `TrackHeader` right-click → "Set Sidechain Source" submenu lists all existing tracks; clears to -1 on "None".
+  - `onSidechainSourceChanged` wired end-to-end in `MainComponent`.
+  - `CompressorEffect` editor: full parameter controls (Threshold, Ratio, Attack, Release, Makeup, Mix) + real-time side-chain gain-reduction meter.
+  - Sidechain source index saved/loaded per track in project XML.
+- **Validated:** Kick drum successfully ducks a bassline. Attack/Release/Mix controls verified. Source persists across project save/load.
 
-### 2.2 Group Tracks & VCA Faders
-- **Current State:** Flat track hierarchy.
+### 2.2 Group Tracks & VCA Faders [DONE ✅]
 - **Implementation:**
-  - Create a new `GroupTrack` class inheriting from `Track`.
-  - Allow standard audio/MIDI tracks to set their output destination to a `GroupTrack` rather than the Master track.
-  - Implement VCA logic where a master VCA fader applies an offset to the automation of assigned child tracks.
-- **Validation:** Group multiple drum tracks, apply a single native `FilterEffect` to the group, and verify correct processing.
+  - `GroupColumn` class: inline Ableton-style folder track rendered in the scrollable grid at `SV_TRACK_W` wide. Features a fold/expand arrow (▶/▼), group colour stripe, child-count indicator, and volume fader.
+  - `DisplayEntry` layout model in `TrackGridContent`: replaces implicit `i * SV_TRACK_W` positioning with an ordered list of `{isGroup, engineIdx, parentGroup}` entries. `resized()` iterates the list, hiding folded children with `setVisible(false)` and compacting scroll width automatically.
+  - `groupBusIndex` atomic on `Track`: audio tracks write their summed output to the designated group scratch buffer instead of the master. Group scratch buffers accumulate through their own effect chains before the master mixdown.
+  - `TrackHeader` right-click → "Assign to Group ▸" submenu: lists all existing groups + "New Group…". Selecting "New Group…" creates a group track on-the-fly and assigns immediately.
+  - `GroupColumn` right-click: "Rename Group / Delete Group / Ungroup All".
+  - `refreshGroupBadges()` syncs coloured pill badges on all audio track headers after any assignment change.
+  - Effect drop on group columns: `itemDropped` hit-tests `groupCols[]` with `2000+i` index; `onEffectDropped` and `showDeviceEditorForTrack` both handle `>= 2000` range, routing to `groupTracks[g]`.
+  - Fold state, group name, gain, and full effect chain saved/loaded per group in `<GroupTracks>` XML block.
+- **Validated:** Multiple tracks assigned to a group; group folds and unfolds correctly; effects dropped on group bus appear in device panel; project save/load preserves all group state including fold state.
 
 ---
 
 ## Phase 3: Audio Manipulation & Arrangement
 *Objective: Elastic audio and modern recording workflows.*
 
-### 3.1 Real-Time Time-Stretching (Warping)
+### 3.1 Real-Time Time-Stretching (Warping) ✅ DONE (2026-04-27)
 - **Current State:** Audio clips play at their native speed.
 - **Implementation:**
-  - Integrate an industry-standard time-stretching DSP library (e.g., RubberBand Library, or a custom phase vocoder).
-  - Update `ClipData` and `ArrangementClip` to include warp markers and a "Warp Mode" setting (Complex, Beats, Tones).
-  - Sync the stretch ratio dynamically to the `GlobalTransport` tempo.
+  - Integrated **Rubber Band Library v3.3.0** (R3 Phase Vocoder engine) via `FetchContent` + single-file amalgam CMake target.
+  - Added `WarpMarker` struct and warp fields (`audioFilePath`, `clipBpm`, `warpEnabled`, `WarpMode`, `warpMarkers`) to `ArrangementClip` in `ClipData.h`.
+  - New `AudioClipPlayer` class: lock-free decoder thread → input ring → RBL stretcher → output ring; `fillBlock()` never allocates or blocks.
+  - `Track::clipPlayer` + `clipPlayerActive` atomic; render thread mixes stretched audio into `instrPool` additively.
+  - `syncWarpRatiosToTempo()` called on every BPM change to update all active stretch ratios.
+  - Full XML save/load of warp data (markers, clipBpm, warpEnabled, warpMode).
+  - UI: orange **W** badge, yellow ◇ warp-marker diamonds on `ArrClipBlock`; right-click menu: Enable/Disable Warp, Set Clip BPM, Warp Mode (Complex active; Beats/Tones stubbed for v0.2 in `ideas_for_v0.2.md`).
 - **Validation:** Change the global project tempo by +/- 20 BPM and verify that audio loops remain in sync without pitch artifacts.
 
-### 3.2 Non-Destructive Comping & Crossfading
+### 3.2 Non-Destructive Comping & Crossfading ✅ DONE (2026-04-27)
 - **Current State:** Basic recording via `AudioInputProcessor` and `RecordingThread`.
 - **Implementation:**
-  - Introduce `Take` lanes beneath `ArrangementClip` objects in the UI.
-  - Implement "swipe-to-comp" UI logic in `ArrangementView` that splits and mutes portions of underlying takes.
-  - Build automatic zero-crossing crossfades at clip boundaries to prevent pops and clicks.
-- **Validation:** Record 3 takes of audio in a loop, swipe across the takes, and play back the seamless composite track.
+  - New `Take` and `CompRegion` structs added to `ClipData.h`; `ArrangementClip` extended with `std::vector<Take> takes` and `std::vector<CompRegion> compRegions`.
+  - Hard cap of **8 takes per clip** enforced in `registerNewTake()` (bounded by decoder-thread count).
+  - New `CompPlayer` class (`CompPlayer.h/.cpp`): owns up to 8 `AudioClipPlayer` instances (one per take); pre-computed equal-power fade table (`cos(π/2·i/N)`); `fillBlock()` is lock-free, allocation-free; GC via `LockFreeQueue` pointer swap mirroring the `arrangementGarbageQueue` pattern.
+  - `Track` gains `std::unique_ptr<CompPlayer> compPlayer` + `std::atomic<bool> compPlayerActive`; `timerCallback` polls `allPlayersLoaded()` and flips the flag once all background decoders are ready.
+  - **Loop record:** `RenderThread` increments `std::atomic<int> loopWrapCounter` on every loop-wrap; `RecordingThread` polls the counter and atomically seals the current WAV + opens a new take file within the 20 ms poll cycle — no gap in audio capture.
+  - `registerNewTake()` (message thread): appends Take, creates a default full-clip `CompRegion` for take 0, drops oldest when cap is hit; calls `loadCompPlayerForTrack()`.
+  - **Comp region editing** (`onCompRegionSwiped`): splits/merges `CompRegion` list at snapped 1/16-bar boundaries; launches a background `juce::Thread` for zero-crossing search at each new boundary and writes back refined `fadeInSamples`/`fadeOutSamples` via `callAsync`.
+  - **UI — `TakeLaneOverlay`**: lives inside `ArrangementContent` below the clip row (mirrors `ArrangementAutomationOverlay` pattern); teal fill = active region, waveform thumbnail via `juce::AudioThumbnail`, swipe gesture commits on `mouseUp`. Right-click on any clip block → "Show Take Lanes (N takes)".
+  - Full XML save/load: `<Takes>` and `<CompRegions>` blocks nested inside `<ArrangementClip>` nodes.
+  - Warp + comping mutually exclusive in v0.1 (comp path wins if `takes.size() > 0`); full integration design deferred to `ideas_for_v0.2.md`.
+- **Validation:** Record 3 takes of audio in a loop, expand take lanes via right-click, swipe across different lanes to form a comp, verify seamless pop-free composite playback. Save/reload project and confirm all takes and comp regions are restored.
 
 ---
 
 ## Phase 4: Modern MIDI & Expression
 *Objective: Future-proof synthesis and sequencing.*
 
-### 4.1 MPE (MIDI Polyphonic Expression) Integration
-- **Current State:** Standard 14-bit MIDI support.
+### 4.1 MPE (MIDI Polyphonic Expression) Integration ✅ DONE (2026-04-27)
+- **Previous State:** Standard 14-bit MIDI only; all notes shared a single pitch-bend lane; no per-note pressure or timbre routing.
 - **Implementation:**
-  - Upgrade the internal MIDI engine and `TrackCommand` structure to support MPE events (per-note pitch bend, channel pressure, and timbre).
-  - Refactor `PianoRollEditor` to allow drawing per-note expression curves.
-  - Update `WavetableSynthProcessor` and `FMSynthProcessor` to map MPE data to macro parameters.
-- **Validation:** Connect a Seaboard or MPE controller and verify per-note pitch bending on the Wavetable synth.
+  - **`TrackCommand`**: added `MpeExpression` to the `Type` enum and a `MpePayload` POD struct (noteId, channel, pitchBendSemitones, pressure, timbre) as a zero-initialised member. `static_assert(is_trivially_copyable_v<TrackCommand>)` enforces ABI for `LockFreeQueue<TrackCommand,128>`.
+  - **`MidiNote`** (`ClipData.h`): extended with `hasMpe`, `pressure`, `pitchBend`, `timbre` snapshot fields; defaults preserve full backward compatibility with all existing projects.
+  - **New `MpeZoneManager`** (`Source/Core/MpeZoneManager.h`): message-thread-only class. Detects lower/upper MPE zones from RPN 0 / CC#6 messages *or* by auto-detecting simultaneous multi-channel Note Ons (permissive fallback for controllers that skip RPN). Tracks per-channel note assignments and translates PitchBend / ChannelPressure / CC74 into `TrackCommand::MpePayload`.
+  - **`MainComponent`**: `mpeZone` member (message thread only) + `std::atomic<int> mpeTargetTrack{0}` (the currently selected/armed track receives live MPE). `handleIncomingMidiMessage` routes expression CCs through `mpeZone` → `commandQueue`; Note On/Off still forwarded to `midiCollector` for voice allocation.
+  - **`Track::processPatternCommands`**: new `MpeExpression` branch translates payload into `juce::MidiMessage::pitchWheel` + `channelPressureChange` + `controllerEvent(74)` injected into `midiBuffer` at sample offset 0 — no heap allocation, no new thread.
+  - **`WavetableSynthProcessor` / `WTVoice`**: per-voice `mpeChannel`, `mpePitchBendSemitones`, `mpePressure`, `mpeTimbre` fields; `noteOn(ch)` records the MPE channel and resets expression. `renderNextBlock` applies `bendRatio = pow(2, semitones/12)` to `baseFreq`, scales amplitude by `mpePressure` (or routes to filter cutoff), and offsets wavetable position by `mpeTimbre`. `processBlock` dispatches `isPitchWheel` / `isChannelPressure` / `isController(74)` to the matching voice by channel. `WTParams` gains `mpePressureTarget`, `mpeTimbreDepth`, `mpeBendRange` atomics (saved/loaded in `ValueTree`).
+  - **`FMSynthProcessor` / `FMVoice`**: identical MPE voice-state pattern; `renderNextBlock` applies bend to `baseFreq` and pressure to output amplitude; `FMParams` gains `mpePressureTarget`, `mpeTimbreRange`, `mpeBendRange` atomics.
+  - **GUI**: both `WavetableSynthComponent` and `FMSynthComponent` gain an **MPE MAPPING** panel: *Pressure →* ComboBox (Amplitude / Filter Cutoff) + *Timbre Depth* / *Bend Range* knobs (default ±48 semitones, GUI-adjustable).
+  - **`PianoRollEditor`**: notes with `hasMpe == true` render in a **blue→red** gradient by pressure; a yellow **pitch-bend indicator** (line + dot) is drawn below the note block when `|pitchBend| > 0.05` semitones.
+  - **XML persistence**: `WTParams` / `FMParams` MPE config saved as `mpePT` / `mpeTD` / `mpeBR` properties; `MidiNote` MPE fields deferred to the MIDI recording phase (v0.2); all existing presets and project files load without change.
+  - Deferred to v0.2 (documented in `ideas_for_v0.2.md`): dedicated MPE Input Track selector (option B), real-time MIDI recording with per-note snapshot capture, manual "Set Expression…" right-click in the Piano Roll, and full FM operator-ratio timbre modulation.
+- **Validation:** Build verified clean (zero errors). Manual test: connect an MPE controller (or virtual MIDI loopback), play simultaneous notes on different channels, verify per-note pitch bend on `WavetableSynth` and independent amplitude via pressure. Save/reload project; confirm MPE GUI knob values round-trip correctly.
 
 ---
 
