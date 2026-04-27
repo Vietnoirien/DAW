@@ -327,12 +327,29 @@ cmake --build build --config Release
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+LiBeDAW is free software licensed under the **GNU Affero General Public License v3.0 or later** (AGPL-3.0-or-later).
+See [LICENSE](LICENSE) for the full text.
+
+In short: you are free to use, study, fork and redistribute LiBeDAW, provided that any modified version you distribute — including deployments accessible over a network — also carries the same AGPL-3.0-or-later license and makes its complete source code available.
+
+### Why AGPL-3.0?
+
+| Dependency | License | Why it constrains us |
+|---|---|---|
+| JUCE 8.0.12 | AGPLv3 (open-source tier) | Linking against JUCE in an open-source project requires AGPLv3 compliance |
+| Rubber Band Library v3.3.0 | GPL-2.0-or-later | Strong copyleft; "or later" makes it compatible with AGPL-3 |
+| clap-juce-extensions | MIT | Permissive — compatible with everything |
+
+The combination of JUCE (AGPLv3) and the Rubber Band Library (GPL-2.0-or-later) makes AGPLv3 the only license that satisfies all dependencies without a commercial exception.
+
+> **Plugin hosting does not propagate the license.** VST3, LV2, and CLAP plugins are loaded as separate dynamic libraries at runtime, not statically linked into LiBeDAW. Commercial closed-source plugins remain fully legal to use inside LiBeDAW.
 
 ---
 
 ## Acknowledgements
 
-Built with [JUCE 8.0.12](https://juce.com/) — the cross-platform C++ audio framework.
+Built with [JUCE 8.0.12](https://juce.com/) — the cross-platform C++ audio framework (AGPLv3 / Commercial EULA).
 
-CLAP SDK headers provided by [clap-juce-extensions](https://github.com/free-audio/clap-juce-extensions) (free-audio / clap team).
+Real-time audio time-stretching powered by the [Rubber Band Library v3.3.0](https://breakfastquay.com/rubberband/) by Breakfast Quay (GPL-2.0-or-later).
+
+CLAP SDK headers provided by [clap-juce-extensions](https://github.com/free-audio/clap-juce-extensions) (free-audio / clap team — MIT).
