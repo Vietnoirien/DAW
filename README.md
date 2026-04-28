@@ -42,6 +42,7 @@ LiBeDAW is developed and tested on **Linux**. The codebase uses only cross-platf
   > **CLAP hosting** — The `clap-juce-extensions` submodule (providing the CLAP SDK headers) is included for future readiness. Native CLAP *host* support requires JUCE 9; until then, use the VST3 version of your plugins (e.g. `Vital.vst3`).
 - ⚙️ **Audio Device Settings** — Runtime soundcard/buffer/sample-rate configuration.
 - 🕹️ **Global Transport** — Sample-accurate BPM clock driving all sequencers.
+- 🎮 **APC Mini Hardware Controller (Phase 5.2)** — Bi-directional MIDI control surface support for the **Akai APC Mini (Mk1)**. Auto-detects the device on startup via `ControlSurfaceManager`. The 8×8 clip grid buttons trigger clip launch and reflect slot state via real-time LED feedback (Off / Green / Green blink / Red / Amber / Yellow). Track faders (CC 48–55) and master fader (CC 56) control track and master volume. Scene launch buttons (notes 82–89) fire whole-row clip launches. LED state is pushed synchronously on the message thread via a direct **ALSA rawmidi** handle, bypassing JUCE's MIDI output stack for sub-millisecond hardware delivery. A `lastKnownState` deduplication layer prevents redundant Note On sends. Full LED resync is performed on project load and track layout changes. *(Shift navigation and MIDI CC mapping panel are planned for a future phase.)*
 
 ---
 
@@ -63,6 +64,7 @@ LiBeDAW is built on strict real-time safety principles:
 | Multi-take comping | `CompPlayer` owns ≤8 `AudioClipPlayer` instances; equal-power crossfade table; `loopWrapCounter` atomic for seamless loop-record |
 | MPE expression | `MpeZoneManager` on message thread; `MpeExpression` command through FIFO; per-voice state on render thread — no extra atomics |
 | Offline Rendering | Rapid-drain loop over `AppAudioBuffer` bypassing RT hardware limits |
+| Hardware LED feedback | `ClipStateObserver` callbacks on message thread → ALSA `snd_rawmidi_write` — no RT thread involvement, no JUCE MIDI output latency |
 
 ### Key Components
 
@@ -100,6 +102,14 @@ Source/
 │   ├── PatternEditor.h           # Piano-roll / step editor UI
 │   ├── PianoRollEditor.h         # Piano roll UI (MPE pressure colour + bend indicator)
 │   └── PatternPool.h             # Pre-allocated pattern memory pool
+├── ControlSurface/
+│   ├── ControlSurface.h          # Abstract base (ClipStateObserver + sendMidi helper)
+│   ├── ClipStateObserver.h       # Observer interface + ClipState enum + LedColor constants
+│   ├── ControlElement.h          # ButtonElement / SliderElement — hardware input abstractions
+│   ├── ControlSurfaceManager.{h,cpp} # Registration, MIDI routing, state broadcast, auto-reconnect
+│   ├── ApcMiniDriver.{h,cpp}     # Akai APC Mini Mk1 driver (8×8 grid, faders, scene buttons)
+│   ├── SessionComponent.{h,cpp}  # Session Ring — scrollable NxM window over clip grid
+│   └── MixerComponent.{h,cpp}    # Fader→volume mapping component
 └── UI/
     ├── SessionView.h             # Clip grid UI (TrackColumn, GroupColumn, sidechain menu)
     ├── ArrangementView.h         # Timeline (TakeLaneOverlay, warp-marker UI, comp menu)
@@ -301,7 +311,8 @@ cmake --build build --config Release
 13. **Play** — Hit the global Transport Play button. All queued clips launch sample-accurately.
 14. **Export Audio** — Click `Export Audio` in the top bar to render your composition to WAV, MP3, FLAC, or OGG format.
 15. **Load a VST3 plugin** — Switch to the **Plugins** tab in the browser, click **Add Folder…** to point it at your VST3 directory (e.g. `/usr/lib/vst3` or the Vital installer folder), then drag a plugin tile onto a track. Click **Show / Hide Editor** in the Device View to open its native GUI.
-16. **Save** — `File → Save Project` to serialize the full session as an `.LBD` file.
+16. **APC Mini controller** — Plug in the Akai APC Mini before or after launching LiBeDAW; the `ControlSurfaceManager` auto-detects it. The 8×8 grid lights up to reflect the current clip state. Press any pad to launch that clip. Move track faders (sliders 0–7) or the master fader to adjust volume. Press a scene launch button (right column) to fire an entire row.
+17. **Save** — `File → Save Project` to serialize the full session as an `.LBD` file.
 
 ---
 
@@ -317,6 +328,8 @@ cmake --build build --config Release
 - [x] Real-time audio warping — Rubber Band Library R3 Phase Vocoder, warp-marker UI
 - [x] Non-destructive comping — `TakeLaneOverlay`, 8-take cap, loop-record, crossfade
 - [x] MPE engine integration — `MpeZoneManager`, per-note expression in WavetableSynth & FMSynth, Piano Roll visualization
+- [x] APC Mini hardware controller (Phase 5.2) — `ControlSurfaceManager`, `ApcMiniDriver`, `SessionComponent`, `MixerComponent`; 8×8 LED grid, faders, scene buttons, ALSA rawmidi LED path
+- [ ] APC Mini Shift navigation — scroll Session Ring with Shift + track/scene buttons
 - [ ] CLAP plugin hosting (pending JUCE 9 native support)
 - [ ] Piano-roll quantization & velocity editing
 - [ ] MIDI controller mapping (CC mapping panel)
