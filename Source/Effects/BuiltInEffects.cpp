@@ -106,10 +106,23 @@ void DelayEffect::prepareToPlay(double sampleRate) {
 void DelayEffect::processBlock(juce::AudioBuffer<float>& buffer) {
     const int numChannels = buffer.getNumChannels();
     const int numSamples = buffer.getNumSamples();
-    
+
     float fb = feedback.load(std::memory_order_relaxed);
     float mx = mix.load(std::memory_order_relaxed);
-    float dTimeSamples = (delayTimeMs.load(std::memory_order_relaxed) / 1000.0f) * currentSampleRate;
+
+    // ── Compute effective delay time ──────────────────────────────────────────
+    float dTimeSamples;
+    if (syncEnabled.load(std::memory_order_relaxed)) {
+        const double bpm = currentBpm.load(std::memory_order_relaxed);
+        const int divIdx = juce::jlimit(0, kNumDivisions - 1,
+                                        syncDivision.load(std::memory_order_relaxed));
+        // beats * (60 000 ms / bpm) = ms per division
+        const float divMs = (float)(kDivisionBeats[divIdx] * 60000.0 / bpm);
+        dTimeSamples = (divMs / 1000.0f) * (float)currentSampleRate;
+    } else {
+        dTimeSamples = (delayTimeMs.load(std::memory_order_relaxed) / 1000.0f)
+                       * (float)currentSampleRate;
+    }
 
     delayLine.setDelay(dTimeSamples);
 
@@ -119,10 +132,10 @@ void DelayEffect::processBlock(juce::AudioBuffer<float>& buffer) {
         for (int i = 0; i < numSamples; ++i) {
             float input = channelData[i];
             float delayed = delayLine.popSample(channel);
-            
+
             float toPush = input + delayed * fb;
             delayLine.pushSample(channel, toPush);
-            
+
             channelData[i] = input * (1.0f - mx) + delayed * mx;
         }
     }
@@ -132,22 +145,27 @@ void DelayEffect::processBlock(juce::AudioBuffer<float>& buffer) {
                          buffer.getReadPointer(0), buffer.getNumSamples());
 }
 
+
 void DelayEffect::clear() {
     delayLine.reset();
 }
 
 juce::ValueTree DelayEffect::saveState() const {
     juce::ValueTree state("DelayState");
-    state.setProperty("delayTimeMs", delayTimeMs.load(), nullptr);
-    state.setProperty("feedback", feedback.load(), nullptr);
-    state.setProperty("mix", mix.load(), nullptr);
+    state.setProperty("delayTimeMs",  delayTimeMs.load(),              nullptr);
+    state.setProperty("feedback",     feedback.load(),                 nullptr);
+    state.setProperty("mix",          mix.load(),                      nullptr);
+    state.setProperty("syncEnabled",  syncEnabled.load(),              nullptr);
+    state.setProperty("syncDivision", syncDivision.load(),             nullptr);
     return state;
 }
 
 void DelayEffect::loadState(const juce::ValueTree& tree) {
-    if (tree.hasProperty("delayTimeMs")) delayTimeMs.store(tree.getProperty("delayTimeMs"), std::memory_order_relaxed);
-    if (tree.hasProperty("feedback")) feedback.store(tree.getProperty("feedback"), std::memory_order_relaxed);
-    if (tree.hasProperty("mix")) mix.store(tree.getProperty("mix"), std::memory_order_relaxed);
+    if (tree.hasProperty("delayTimeMs"))  delayTimeMs.store (tree.getProperty("delayTimeMs"),  std::memory_order_relaxed);
+    if (tree.hasProperty("feedback"))     feedback.store    (tree.getProperty("feedback"),      std::memory_order_relaxed);
+    if (tree.hasProperty("mix"))          mix.store         (tree.getProperty("mix"),           std::memory_order_relaxed);
+    if (tree.hasProperty("syncEnabled"))  syncEnabled.store ((bool)tree.getProperty("syncEnabled"),  std::memory_order_relaxed);
+    if (tree.hasProperty("syncDivision")) syncDivision.store((int) tree.getProperty("syncDivision"), std::memory_order_relaxed);
 }
 
 void DelayEffect::registerAutomationParameters(AutomationRegistry* registry) {

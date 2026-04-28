@@ -2541,6 +2541,22 @@ void MainComponent::timerCallback()
     while (auto opt = pluginGarbageQueue.pop())
         delete *opt;
 
+    // ── Delay tempo sync: push current BPM into every DelayEffect ────────────
+    // Called at 30 Hz — cheap enough (just an atomic store per effect).
+    {
+        const double currentBpm = transportClock.getBpm();
+        auto propagateBpm = [&](Track& t) {
+            if (auto* vec = t.activeEffectChain.load(std::memory_order_acquire))
+                for (auto* eff : *vec)
+                    if (auto* del = dynamic_cast<DelayEffect*>(eff))
+                        del->setBpm(currentBpm);
+        };
+        propagateBpm(masterTrack);
+        for (int r = 0; r < numReturnTracks.load(); ++r) propagateBpm(*returnTracks[r]);
+        for (int t = 0; t < nTracks; ++t)               propagateBpm(*audioTracks[t]);
+    }
+
+
     // ── 3.2 CompPlayer activation poll ────────────────────────────────────────
     // Once all take AudioClipPlayers have finished their background loads,
     // flip compPlayerActive so the render thread starts calling fillBlock().

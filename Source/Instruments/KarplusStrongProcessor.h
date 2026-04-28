@@ -149,9 +149,29 @@ public:
             delayBuffer[writePos] = filtered;
             writePos = (writePos + 1) & (kMaxBufferSize - 1);
 
-            // Pickup position comb filtering (simulates pick position)
-            // Simple: just output the direct signal (pickup pos affects tone subtly via buffer init)
-            float output = filtered * ampEnv * currentVelocity * masterLvl;
+            // Pickup position comb filtering.
+            // A second fractional tap is read at `pickup * delayLength` samples
+            // before the write head. Subtracting it creates spectral notches at
+            // harmonics where the two taps are in phase opposition, simulating
+            // the timbral effect of moving the pickup from bridge to midpoint.
+            //   pickup = 0.0 → bridge (no comb, bright/full harmonics)
+            //   pickup = 0.5 → midpoint (even harmonics notched, hollow/warm)
+            float output = filtered;
+            if (pickup > 0.01f) {
+                const float tapDelay = juce::jlimit(2.0f, delayLength * 0.98f,
+                                                    pickup * delayLength);
+                float readF2 = (float)writePos - tapDelay;
+                while (readF2 < 0.0f) readF2 += (float)kMaxBufferSize;
+                const int readI2  = (int)readF2 & (kMaxBufferSize - 1);
+                const int readI3  = (readI2 + 1) & (kMaxBufferSize - 1);
+                const float frac2 = readF2 - (int)readF2;
+                const float tapSample = delayBuffer[readI2]
+                                      + frac2 * (delayBuffer[readI3] - delayBuffer[readI2]);
+                // Normalise so peak gain is 1.0 regardless of pickup amount.
+                output = (filtered - tapSample * pickup)
+                       * (1.0f / (1.0f + pickup));
+            }
+            output *= ampEnv * currentVelocity * masterLvl;
 
             out.addSample(0, startSample + s, output);
             out.addSample(1, startSample + s, output);

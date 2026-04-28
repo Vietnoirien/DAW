@@ -53,9 +53,38 @@ public:
     std::unique_ptr<juce::Component> createEditor() override;
     juce::String getName() const override { return "Delay"; }
 
-    std::atomic<float> delayTimeMs { 250.0f };
-    std::atomic<float> feedback { 0.5f };
-    std::atomic<float> mix { 0.5f };
+    // ── Tempo sync ────────────────────────────────────────────────────────────
+    // Called by MainComponent::timerCallback() whenever the transport BPM changes.
+    void setBpm(double bpm) noexcept { currentBpm.store(bpm, std::memory_order_relaxed); }
+
+    // Musical note-value divisions, indexed by syncDivision (0-based).
+    // Each value is the fraction of one beat (quarter note = 1.0).
+    static constexpr int kNumDivisions = 12;
+    static constexpr float kDivisionBeats[kNumDivisions] = {
+        0.125f,   // 1/32
+        0.1875f,  // 1/32 dotted
+        0.25f,    // 1/16
+        0.375f,   // 1/16 dotted
+        0.5f,     // 1/8
+        0.75f,    // 1/8 dotted
+        1.0f,     // 1/4  (quarter)
+        1.5f,     // 1/4 dotted
+        2.0f,     // 1/2  (half)
+        3.0f,     // 1/2 dotted
+        4.0f,     // 1 bar (whole)
+        8.0f,     // 2 bars
+    };
+    static constexpr const char* kDivisionNames[kNumDivisions] = {
+        "1/32", "1/32d", "1/16", "1/16d",
+        "1/8",  "1/8d",  "1/4",  "1/4d",
+        "1/2",  "1/2d",  "1 bar","2 bars",
+    };
+
+    std::atomic<float> delayTimeMs { 250.0f };  // used when syncEnabled = false
+    std::atomic<float> feedback     { 0.5f };
+    std::atomic<float> mix          { 0.5f };
+    std::atomic<bool>  syncEnabled  { false };
+    std::atomic<int>   syncDivision { 6 };      // default: 1/4 note (index 6)
 
     static constexpr int fftOrder = 10;
     static constexpr int fftSize  = 1024;
@@ -65,6 +94,7 @@ public:
 private:
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> delayLine { 192000 };
     double currentSampleRate = 44100.0;
+    std::atomic<double> currentBpm { 120.0 };
 };
 
 class ChorusEffect : public EffectProcessor {

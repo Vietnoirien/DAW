@@ -20,71 +20,72 @@ struct DX7AlgorithmDef {
 // 32 algorithms faithful to the DX7 spirit, adapted for 4 operators.
 // Op 3 = deepest modulator (like DX7 Op6), Op 0 = primary carrier (DX7 Op1).
 static constexpr DX7AlgorithmDef kDX7Algorithms[32] = {
-    //  Alg 1:  3->2->1->0(C)
+    //  Alg 1:  3->2->1->0(C)  [linear chain]
     { {1<<1, 1<<2, 1<<3, 0}, {true,false,false,false} },
-    //  Alg 2:  3->2->1->0(C), 3->0(C)
+    //  Alg 2:  3->2->1->0(C), 3->0(C)  [chain + shortcut to carrier]
     { {1<<1|1<<3, 1<<2, 1<<3, 0}, {true,false,false,false} },
-    //  Alg 3:  3->2->0(C), 3->1->0(C)
+    //  Alg 3:  3->2->0(C), 3->1->0(C)  [branching mod feeds two paths]
     { {1<<1|1<<2, 1<<3, 1<<3, 0}, {true,false,false,false} },
-    //  Alg 4:  3->2->0(C), 1->0(C)
+    //  Alg 4:  3->2->0(C), 1->0(C)  [two independent branches into carrier]
     { {1<<1|1<<2, 0, 1<<3, 0}, {true,false,false,false} },
-    //  Alg 5:  3->2->0(C), 3->1(C)
+    //  Alg 5:  3->2->0(C), 3->1(C)  [shared mod, dual carriers]
     { {1<<2, 1<<3, 1<<3, 0}, {true,true,false,false} },
-    //  Alg 6:  3->2->0(C), 1(C)
+    //  Alg 6:  3->2->0(C), 1(C)  [chain + independent bare carrier]
     { {1<<2, 0, 1<<3, 0}, {true,true,false,false} },
-    //  Alg 7:  3->2->1->0(C) + 3->0(C) branch
-    { {1<<1|1<<3, 1<<2, 1<<3, 0}, {true,false,false,false} },
-    //  Alg 8:  2->1->0(C), 3->0(C)
+    //  Alg 7:  2->1->0(C), 3->0(C)  [chain-of-3 + direct extra mod to carrier]
     { {1<<1|1<<3, 1<<2, 0, 0}, {true,false,false,false} },
-    //  Alg 9:  3->2->1->0(C)  (strict serial)
-    { {1<<1, 1<<2, 1<<3, 0}, {true,false,false,false} },
-    //  Alg 10: 3->2->0(C), 1->0(C)  (two mods into carrier)
-    { {1<<1|1<<2, 0, 1<<3, 0}, {true,false,false,false} },
-    //  Alg 11: 2->1->0(C), 3->1->0(C)  (two stacks into 0)
+    //  Alg 8:  2->1->0(C), 3->1  [extra mod feeds middle of chain]
     { {1<<1, 1<<2|1<<3, 0, 0}, {true,false,false,false} },
-    //  Alg 12: 2->1->0(C), 3(C)
+    //  Alg 9:  3->1->0(C), 2->0(C)  [two separate chains into carrier]
+    { {1<<1|1<<2, 1<<3, 0, 0}, {true,false,false,false} },
+    //  Alg 10: 3->2->1->0(C), 2->0(C)  [chain with mid-point bypass to carrier]
+    { {1<<1|1<<2, 1<<2, 1<<3, 0}, {true,false,false,false} },
+    //  Alg 11: 2->1->0(C), 3->1  [Y: two mods fan into op1 which feeds carrier]
+    { {1<<1, 1<<2|1<<3, 0, 0}, {true,false,false,false} },
+    //  Alg 12: 2->1->0(C), 3(C)  [chain of 3 + bare fourth carrier]
     { {1<<1, 1<<2, 0, 0}, {true,false,false,true} },
-    //  Alg 13: 2->1(C), 2->0(C), 3(C)
+    //  Alg 13: 2->1(C), 2->0(C), 3(C)  [one mod fans to two carriers + bare]
     { {1<<2, 1<<2, 0, 0}, {true,true,false,true} },
-    //  Alg 14: 2->1->0(C), 3->0(C)
-    { {1<<1|1<<3, 1<<2, 0, 0}, {true,false,false,false} },
-    //  Alg 15: 1->0(C), 3->2->0(C)
-    { {1<<1|1<<2, 0, 1<<3, 0}, {true,false,false,false} },
-    //  Alg 16: 1->0(C), 2(C), 3(C)
-    { {1<<1, 0, 0, 0}, {true,false,true,true} },
-    //  Alg 17: 1->0(C), 3->2(C)
+    //  Alg 14: 3->2->1(C), 3->0(C)  [chain exits mid-way + shortcut to op0]
+    { {1<<3, 1<<2, 1<<3, 0}, {true,true,false,false} },
+    //  Alg 15: 1->0(C), 3->2(C)  [two independent 2-op stacks]
     { {1<<1, 0, 1<<3, 0}, {true,false,true,false} },
-    //  Alg 18: 3->2->0(C), 1->0(C)  (two mods)
-    { {1<<1|1<<2, 0, 1<<3, 0}, {true,false,false,false} },
-    //  Alg 19: 3->0(C), 2->0(C), 1->0(C)  (star: three mods into carrier)
+    //  Alg 16: 1->0(C), 2(C), 3(C)  [one 2-op stack + two bare carriers]
+    { {1<<1, 0, 0, 0}, {true,false,true,true} },
+    //  Alg 17: 3->0(C), 2->1(C)  [two crossed 2-op stacks, different pairing]
+    { {1<<3, 0, 1<<2, 0}, {true,true,false,false} },
+    //  Alg 18: 3->0(C), 2->0(C), 1->0(C)  [star: all mods into single carrier]
     { {1<<1|1<<2|1<<3, 0, 0, 0}, {true,false,false,false} },
-    //  Alg 20: 3->0(C), 2->0(C), 1(C)
+    //  Alg 19: 3->0(C), 2->0(C), 1(C)  [two mods into carrier + bare carrier]
     { {1<<2|1<<3, 0, 0, 0}, {true,true,false,false} },
-    //  Alg 21: 3->0(C), 2->0(C), 1->0(C) same as 19
-    { {1<<1|1<<2|1<<3, 0, 0, 0}, {true,false,false,false} },
-    //  Alg 22: 3->2(C), 1->0(C)
+    //  Alg 20: 3->2(C), 1->0(C)  [two independent 2-op stacks, ops swapped]
     { {1<<1, 0, 1<<3, 0}, {true,false,true,false} },
-    //  Alg 23: 3->2(C), 3->1(C), 3->0(C)  (fan out)
+    //  Alg 21: 3->2(C), 3->1(C), 3->0(C)  [one mod fans to three carriers]
     { {1<<3, 1<<3, 1<<3, 0}, {true,true,true,false} },
-    //  Alg 24: 3->2(C), 1(C), 0(C)
+    //  Alg 22: 3->2(C), 1(C), 0(C)  [one 2-op stack + two bare carriers]
     { {0, 0, 1<<3, 0}, {true,true,true,false} },
-    //  Alg 25: 3->2(C), 3->1(C), 0(C)
+    //  Alg 23: 3->2(C), 3->1(C), 0(C)  [branching mod + independent bare carrier]
     { {0, 1<<3, 1<<3, 0}, {true,true,true,false} },
-    //  Alg 26: 1->0(C), 2(C), 3(C)
-    { {1<<1, 0, 0, 0}, {true,false,true,true} },
-    //  Alg 27: 0(C), 1(C), 2(C), 3(C)  (all carriers, pure additive)
+    //  Alg 24: 0(C), 1(C), 2(C), 3(C)  [all carriers — pure additive synthesis]
     { {0, 0, 0, 0}, {true,true,true,true} },
-    //  Alg 28: 3->2->1(C), 0(C)
+    //  Alg 25: 3->2->1(C), 0(C)  [chain of 3 exiting at op1 + bare op0 carrier]
     { {0, 1<<2, 1<<3, 0}, {true,true,false,false} },
-    //  Alg 29: 3->2->1->0(C), feedback on 0
-    { {1<<1, 1<<2, 1<<3, 0}, {true,false,false,false} },
-    //  Alg 30: 2->1->0(C), 3->2  (extra depth)
-    { {1<<1, 1<<2, 1<<3, 0}, {true,false,false,false} },
-    //  Alg 31: 3->1->0(C), 2->0(C)
-    { {1<<1|1<<2, 0, 1<<3, 0}, {true,false,false,false} },
-    //  Alg 32: 3->2(C), 1->0(C)  (dual 2-op)
-    { {1<<1, 0, 1<<3, 0}, {true,false,true,false} },
+    //  Alg 26: 3->1(C), 2->0(C)  [cross-paired 2-op stacks]
+    { {1<<2, 1<<3, 0, 0}, {true,true,false,false} },
+    //  Alg 27: 3->2->1(C), 2->0(C)  [chain forks: op2 also drives carrier op0]
+    { {1<<2, 1<<2, 1<<3, 0}, {true,true,false,false} },
+    //  Alg 28: 3->2->1->0(C), 3->1  [chain + shortcut to mid-point op1]
+    { {1<<1, 1<<2, 1<<3|1<<2, 0}, {true,false,false,false} },
+    //  Alg 29: 3->0(C), 2->1->0(C)  [direct mod + 2-deep chain both into carrier]
+    { {1<<1|1<<3, 1<<2, 0, 0}, {true,false,false,false} },
+    //  Alg 30: 3->1->0(C), 2->1  [extra mod feeds chain entry op1]
+    { {1<<1, 1<<2|1<<3, 0, 0}, {true,false,false,false} },
+    //  Alg 31: 3->2->0(C), 2->1->0(C)  [op2 shared: two paths converge on carrier]
+    { {1<<1|1<<2, 1<<2, 1<<3, 0}, {true,false,false,false} },
+    //  Alg 32: 3->0(C), 1->0(C), 2->1  [op2 feeds op1 feeds carrier, op3 direct too]
+    { {1<<1|1<<3, 1<<2, 0, 0}, {true,false,false,false} },
 };
+
 
 // ============================================================
 // FMParams — all cross-thread state via std::atomic
@@ -245,10 +246,18 @@ public:
                 opSin[op] *= opEnv[op] * opLevel[op];
             }
 
+            // MPE timbre: ratio offset applied to all carrier operators.
+            // Range: (mpeTimbre-0.5) * mpeTimbreRange  →  e.g. ±0.25 at range=0.5
+            const float timbreRatioMod = (mpeTimbre - 0.5f) * p.mpeTimbreRange.load();
+
             // Pass 2: carriers re-evaluate with FM modulation from modulators
             float audioOut = 0.0f;
             for (int op = 0; op < 4; ++op) {
-                float freq = baseFreq * opRatio[op];
+                // Apply timbre offset to carrier op ratios; clamp so freq > 0.
+                float ratio = opRatio[op];
+                if (algo.isCarrier[op])
+                    ratio = juce::jlimit(0.01f, 32.0f, ratio + timbreRatioMod);
+                float freq = baseFreq * ratio;
                 float ph   = (float)opPhase[op];
 
                 // Accumulate FM modulation from all source operators
@@ -272,16 +281,12 @@ public:
                     audioOut += sample;
             }
 
-            // MPE timbre modulates Op0 (carrier) ratio offset
-            const float timbreRatioMod = (mpeTimbre - 0.5f) * p.mpeTimbreRange.load();
-
             // Update feedback state from carrier output
             feedbackSample = audioOut;
 
             // MPE amplitude: pressure scales output if pressureTarget == 0
             const float ampMpe = (p.mpePressureTarget.load() == 0) ? mpePressure : 1.0f;
             audioOut *= ampEnv * currentVelocity * masterLvl * ampMpe;
-            juce::ignoreUnused(timbreRatioMod); // used as hint; full Op ratio modulation in v0.2
 
             if (filterOn)
                 audioOut = filter.processSample(0, audioOut);
