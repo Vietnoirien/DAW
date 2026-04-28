@@ -41,39 +41,40 @@
 // ─────────────────────────────────────────────────────────────────────────────
 struct PdcDelayLine
 {
-    // 8 192 samples ≈ 170 ms @ 48 kHz — well beyond any real plugin lookahead.
-    static constexpr int kMaxDelay = 8192;
-    std::array<float, kMaxDelay> bufL {}, bufR {};
-    int writePos      = 0;
-    int delaySamples  = 0;
+    static constexpr int kMaxDelaySamples = 8192;
 
-    void setDelay (int d)
+    std::array<float, kMaxDelaySamples> bufL{};
+    std::array<float, kMaxDelaySamples> bufR{};
+    int writePos = 0;
+    std::atomic<int> delaySamples{0};
+
+    void setDelay(int d) noexcept
     {
-        delaySamples = juce::jlimit (0, kMaxDelay - 1, d);
-        bufL.fill (0.0f);
-        bufR.fill (0.0f);
-        writePos = 0;
+        delaySamples.store(juce::jlimit(0, kMaxDelaySamples - 1, d),
+                           std::memory_order_relaxed);
     }
 
-    void process (juce::AudioBuffer<float>& buf)
+    void process(juce::AudioBuffer<float>& buf) noexcept
     {
-        if (delaySamples == 0) return;
-        const int n  = buf.getNumSamples();
-        float*    L  = buf.getWritePointer (0);
-        float*    R  = buf.getNumChannels() > 1 ? buf.getWritePointer (1) : nullptr;
+        const int d   = delaySamples.load(std::memory_order_relaxed);
+        const int n   = buf.getNumSamples();
+        float* L      = buf.getWritePointer(0);
+        float* R      = (buf.getNumChannels() > 1) ? buf.getWritePointer(1) : nullptr;
+
         for (int i = 0; i < n; ++i)
         {
-            const int readPos = (writePos - delaySamples + kMaxDelay) % kMaxDelay;
-            const float outL  = bufL[readPos];
-            bufL[writePos]    = L[i];
-            L[i]              = outL;
-            if (R)
-            {
-                const float outR = bufR[readPos];
-                bufR[writePos]   = R[i];
-                R[i]             = outR;
-            }
-            writePos = (writePos + 1) % kMaxDelay;
+            const float inL   = L[i];
+            const float inR   = R ? R[i] : 0.0f;
+
+            bufL[writePos] = inL;
+            if (R) bufR[writePos] = inR;
+
+            const int readPos = (writePos - d + kMaxDelaySamples) % kMaxDelaySamples;
+
+            L[i] = bufL[readPos];
+            if (R) R[i] = bufR[readPos];
+
+            writePos = (writePos + 1) % kMaxDelaySamples;
         }
     }
 };
@@ -397,6 +398,8 @@ private:
 // ════════════════════════════════════════════════════════════════════════════
 //  MainComponent
 // ════════════════════════════════════════════════════════════════════════════
+class ProjectStateAction;
+
 class MainComponent : public juce::AudioAppComponent,
                       public juce::MidiInputCallback,
                       public juce::Timer,
@@ -412,6 +415,7 @@ public:
     void showDeviceEditorForTrack(int trackIdx);
     void regenerateDrumRackMidi(ClipData& clip);
     void regenerateEuclideanMidi(ClipData& clip);
+    void regenerateMidiMidi(ClipData& clip);
     void loadAudioFileIntoDrumPad(int trackIdx, int padIndex, const juce::File& file);
     void loadAudioFileIntoTrack(int trackIdx, const juce::File& file);
     void updateDrumRackPatternEditor();
@@ -475,20 +479,30 @@ private:
     void loadDeviceSettings();
 
     // ── Core state ───────────────────────────────────────────────────────────
+    juce::SpinLock projectTopologyLock;
     double currentSampleRate = 0.0;
     int    currentBufferSize = 512;
     GlobalTransport transportClock;
     ProjectManager  projectManager;
+
+    ProjectStateAction* pendingParamAction = nullptr;
+
+public:
+    ProjectManager& getProjectManager() { return projectManager; }
+private:
     juce::File      currentProjectFile;
     bool            projectIsDirty { false };
     std::unique_ptr<juce::FileChooser> projectChooser;
 
     void configureProjectMenu();
-    void syncProjectToUI();
-    void syncUIToProject();
     void exportProject(const juce::File& outputFile, const juce::String& format);
     void updateWindowTitle();
     void markDirty();
+
+public:
+    void syncProjectToUI();
+    void syncUIToProject();
+private:
 
     // ── Plugin Delay Compensation ─────────────────────────────────────────────
     // Scans all track effect chains, computes per-track compensation delay, and
@@ -627,6 +641,17 @@ private:
 
     void switchToView(DAWView v);
     void syncArrangementFromSession();
+
+    // ── Phase 6.1: State Serialization & Undo Helpers ────────────────────────
+    juce::ValueTree serializeTrack(int t);
+    void deserializeTrack(int t, const juce::ValueTree& trackNode);
+    bool deleteTrackInternal(int trackIndex);
+    bool restoreTrackInternal(int trackIndex, const juce::ValueTree& trackState);
+    bool deleteClipInternal(int trackIdx, int sceneIdx, ClipData& outDeletedClip);
+    bool restoreClipInternal(int trackIdx, int sceneIdx, const ClipData& clipState);
+
+    // ── Global State ─────────────────────────────────────────────────────────
+    juce::UndoManager undoManager;
 
     // ── Level Meters ─────────────────────────────────────────────────────────
     float masterLevelDisplay = 0.0f;

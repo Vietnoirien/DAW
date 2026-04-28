@@ -188,7 +188,10 @@ public:
         }
 
         if (!data.hasClip) {
-            if (onCreateClip) onCreateClip();
+            if (onCreateClip) {
+                auto callback = onCreateClip;
+                juce::MessageManager::callAsync([callback]() { callback(); });
+            }
         }
         else {
             if (e.x < 24) {
@@ -1099,49 +1102,70 @@ public:
     // ── Track Management ─────────────────────────────────────────────────────
     int addTrack (TrackType type, const juce::String& name)
     {
-        int idx  = columns.size();
-        auto* col = new TrackColumn (idx, name, type);
-        col->onCreateClipAt = [this, idx] (int s) { if (onCreateClip) onCreateClip (idx, s); };
-        col->onSelectClipAt = [this, idx] (int s) { if (onSelectClip) onSelectClip (idx, s); };
-        col->onLaunchClipAt = [this, idx] (int s) { if (onLaunchClip) onLaunchClip (idx, s); };
-        col->onPauseClipAt  = [this, idx] (int s) { if (onPauseClip)  onPauseClip  (idx, s); };
-        col->onDeleteClipAt = [this, idx] (int s) { if (onDeleteClip) onDeleteClip (idx, s); };
-        col->onDuplicateClipAt = [this, idx] (int s) { if (onDuplicateClip) onDuplicateClip (idx, s); };
-        col->onSelectTrack  = [this, idx] () { if (onSelectTrack) onSelectTrack (idx); };
-        col->onDeleteTrack  = [this, idx] () { if (onDeleteTrack) onDeleteTrack (idx); };
-        col->onVolumeChanged = [this, idx] (float g) { if (onTrackVolumeChanged) onTrackVolumeChanged (idx, g); };
-        col->onSendChanged   = [this, idx] (int r, float l) { if (onTrackSendChanged) onTrackSendChanged (idx, r, l); };
-        col->onMuteChanged      = [this, idx] (bool m)  { if (onTrackMuteChanged)   onTrackMuteChanged   (idx, m); };
-        col->onSoloChanged      = [this, idx] (bool s)  { if (onTrackSoloChanged)   onTrackSoloChanged   (idx, s); };
-        col->onArmChanged       = [this, idx] (bool a)  { if (onTrackArmChanged)    onTrackArmChanged    (idx, a); };
-        col->onRenameTrack      = [this, idx] (const juce::String& n) { if (onRenameTrack)    onRenameTrack    (idx, n); };
-        col->onSetTrackColour   = [this, idx] (juce::Colour c)         { if (onSetTrackColour) onSetTrackColour (idx, c); };
-        col->onRenameClipAt     = [this, idx] (int s, const juce::String& n) { if (onRenameClip)    onRenameClip    (idx, s, n); };
-        col->onSetClipColourAt  = [this, idx] (int s, juce::Colour c)         { if (onSetClipColour) onSetClipColour (idx, s, c); };
-        col->onAddScene         = [this, idx] () { if (onAddScene) onAddScene (idx); };
-        col->header.onSelectTrack   = col->onSelectTrack;
-        col->header.onDeleteTrack   = col->onDeleteTrack;
-        col->header.onRenameTrack   = col->onRenameTrack;
-        col->header.onSetTrackColour = col->onSetTrackColour;
-        col->header.getGroupNames   = [this]() -> juce::StringArray {
-            return getGroupNames ? getGroupNames() : juce::StringArray();
-        };
-        col->header.onAssignToGroup = [this, idx](int groupIdx) {
-            if (onAssignToGroup) onAssignToGroup(idx, groupIdx);
-        };
+        return insertTrack(columns.size(), type, name);
+    }
+
+    int insertTrack (int index, TrackType type, const juce::String& name)
+    {
+        if (index < 0 || index > columns.size()) index = columns.size();
+        auto* col = new TrackColumn (index, name, type);
+        
         // Provision one send knob per existing return track
         for (int r = 0; r < numReturnTracksCached; ++r)
             col->addSendKnob(r);
+            
         addAndMakeVisible (col);
-        columns.add (col);
-        // Explicitly re-layout: setSize() in updateContentSize() may not change the
-        // total size (if the viewport is wide enough), so resized() would never fire
-        // and the new column would get zero bounds. Always force the layout here.
-        trackParentGroup.push_back(-1);
+        columns.insert (index, col);
+        trackParentGroup.insert(trackParentGroup.begin() + index, -1);
+        
+        // Re-bind all closures for this and shifted columns
+        for (int i = index; i < columns.size(); ++i)
+        {
+            columns[i]->trackIndex = i;
+            columns[i]->onCreateClipAt = [this, i] (int s) { if (onCreateClip) onCreateClip (i, s); };
+            columns[i]->onSelectClipAt = [this, i] (int s) { if (onSelectClip) onSelectClip (i, s); };
+            columns[i]->onLaunchClipAt = [this, i] (int s) { if (onLaunchClip) onLaunchClip (i, s); };
+            columns[i]->onPauseClipAt  = [this, i] (int s) { if (onPauseClip)  onPauseClip  (i, s); };
+            columns[i]->onDeleteClipAt = [this, i] (int s) { if (onDeleteClip) onDeleteClip (i, s); };
+            columns[i]->onDuplicateClipAt = [this, i] (int s) { if (onDuplicateClip) onDuplicateClip (i, s); };
+            columns[i]->onSelectTrack  = [this, i] () { if (onSelectTrack) onSelectTrack (i); };
+            columns[i]->onDeleteTrack  = [this, i] () { if (onDeleteTrack) onDeleteTrack (i); };
+            columns[i]->onVolumeChanged = [this, i] (float g) { if (onTrackVolumeChanged) onTrackVolumeChanged (i, g); };
+            columns[i]->onSendChanged   = [this, i] (int r, float l) { if (onTrackSendChanged) onTrackSendChanged (i, r, l); };
+            columns[i]->onMuteChanged      = [this, i] (bool m)  { if (onTrackMuteChanged)   onTrackMuteChanged   (i, m); };
+            columns[i]->onSoloChanged      = [this, i] (bool s)  { if (onTrackSoloChanged)   onTrackSoloChanged   (i, s); };
+            columns[i]->onArmChanged       = [this, i] (bool a)  { if (onTrackArmChanged)    onTrackArmChanged    (i, a); };
+            columns[i]->onRenameTrack      = [this, i] (const juce::String& n) { if (onRenameTrack)    onRenameTrack    (i, n); };
+            columns[i]->onSetTrackColour   = [this, i] (juce::Colour c)         { if (onSetTrackColour) onSetTrackColour (i, c); };
+            columns[i]->onRenameClipAt     = [this, i] (int s, const juce::String& n) { if (onRenameClip)    onRenameClip    (i, s, n); };
+            columns[i]->onSetClipColourAt  = [this, i] (int s, juce::Colour c)         { if (onSetClipColour) onSetClipColour (i, s, c); };
+            columns[i]->onAddScene         = [this, i] () { if (onAddScene) onAddScene (i); };
+            columns[i]->header.onSelectTrack   = columns[i]->onSelectTrack;
+            columns[i]->header.onDeleteTrack   = columns[i]->onDeleteTrack;
+            columns[i]->header.onRenameTrack   = columns[i]->onRenameTrack;
+            columns[i]->header.onSetTrackColour = columns[i]->onSetTrackColour;
+            columns[i]->header.getGroupNames   = [this]() -> juce::StringArray {
+                return getGroupNames ? getGroupNames() : juce::StringArray();
+            };
+            columns[i]->header.onAssignToGroup = [this, i](int groupIdx) {
+                if (onAssignToGroup) onAssignToGroup(i, groupIdx);
+            };
+            for (auto* sl : columns[i]->slots)
+            {
+                sl->trackIndex = i;
+                sl->onCreateClip = [this, i, s = sl->sceneIndex] { if (onCreateClip) onCreateClip (i, s); };
+                sl->onSelectClip = [this, i, s = sl->sceneIndex] { if (onSelectClip) onSelectClip (i, s); };
+                sl->onLaunchClip = [this, i, s = sl->sceneIndex] { if (onLaunchClip) onLaunchClip (i, s); };
+                sl->onPauseClip  = [this, i, s = sl->sceneIndex] { if (onPauseClip)  onPauseClip  (i, s); };
+                sl->onDeleteClip = [this, i, s = sl->sceneIndex] { if (onDeleteClip) onDeleteClip (i, s); };
+                sl->onDuplicateClip = [this, i, s = sl->sceneIndex] { if (onDuplicateClip) onDuplicateClip (i, s); };
+            }
+        }
+        
         rebuildDisplayOrder();
         resized();
         repaint();
-        return idx;
+        return index;
     }
 
     void setClipData (int track, int scene, const ClipData& d)
@@ -1541,6 +1565,13 @@ public:
         return idx;
     }
 
+    int insertTrack (int index, TrackType type, const juce::String& name)
+    {
+        int idx = gridContent.insertTrack (index, type, name);
+        updateContentSize();
+        return idx;
+    }
+
     void addSceneToTrack (int trackIndex)
     {
         if (juce::isPositiveAndBelow (trackIndex, gridContent.columns.size()))
@@ -1608,6 +1639,16 @@ public:
 
         if (onDeleteReturnTrack) onDeleteReturnTrack (retIdx);
 
+        resized();
+        repaint();
+    }
+
+    void clearReturnTracks() {
+        while (!returnColumns.empty()) {
+            removeChildComponent(returnColumns.back().get());
+            returnColumns.pop_back();
+        }
+        gridContent.numReturnTracksCached = 0;
         resized();
         repaint();
     }

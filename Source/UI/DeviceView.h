@@ -58,6 +58,8 @@ public:
     // Fired after any slider/knob/button inside the device chain is released.
     // Wire this to MainComponent::markDirty() to track unsaved parameter changes.
     std::function<void()> onParamChanged;
+    // Fired when the user starts interacting with a control.
+    std::function<void()> onParamDragStart;
 
     DeviceView() {
         setOpaque(true);
@@ -93,6 +95,11 @@ public:
                             }
                         });
                 }
+            }
+        }
+        else if (!event.mods.isPopupMenu()) {
+            if (event.originalComponent != this && onParamDragStart) {
+                onParamDragStart();
             }
         }
     }

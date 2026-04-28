@@ -129,3 +129,70 @@ if (UNIX)
         COMMENT "Creating LiBeDAW_artefacts/LiBeDAW symlink → $<CONFIG>/LiBeDAW"
     )
 endif()
+
+# ── Unit Tests (Google Test 1.14.0) ──────────────────────────────────────────
+option(LIBEDAW_BUILD_TESTS "Build LiBeDAW unit tests (requires internet for FetchContent)" OFF)
+
+if (LIBEDAW_BUILD_TESTS)
+    FetchContent_Declare(
+        googletest
+        URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+    )
+    # Prevent GTest from overriding our compiler/linker settings on Windows
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(googletest)
+
+    enable_testing()
+
+    juce_add_console_app(LiBeDAW_tests PRODUCT_NAME "LiBeDAW_tests")
+    juce_generate_juce_header(LiBeDAW_tests)
+
+    target_sources(LiBeDAW_tests PRIVATE
+        Tests/test_main.cpp
+        Tests/LockFreeQueue/test_lockfree_queue.cpp
+        Tests/LockFreeQueue/test_app_audio_buffer.cpp
+        Tests/LockFreeQueue/test_pdc_delay_line.cpp
+        Tests/Sequencing/test_euclidean_pattern.cpp
+        Tests/Sequencing/test_global_transport.cpp
+        Tests/Instruments/test_fm_algorithms.cpp
+        Tests/Instruments/test_compressor_and_delay.cpp
+        Tests/DataModel/test_clip_data_and_persistence.cpp
+        Tests/ControlSurface/test_session_and_csm.cpp
+        # Production sources that tests exercise directly
+        Source/Effects/BuiltInEffects.cpp
+        Source/Instruments/FMSynthProcessor.cpp
+        Source/ControlSurface/SessionComponent.cpp
+        Source/ControlSurface/MixerComponent.cpp
+        Source/ControlSurface/ControlSurfaceManager.cpp)
+
+    target_include_directories(LiBeDAW_tests PRIVATE
+        Source/Core
+        Source/UI
+        Source/Sequencing
+        Source/Instruments
+        Source/Effects
+        Source/ControlSurface)
+
+    target_compile_features(LiBeDAW_tests PRIVATE cxx_std_20)
+
+    target_compile_definitions(LiBeDAW_tests PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_PLUGINHOST_VST3=0
+        JUCE_UNIT_TESTS=1)
+
+    target_link_libraries(LiBeDAW_tests PRIVATE
+        GTest::gtest
+        GTest::gmock
+        juce::juce_core
+        juce::juce_data_structures
+        juce::juce_events
+        juce::juce_audio_basics
+        juce::juce_audio_devices
+        juce::juce_audio_formats
+        juce::juce_audio_processors
+        juce::juce_dsp)
+
+    include(GoogleTest)
+    gtest_discover_tests(LiBeDAW_tests)
+endif()

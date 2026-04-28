@@ -40,8 +40,8 @@ static constexpr DX7AlgorithmDef kDX7Algorithms[32] = {
     { {1<<1|1<<2, 1<<3, 0, 0}, {true,false,false,false} },
     //  Alg 10: 3->2->1->0(C), 2->0(C)  [chain with mid-point bypass to carrier]
     { {1<<1|1<<2, 1<<2, 1<<3, 0}, {true,false,false,false} },
-    //  Alg 11: 2->1->0(C), 3->1  [Y: two mods fan into op1 which feeds carrier]
-    { {1<<1, 1<<2|1<<3, 0, 0}, {true,false,false,false} },
+    //  Alg 11: 3->0(C), 2->0(C), 1->0(C), 2->1  [Three direct mods to carrier + one cross mod]
+    { {1<<1|1<<2|1<<3, 1<<2, 0, 0}, {true,false,false,false} },
     //  Alg 12: 2->1->0(C), 3(C)  [chain of 3 + bare fourth carrier]
     { {1<<1, 1<<2, 0, 0}, {true,false,false,true} },
     //  Alg 13: 2->1(C), 2->0(C), 3(C)  [one mod fans to two carriers + bare]
@@ -53,13 +53,13 @@ static constexpr DX7AlgorithmDef kDX7Algorithms[32] = {
     //  Alg 16: 1->0(C), 2(C), 3(C)  [one 2-op stack + two bare carriers]
     { {1<<1, 0, 0, 0}, {true,false,true,true} },
     //  Alg 17: 3->0(C), 2->1(C)  [two crossed 2-op stacks, different pairing]
-    { {1<<3, 0, 1<<2, 0}, {true,true,false,false} },
+    { {1<<3, 1<<2, 0, 0}, {true,true,false,false} },
     //  Alg 18: 3->0(C), 2->0(C), 1->0(C)  [star: all mods into single carrier]
     { {1<<1|1<<2|1<<3, 0, 0, 0}, {true,false,false,false} },
     //  Alg 19: 3->0(C), 2->0(C), 1(C)  [two mods into carrier + bare carrier]
     { {1<<2|1<<3, 0, 0, 0}, {true,true,false,false} },
-    //  Alg 20: 3->2(C), 1->0(C)  [two independent 2-op stacks, ops swapped]
-    { {1<<1, 0, 1<<3, 0}, {true,false,true,false} },
+    //  Alg 20: 1->0(C), 3->2->0(C), 3(C)  [Carrier 3 also feeds chain into carrier 0]
+    { {1<<1|1<<2, 0, 1<<3, 0}, {true,false,false,true} },
     //  Alg 21: 3->2(C), 3->1(C), 3->0(C)  [one mod fans to three carriers]
     { {1<<3, 1<<3, 1<<3, 0}, {true,true,true,false} },
     //  Alg 22: 3->2(C), 1(C), 0(C)  [one 2-op stack + two bare carriers]
@@ -75,15 +75,15 @@ static constexpr DX7AlgorithmDef kDX7Algorithms[32] = {
     //  Alg 27: 3->2->1(C), 2->0(C)  [chain forks: op2 also drives carrier op0]
     { {1<<2, 1<<2, 1<<3, 0}, {true,true,false,false} },
     //  Alg 28: 3->2->1->0(C), 3->1  [chain + shortcut to mid-point op1]
-    { {1<<1, 1<<2, 1<<3|1<<2, 0}, {true,false,false,false} },
-    //  Alg 29: 3->0(C), 2->1->0(C)  [direct mod + 2-deep chain both into carrier]
-    { {1<<1|1<<3, 1<<2, 0, 0}, {true,false,false,false} },
-    //  Alg 30: 3->1->0(C), 2->1  [extra mod feeds chain entry op1]
-    { {1<<1, 1<<2|1<<3, 0, 0}, {true,false,false,false} },
-    //  Alg 31: 3->2->0(C), 2->1->0(C)  [op2 shared: two paths converge on carrier]
-    { {1<<1|1<<2, 1<<2, 1<<3, 0}, {true,false,false,false} },
-    //  Alg 32: 3->0(C), 1->0(C), 2->1  [op2 feeds op1 feeds carrier, op3 direct too]
-    { {1<<1|1<<3, 1<<2, 0, 0}, {true,false,false,false} },
+    { {1<<1, 1<<2|1<<3, 1<<3, 0}, {true,false,false,false} },
+    //  Alg 29: 3(C)->0,1,2; 2->1->0(C)  [Op3 is carrier & universal mod, plus 2-1-0 chain]
+    { {1<<1|1<<3, 1<<2|1<<3, 1<<3, 0}, {true,false,false,true} },
+    //  Alg 30: 3->1->0(C), 2(C)  [3-op chain + bare carrier Op2]
+    { {1<<1, 1<<3, 0, 0}, {true,false,true,false} },
+    //  Alg 31: 1->0(C), 3->0(C), 2(C)  [Two independent mods to carrier + bare carrier Op2]
+    { {1<<1|1<<3, 0, 0, 0}, {true,false,true,false} },
+    //  Alg 32: 3->0(C), 2(C)->1->0(C), 2(C)->0(C)  [Carrier 2 is also master modulator]
+    { {1<<1|1<<2|1<<3, 1<<2, 0, 0}, {true,false,true,false} },
 };
 
 

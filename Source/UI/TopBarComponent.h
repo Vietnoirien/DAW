@@ -10,6 +10,8 @@ public:
         addAndMakeVisible(recordBtn);
         addAndMakeVisible(playBtn);
         addAndMakeVisible(stopBtn);
+        addAndMakeVisible(undoBtn);
+        addAndMakeVisible(redoBtn);
         addAndMakeVisible(bpmSlider);
         addAndMakeVisible(settingsBtn);
         addAndMakeVisible(projectBtn);
@@ -37,6 +39,9 @@ public:
         };
         recordBtn.setClickingTogglesState(true);
         recordBtn.setColour(juce::TextButton::buttonOnColourId, juce::Colours::red.withAlpha(0.8f));
+
+        undoBtn.onClick = [this] { if (onUndo) onUndo(); };
+        redoBtn.onClick = [this] { if (onRedo) onRedo(); };
 
         bpmSlider.setSliderStyle(juce::Slider::LinearBar);
         bpmSlider.setRange(20.0, 300.0, 1.0);
@@ -83,6 +88,8 @@ public:
     std::function<void()> onExportAudio;
     std::function<void()> onBpmChanged;
     std::function<void()> onQuit;
+    std::function<void()> onUndo;
+    std::function<void()> onRedo;
 
     // View callbacks
     std::function<void()> onSwitchToSession;
@@ -113,6 +120,8 @@ public:
         fb.items.add(juce::FlexItem(recordBtn).withWidth(40).withHeight(30).withMargin(margin));
         fb.items.add(juce::FlexItem(playBtn).withWidth(80).withHeight(30).withMargin(margin));
         fb.items.add(juce::FlexItem(stopBtn).withWidth(80).withHeight(30).withMargin(margin));
+        fb.items.add(juce::FlexItem(undoBtn).withWidth(60).withHeight(30).withMargin(margin));
+        fb.items.add(juce::FlexItem(redoBtn).withWidth(60).withHeight(30).withMargin(margin));
         fb.items.add(juce::FlexItem(bpmSlider).withWidth(100).withHeight(30).withMargin(margin));
         
         // Add some space before view buttons
@@ -132,6 +141,8 @@ public:
     juce::TextButton recordBtn    {"O"}; // Record symbol
     juce::TextButton playBtn      {"Play"};
     juce::TextButton stopBtn      {"Stop"};
+    juce::TextButton undoBtn      {"Undo"};
+    juce::TextButton redoBtn      {"Redo"};
     juce::TextButton settingsBtn  {"[=] Settings"};
     juce::TextButton projectBtn   {"Project v"};
     juce::TextButton sessionViewBtn{"SESSION"};

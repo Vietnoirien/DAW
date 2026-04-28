@@ -1,5 +1,6 @@
 #include "MainComponent.h"
 #include "../Effects/BespokeEffectEditors.h"
+#include "UndoActions.h"
 
 // ════════════════════════════════════════════════════════════════════════════
 //  RecordingThread::run()
@@ -19,9 +20,16 @@ void RecordingThread::run()
         const bool loopWrapped = (currentWrap != lastLoopWrap);
         lastLoopWrap = currentWrap;
 
-        for (int t = 0; t < nTracks; ++t) {
-            auto* track = owner.audioTracks[t].get();
-            bool isArmed = track->isArmedForRecord.load(std::memory_order_relaxed);
+        {
+            juce::SpinLock::ScopedTryLockType sl(owner.projectTopologyLock);
+            if (!sl.isLocked()) {
+                wait(20);
+                continue;
+            }
+
+            for (int t = 0; t < nTracks; ++t) {
+                auto* track = owner.audioTracks[t].get();
+                bool isArmed = track->isArmedForRecord.load(std::memory_order_relaxed);
 
             if (isRecording && isArmed) {
                 // ── Loop-wrap during recording: finalise current take and start new one ──
@@ -105,7 +113,8 @@ void RecordingThread::run()
                     track->recordFifo->finishedRead(size1 + size2);
                 }
             }
-        }
+        } // end for loop
+        } // end lock scope
 
         wait(20); // Poll every 20 ms
     }
@@ -144,6 +153,15 @@ void RenderThread::run()
         // Fill as many blocks as the ring buffer has room for.
         while (owner.appBuffer.hasRoomToWrite() && !threadShouldExit())
         {
+            juce::SpinLock::ScopedTryLockType sl(owner.projectTopologyLock);
+            if (!sl.isLocked()) {
+                const int bs = owner.appBuffer.getBlockSize();
+                owner.renderScratch.clear();
+                owner.appBuffer.renderBlockPosition.fetch_add(bs, std::memory_order_release);
+                owner.appBuffer.writeBlock(owner.renderScratch);
+                continue;
+            }
+
             const int bs       = owner.appBuffer.getBlockSize();
             const int nCh      = owner.appBuffer.getNumChannels();
 
@@ -758,7 +776,23 @@ MainComponent::MainComponent()
     };
 
     // Any knob/slider/button release inside the device chain marks the project dirty.
-    deviceView.onParamChanged = [this] { markDirty(); };
+    deviceView.onParamDragStart = [this] {
+        if (pendingParamAction) {
+            delete pendingParamAction;
+            pendingParamAction = nullptr;
+        }
+        undoManager.beginNewTransaction("Edit Parameter");
+        pendingParamAction = new ProjectStateAction(*this, "Edit Parameter");
+    };
+
+    deviceView.onParamChanged = [this] { 
+        if (pendingParamAction) {
+            pendingParamAction->captureAfterState();
+            undoManager.perform(pendingParamAction);
+            pendingParamAction = nullptr;
+        }
+        markDirty(); 
+    };
 
     deviceView.canAddAutomation = [this]() -> bool {
         if (selectedTrackIndex < 0 || selectedTrackIndex >= (int)audioTracks.size()) return false;
@@ -898,6 +932,9 @@ MainComponent::MainComponent()
         }
         deviceView.updateAutomationIndicators(autoInfo);
     };
+
+    topBar->onUndo = [this] { undoManager.undo(); };
+    topBar->onRedo = [this] { undoManager.redo(); };
 
     // ── Transport ─────────────────────────────────────────────────────────────
     topBar->playBtn.onClick = [this] {
@@ -1252,6 +1289,10 @@ MainComponent::MainComponent()
 
     sessionView.onCreateClip = [this](int t, int s) {
         if (t < 0 || t >= (int)audioTracks.size()) return;
+        
+        undoManager.beginNewTransaction("Create Clip");
+        auto* action = new ProjectStateAction(*this, "Create Clip");
+
         // Ensure the scene row exists in the data model
         while ((int)clipGrid[t].size() <= s) {
             clipGrid[t].emplace_back();
@@ -1299,6 +1340,9 @@ MainComponent::MainComponent()
         resized();
         // ── 5.2 Control Surface: new clip slot → HasClip LED ─────────────────
         controlSurfaceManager.notifyClipState(t, s, ClipState::HasClip);
+        
+        action->captureAfterState();
+        undoManager.perform(action);
     };
 
     sessionView.onSelectClip = [this](int t, int s) {
@@ -1457,6 +1501,9 @@ MainComponent::MainComponent()
         if (t < 0 || t >= (int)audioTracks.size()) return;
         if (s < 0 || s >= (int)clipGrid[t].size()) return;
 
+        undoManager.beginNewTransaction("Delete Clip");
+        auto* action = new ProjectStateAction(*this, "Delete Clip");
+
         auto& clip = clipGrid[t][s];
         markDirty();
 
@@ -1481,13 +1528,22 @@ MainComponent::MainComponent()
             // Adjust selection index since all scenes above shifted down
             selectedSceneIndex--;
         }
+
+        action->captureAfterState();
+        undoManager.perform(action);
     };
 
     sessionView.onDuplicateClip = [this](int t, int s) {
         if (t < 0 || t >= (int)audioTracks.size()) return;
-        auto& sourceClip = clipGrid[t][s];
-        if (!sourceClip.hasClip) return;
+        if (s < 0 || s >= (int)clipGrid[t].size()) return;
         
+        // Take a full copy NOW before any potential clipGrid reallocation
+        ClipData copy = clipGrid[t][s];
+        if (!copy.hasClip) return;
+        
+        undoManager.beginNewTransaction("Duplicate Clip");
+        auto* action = new ProjectStateAction(*this, "Duplicate Clip");
+
         int nextEmpty = -1;
         for (int ns = s + 1; ns < (int)clipGrid[t].size(); ++ns) {
             if (!clipGrid[t][ns].hasClip) {
@@ -1496,19 +1552,48 @@ MainComponent::MainComponent()
             }
         }
         
-        if (nextEmpty != -1) {
-            ClipData copy = sourceClip;
-            copy.isPlaying = false; 
-            clipGrid[t][nextEmpty] = copy;
-            sessionView.setClipData(t, nextEmpty, copy);
-            // ── 5.2 Control Surface: duplicated slot → HasClip LED ────────────
-            controlSurfaceManager.notifyClipState(t, nextEmpty, ClipState::HasClip);
+        if (nextEmpty == -1) {
+            int maxScenes = 0;
+            for (const auto& trackScenes : clipGrid) {
+                if ((int)trackScenes.size() > maxScenes) {
+                    maxScenes = (int)trackScenes.size();
+                }
+            }
+            nextEmpty = maxScenes;
+            for (int i = 0; i < (int)audioTracks.size(); ++i) {
+                while ((int)clipGrid[i].size() <= nextEmpty) {
+                    clipGrid[i].emplace_back();
+                    sessionView.addSceneToTrack(i);
+                }
+            }
+            controlSurfaceManager.notifyLayout();
         }
+        
+        copy.isPlaying = false; 
+        
+        if (copy.patternMode == "drumrack") {
+            regenerateDrumRackMidi(copy);
+        } else if (copy.patternMode == "euclidean") {
+            regenerateEuclideanMidi(copy);
+        } else {
+            regenerateMidiMidi(copy);
+        }
+
+        clipGrid[t][nextEmpty] = copy;
+        sessionView.setClipData(t, nextEmpty, copy);
+        controlSurfaceManager.notifyClipState(t, nextEmpty, ClipState::HasClip);
+        markDirty();
+
+        action->captureAfterState();
+        undoManager.perform(action);
     };
 
     sessionView.onDeleteTrack = [this](int trackIndex) {
         int nTracks = numActiveTracks.load(std::memory_order_acquire);
         if (trackIndex < 0 || trackIndex >= nTracks) return;
+
+        undoManager.beginNewTransaction("Delete Track");
+        auto* action = new ProjectStateAction(*this, "Delete Track");
 
         // ── Step 1: Atomically detach the instrument BEFORE stopping the thread.
         // This ensures the render thread will see nullptr on its next processBlock
@@ -1562,13 +1647,16 @@ MainComponent::MainComponent()
         }
 
         // Erase from all parallel vectors
-        audioTracks.erase(audioTracks.begin() + trackIndex);
-        clipGrid.erase(clipGrid.begin() + trackIndex);
-        trackInstruments.erase(trackInstruments.begin() + trackIndex);
-        loadedFiles.erase(loadedFiles.begin() + trackIndex);
-        arrangementTracks.erase(arrangementTracks.begin() + trackIndex);
+        {
+            juce::SpinLock::ScopedLockType sl(projectTopologyLock);
+            audioTracks.erase(audioTracks.begin() + trackIndex);
+            clipGrid.erase(clipGrid.begin() + trackIndex);
+            trackInstruments.erase(trackInstruments.begin() + trackIndex);
+            loadedFiles.erase(loadedFiles.begin() + trackIndex);
+            arrangementTracks.erase(arrangementTracks.begin() + trackIndex);
 
-        numActiveTracks.fetch_sub(1, std::memory_order_release);
+            numActiveTracks.fetch_sub(1, std::memory_order_release);
+        }
         sessionView.removeTrack(trackIndex);
 
         if (selectedTrackIndex == trackIndex) {
@@ -1585,6 +1673,9 @@ MainComponent::MainComponent()
         if (wasRunning) renderThread.startThread();
         // ── 5.1 Control Surface: grid layout changed ──────────────────────────
         controlSurfaceManager.notifyLayout();
+
+        action->captureAfterState();
+        undoManager.perform(action);
     };
 
     sessionView.onLaunchScene = [this](int sceneIdx) {
@@ -1680,15 +1771,21 @@ MainComponent::MainComponent()
                 audioTracks[targetIdx]->refreshAutomationRegistry();
             }
         } else {
+            undoManager.beginNewTransaction("Add Track");
+            auto* action = new ProjectStateAction(*this, "Add Track");
+
             // Drop onto drop zone — create new track (no upper limit)
             // Push to all parallel vectors BEFORE incrementing numActiveTracks so
             // the render thread never sees an out-of-range index.
-            audioTracks.push_back(std::make_unique<Track>());
-            clipGrid.push_back(std::vector<ClipData>());
-            trackInstruments.push_back(type);
-            loadedFiles.push_back(juce::File{});
-            arrangementTracks.push_back({});
-            targetIdx = numActiveTracks.fetch_add(1, std::memory_order_release);
+            {
+                juce::SpinLock::ScopedLockType sl(projectTopologyLock);
+                audioTracks.push_back(std::make_unique<Track>());
+                clipGrid.push_back(std::vector<ClipData>());
+                trackInstruments.push_back(type);
+                loadedFiles.push_back(juce::File{});
+                arrangementTracks.push_back({});
+                targetIdx = numActiveTracks.fetch_add(1, std::memory_order_release);
+            }
             sessionView.addTrack(TrackType::Audio, "Track " + juce::String(targetIdx + 1));
             sessionView.gridContent.columns[targetIdx]->header.hasInstrument = true;
             sessionView.gridContent.columns[targetIdx]->header.instrumentName = type;
@@ -1711,6 +1808,9 @@ MainComponent::MainComponent()
                 }
                 audioTracks[targetIdx]->refreshAutomationRegistry();
             }
+            
+            action->captureAfterState();
+            undoManager.perform(action);
         }
 
         // Always select the track and show its device panel immediately,
@@ -1803,6 +1903,9 @@ MainComponent::MainComponent()
         int newRetIdx = numReturnTracks.load(std::memory_order_relaxed);
         if (newRetIdx >= 8) return; // max 8 return tracks (matches sendLevels array)
 
+        undoManager.beginNewTransaction("Add Return Track");
+        auto* action = new ProjectStateAction(*this, "Add Return Track");
+
         // Create a new return track
         returnTracks.push_back(std::make_unique<Track>());
         numReturnTracks.store(newRetIdx + 1, std::memory_order_release);
@@ -1823,6 +1926,9 @@ MainComponent::MainComponent()
         sessionView.updateContentSize();
         sessionView.resized();
         markDirty();
+
+        action->captureAfterState();
+        undoManager.perform(action);
     };
 
     sessionView.onMasterVolumeChanged = [this](float gain) {
@@ -1871,11 +1977,19 @@ MainComponent::MainComponent()
 
     // ── Group Track Callbacks (2.2) ───────────────────────────────────────────
     sessionView.onAddGroupTrack = [this] {
+        undoManager.beginNewTransaction("Add Group Track");
+        auto* action = new ProjectStateAction(*this, "Add Group Track");
         addGroupTrack();
+        action->captureAfterState();
+        undoManager.perform(action);
     };
 
     sessionView.onDeleteGroupTrack = [this](int groupIdx) {
+        undoManager.beginNewTransaction("Delete Group Track");
+        auto* action = new ProjectStateAction(*this, "Delete Group Track");
         deleteGroupTrack(groupIdx);
+        action->captureAfterState();
+        undoManager.perform(action);
     };
 
     sessionView.onRouteTrackToGroup = [this](int trackIdx, int groupIdx) {
@@ -2181,6 +2295,11 @@ MainComponent::MainComponent()
 
 MainComponent::~MainComponent()
 {
+    if (pendingParamAction) {
+        delete pendingParamAction;
+        pendingParamAction = nullptr;
+    }
+
     stopTimer();
     deviceManager.removeMidiInputDeviceCallback("", this);
 
@@ -2261,7 +2380,8 @@ void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate
 // ════════════════════════════════════════════════════════════════════════════
 void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
 {
-    if (isExporting.load(std::memory_order_acquire)) {
+    juce::SpinLock::ScopedTryLockType sl(projectTopologyLock);
+    if (!sl.isLocked() || isExporting.load(std::memory_order_acquire)) {
         bufferToFill.clearActiveBufferRegion();
         return;
     }
@@ -2395,6 +2515,23 @@ void MainComponent::resized()
 
 bool MainComponent::keyPressed (const juce::KeyPress& key)
 {
+    if (key.getModifiers().isCommandDown())
+    {
+        if (key.getKeyCode() == 'z' || key.getKeyCode() == 'Z')
+        {
+            if (key.getModifiers().isShiftDown())
+                undoManager.redo();
+            else
+                undoManager.undo();
+            return true;
+        }
+        else if (key.getKeyCode() == 'y' || key.getKeyCode() == 'Y')
+        {
+            undoManager.redo();
+            return true;
+        }
+    }
+
     if (key == juce::KeyPress::tabKey)
     {
         if (currentView == DAWView::Session)
@@ -3216,6 +3353,8 @@ void MainComponent::configureProjectMenu()
 
 void MainComponent::syncUIToProject()
 {
+    juce::SpinLock::ScopedLockType sl(projectTopologyLock);
+
     // Clear current tracks and UI
     numActiveTracks.store(0, std::memory_order_relaxed);
     // Clear all existing tracks (instruments, effects, commands)
@@ -3232,6 +3371,24 @@ void MainComponent::syncUIToProject()
     trackInstruments.clear();
     loadedFiles.clear();
     arrangementTracks.clear();
+    
+    numGroupTracks.store(0, std::memory_order_relaxed);
+    for (int t = 0; t < (int)groupTracks.size(); ++t) {
+        groupTracks[t]->gain.store(1.0f);
+        if (auto* oldVec = groupTracks[t]->activeEffectChain.exchange(nullptr, std::memory_order_acq_rel)) {
+            groupTracks[t]->effectVectorGarbageQueue.push(oldVec);
+        }
+    }
+    groupTracks.clear();
+
+    numReturnTracks.store(0, std::memory_order_relaxed);
+    for (int t = 0; t < (int)returnTracks.size(); ++t) {
+        returnTracks[t]->gain.store(1.0f);
+        if (auto* oldVec = returnTracks[t]->activeEffectChain.exchange(nullptr, std::memory_order_acq_rel)) {
+            returnTracks[t]->effectVectorGarbageQueue.push(oldVec);
+        }
+    }
+    returnTracks.clear();
     // Re-reserve so push_back stays safe
     audioTracks.reserve(128);
     clipGrid.reserve(128);
@@ -3239,11 +3396,16 @@ void MainComponent::syncUIToProject()
     loadedFiles.reserve(128);
     arrangementTracks.reserve(128);
     
+    int oldTrackIdx = selectedTrackIndex;
+    int oldSceneIdx = selectedSceneIndex;
+
     selectedTrackIndex = -1;
     selectedSceneIndex = -1;
     
     // Clear session view UI columns
     sessionView.gridContent.columns.clear();
+    sessionView.gridContent.groupCols.clear();
+    sessionView.clearReturnTracks();
     sessionView.resized();
 
     auto& pTree = projectManager.getTree();
@@ -3732,6 +3894,14 @@ void MainComponent::syncUIToProject()
     // notifyLayout() blanks all LEDs and then performs a full sync based on the
     // now-populated clipGrid.
     controlSurfaceManager.notifyLayout();
+
+    if (oldTrackIdx >= 0 && oldTrackIdx < (int)audioTracks.size()) {
+        selectedTrackIndex = oldTrackIdx;
+        selectedSceneIndex = oldSceneIdx;
+        sessionView.setTrackSelected(selectedTrackIndex);
+        sessionView.setClipSelected(selectedTrackIndex, selectedSceneIndex);
+        showDeviceEditorForTrack(selectedTrackIndex);
+    }
 }
 
 void MainComponent::syncProjectToUI()
@@ -4398,6 +4568,15 @@ void MainComponent::regenerateEuclideanMidi(ClipData& clip) {
     }
 }
 
+void MainComponent::regenerateMidiMidi(ClipData& clip) {
+    // For standard piano roll clips, forcing a vector copy ensures the newly duplicated slot
+    // receives its own independent midiNotes block. When launched, rentPattern() will pool a 
+    // unique Pattern* for the render thread instead of sharing the source clip's pointer.
+    std::vector<MidiNote> unlinkedNotes = clip.midiNotes;
+    clip.midiNotes.clear();
+    clip.midiNotes = unlinkedNotes;
+}
+
 void MainComponent::loadAudioFileIntoDrumPad(int trackIdx, int padIndex, const juce::File& file) {
     if (trackIdx < 0 || trackIdx >= (int)audioTracks.size()) return;
 
@@ -4625,19 +4804,28 @@ void MainComponent::loadPluginAsTrackInstrument (int trackIdx, const juce::File&
 
     if (targetIdx < 0 || targetIdx >= nTracks)
     {
+        undoManager.beginNewTransaction("Add Track");
+        auto* action = new ProjectStateAction(*this, "Add Track");
+
         // Dropped on the drop zone — create a new track
         juce::String pluginName = foundDescs[0]->name;
-        audioTracks.push_back (std::make_unique<Track>());
-        clipGrid.push_back ({});
-        trackInstruments.push_back ("Plugin:" + pluginName);
-        loadedFiles.push_back (juce::File{});
-        arrangementTracks.push_back ({});
-        targetIdx = numActiveTracks.fetch_add (1, std::memory_order_release);
+        {
+            juce::SpinLock::ScopedLockType sl(projectTopologyLock);
+            audioTracks.push_back (std::make_unique<Track>());
+            clipGrid.push_back ({});
+            trackInstruments.push_back ("Plugin:" + pluginName);
+            loadedFiles.push_back (juce::File{});
+            arrangementTracks.push_back ({});
+            targetIdx = numActiveTracks.fetch_add (1, std::memory_order_release);
+        }
         sessionView.addTrack (TrackType::Audio, pluginName);
         sessionView.gridContent.columns[targetIdx]->header.hasInstrument = true;
         sessionView.gridContent.columns[targetIdx]->header.instrumentName = "Plugin:" + pluginName;
         sessionView.gridContent.columns[targetIdx]->header.repaint();
         syncArrangementFromSession();
+        
+        action->captureAfterState();
+        undoManager.perform(action);
     }
     else
     {

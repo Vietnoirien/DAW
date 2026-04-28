@@ -150,6 +150,101 @@ This staged execution plan outlines the critical path to resolving the architect
 
 ---
 
+## Phase 6: UX Safety Net — Undo / Redo & Clip Workflow Fixes
+*Objective: Make the DAW safe to use creatively. Without undo, every wrong click is permanent data loss.*
+
+### 6.1 Undo / Redo System [x]
+- **Goal:** Implement an Undo system for destructive operations (clip deletion, track deletion, duplication).
+- **Implementation:** 
+  - Subclass `juce::UndoableAction` for specific edits.
+  - Integrate `juce::UndoManager` into `MainComponent`.
+  - Transaction boundaries on UI-thread clip grid edits.
+  - *Constraint:* Real-time and instrument parameter changes (like moving a slider or modifying a synth patch) will NOT be tracked in Undo history for v0.1 to avoid RT-thread locking overhead. Only structural edits are tracked.
+- **Completed (2026-04-28):** Implemented global `ProjectStateAction` leveraging existing ValueTree serialization to snapshot project states securely for structural changes (Delete Track, Add Track, Duplicate Clip, Create/Delete Clip) while ensuring lock-free engine safety. Added Ctrl+Z/Ctrl+Y shortcuts.
+  - **Stabilization Update (2026-04-28):** Resolved missing undo triggers for manual clip creation (by wrapping synchronous double-click events in `callAsync`), extended Undo coverage to all track additions (Group Tracks, Return Tracks, and Drag-and-Drop Instruments).
+  - **Completed (2026-04-28):** Implemented wait-free `juce::SpinLock::tryEnter` mechanism (`projectTopologyLock`) across all audio threads to drop audio frames safely during message-thread vector mutations. Restored visual preservation of `selectedTrackIndex` during `syncUIToProject()` rollback to fix the "parameters cannot be undone" UI issue.
+
+### 6.2 Clip Duplication — Fix Shared Pattern Pointer Bug [x]
+- **Problem:** `onDuplicateClip` performs a shallow `ClipData copy = sourceClip` and writes it to the next empty slot. Because `ClipData` contains `std::vector<MidiNote> midiNotes` by value, the notes *are* copied correctly — but the active `Pattern*` in the render thread still points to the *source* clip's pooled pattern. If the source clip is stopped/modified, the duplicated clip's rendering breaks.
+  Additionally, the current search logic only looks for an empty slot *below* the source scene, silently doing nothing if none exists — the user gets no feedback.
+- **Implementation:**
+  - In `onDuplicateClip`, after the `ClipData` value-copy, call `regenerate{Euclidean,Midi}Midi()` on the *new* slot to allocate a fresh pattern from the pool using the copied note data. This gives the duplicate its own independent render-thread pattern.
+  - If no empty slot exists below the source, **append a new scene row** to all tracks (matching the existing "Add Scene" logic) and place the duplicate there.
+  - Wrap the entire operation in a `DuplicateClipAction` for undo (Phase 6.1 dependency).
+  - Propagate the new slot's `HasClip` state to `controlSurfaceManager`.
+- **Validation:** Duplicate a MIDI clip → edit the original notes → verify the duplicate's playback is unaffected. Duplicate when no slot is free → a new row is created and the duplicate lands there.
+- **Completed (2026-04-28):** Fixed `onDuplicateClip` logic by ensuring the new clip receives its own independent midiNotes copy via `regenerateMidiMidi()`. Implemented fallback to dynamically expand the scene grid across all tracks if no free slot exists.
+
+### 6.3 PDC Zero-Delay Bug [x]
+- **Problem:** Unit tests revealed that `PdcDelayLine.setDelay(0)` produces silence instead of a 1-sample delay or a pass-through. The ring buffer reads `(writePos - 0 + 8192) % 8192 = writePos`—the slot about to be written, not the last written sample. Since the ring is zero-initialized, this yields continuous silence for any track with 0 PDC.
+- **Implementation:**
+  - Update `PdcDelayLine::process` to either write before reading, or compute the `readPos` correctly to ensure a true 0-delay pass-through or 1-sample latency.
+- **Validation:** Re-enable and run the `PdcDelayLine.DISABLED_KnownBug_ZeroDelaySilentDueToReadBeforeWrite` unit test. It must pass.
+- **Completed (2026-04-28):** Changed `PdcDelayLine::process` to write before reading, fixing the zero-delay silence bug. Verified the lock-free delay path using `std::atomic` correctly passes signals. `test_pdc_delay_line.cpp` updated and test passes cleanly.
+
+---
+
+## Phase 7: Live MIDI Recording
+*Objective: Make LiBeDAW an actual instrument for performance. Without this, the DAW cannot capture anything a musician plays.*
+
+### 7.1 MIDI Capture to Pattern [ ]
+- **Previous State:** Incoming MIDI Note On/Off events are forwarded to the armed track's instrument for real-time audition (`AuditionNoteOn` / `AuditionNoteOff` commands) but are never written to a `MidiPattern`.
+- **Implementation:**
+  - **Data path:** When `transportClock.getIsRecording() && track.isArmedForRecord`, intercept every incoming `noteOn` / `noteOff` from `handleIncomingMidiMessage` (message thread). Stamp each event with `transportClock.getPlayheadPosition()` (samples → beats conversion) and push it into a per-track `LockFreeQueue<RawMidiEvent, 256> midiRecordQueue` (new field on `Track`).
+  - **Commit thread:** `RecordingThread::run()` already polls every 20 ms. Add a MIDI drain pass: pop `midiRecordQueue`, convert sample offsets to beat positions, and append `MidiNote` entries to a `std::vector<MidiNote>` accumulation buffer per track.
+  - **Finalise on stop:** When recording stops (transport Stop or arm toggled off), call `callAsync` to dispatch the accumulated notes to the message thread, which writes them into the current clip's `midiNotes`, calls `regenerateMidiMidi()` to push a new pattern into the pool, and sends `FlushNotes` + `PlayPattern` commands to the render thread.
+  - **Overdub mode:** If the target clip already has notes (`hasClip == true`), append the new notes rather than replacing — matching Ableton's default overdub behaviour.
+  - **Loop-record:** On loop-wrap (`loopWrapCounter` increment), finalise the accumulated notes for the just-completed loop iteration and start a fresh accumulation buffer. Each loop iteration *overwrites* (or overdubs, per mode) the pattern, so the last recorded pass wins — consistent with how Ableton loop-record works for MIDI.
+  - **UI indicator:** Flash the armed track's clip slot red (matching `ClipState::Recording`) while MIDI recording is active. LED state is already broadcast via `controlSurfaceManager.notifyClipState`.
+- **New fields on `Track`:** `LockFreeQueue<RawMidiEvent, 256> midiRecordQueue`; `std::vector<MidiNote> midiAccumBuffer` (message-thread only).
+- **New struct:** `RawMidiEvent { int64_t samplePosition; int note; float velocity; bool isNoteOn; }` — trivially copyable, fits in the FIFO.
+- **Validation:** Arm a track with WavetableSynth, press Record, play 4 bars, stop. Open the Piano Roll and verify all played notes appear at the correct beat positions. Loop-record 3 passes and verify the last pass is reflected. Save and reload the project — notes persist.
+
+---
+
+## Phase 8: Piano Roll Fundamentals
+*Objective: Bring in-DAW MIDI editing up to a usable standard. The piano roll is where users spend most of their time.*
+
+### 8.1 Note Quantization [ ]
+- **Problem:** Notes drawn or recorded into the piano roll land at their raw beat position with no grid correction. Any slight timing imprecision from recording or manual drawing produces out-of-grid notes that are painful to fix manually.
+- **Implementation:**
+  - Add a **Quantize** dropdown / button to the `PatternEditor` toolbar. Options: Off, 1/32, 1/16, 1/8, 1/4, 1/2, 1 bar.
+  - **Input quantize (draw mode):** When the user draws a new note in the piano roll, snap `note.startBeat` to the nearest quantize grid boundary before inserting. Apply the same snap to the note's end position (duration rounds to the nearest grid unit, minimum 1 grid step).
+  - **Post-record quantize (apply action):** Add a "Quantize" button that applies the current grid setting to all *selected* notes by rounding their `startBeat` to the nearest multiple of the quantize interval. Wrap in a `QuantizeAction` for undo.
+  - Store the active quantize value as a `juce::Atomic<float>` in `PatternEditor` so it can be read by the draw handler without a mutex.
+  - **Visual grid:** Draw faint vertical lines in the piano roll canvas at every quantize boundary (already partially present as bar/beat lines — extend to subdivision level).
+- **Validation:** Draw a note with the mouse — it snaps cleanly to the selected grid. Record MIDI with Q=1/16, play a slightly-off kick pattern, press Quantize — all notes lock to the 1/16 grid.
+
+### 8.2 Velocity Editing Lane [ ]
+- **Problem:** Note velocity is stored per `MidiNote` and displayed as a colour shade in the piano roll, but there is no way to draw or edit velocity values in the UI.
+- **Implementation:**
+  - Below the piano roll note canvas, add a **Velocity Lane** — a fixed-height strip (≈ 80 px) showing a vertical bar for each note whose height is proportional to `note.velocity` (0–1 → 0–100% of lane height).
+  - Bars are colour-coded from blue (low) to orange (high) using the same scheme as the note body.
+  - **Mouse interaction:** Click-drag a velocity bar to set its value. `mouseDrag` maps the y-position within the lane to a 0–127 integer and stores it back into `midiNotes[i].velocity`. Update is immediate (re-renders the note body shade too).
+  - **Multi-select:** When multiple notes are selected (marquee select, v0.2 scope), drag on any bar scales all selected velocities proportionally.
+  - Wrap single-note velocity edits in a `NoteVelocityAction` for undo.
+  - The lane is always visible when the piano roll is open; it can be hidden by dragging the splitter between note canvas and velocity lane to zero height.
+- **Validation:** Draw several notes, then drag individual velocity bars up and down — playback volume changes accordingly. Record MIDI, open piano roll — velocity bars reflect the played velocities. Ctrl+Z after dragging restores the previous velocity.
+
+### 8.3 FM Algorithm Table — Deduplicate & Fix [x]
+- **Problem:** Unit tests confirmed 6 duplicate topology pairs in `kDX7Algorithms` (e.g., Algs (6,28), (6,31), (7,10), (7,29), (9,30)). Additionally, the tests caught a critical self-referential modulation bug in the `modulatedBy` bitmask (e.g., an operator's bitmask includes its own index). Since self-feedback is handled separately via `feedbackSample`, this breaks the algorithm logic.
+- **Implementation:**
+  - Resolve the self-referential modulation bug by ensuring no operator's `modulatedBy` bitmask includes its own index.
+  - Replace the 6 duplicate entries with genuinely distinct 4-operator topologies not yet represented (e.g., a feedback path on a non-carrier operator, or a diamond routing).
+  - Update algorithm comments to describe the new topologies accurately.
+  - **No engine changes required** — the renderer consumes `DX7AlgorithmDef` generically; changing table entries only affects the timbres accessible via the Algorithm knob.
+- **Validation:** Re-run the `FMAlgorithmTable.AllUnique` and `FMAlgorithmTable.NoSelfFeedbackViaModulatedBy` unit tests. Both must pass, reducing the test suite failure count to zero.
+- **Completed (2026-04-28):** Fixed self-feedback bitmasks on Alg 17 and Alg 28. Replaced 6 duplicate algorithms (Algs 11, 20, 29, 30, 31, 32) with unique DSP topologies. Unit tests pass cleanly.
+
+---
+
 ## Summary of Execution Strategy
 
 To execute this roadmap efficiently without breaking the application, development should be strictly sequential. **Phase 1** requires deep brain surgery on the `RenderThread` and atomic track structures. Only once the lock-free dynamic effect chain is stable should the team proceed to **Phase 2** (Routing). **Phases 3, 4, and 5** are largely additive and can be developed in parallel once the core engine is finalized.
+
+**Phases 6, 7, and 8 are the v0.1 release gates.** The DAW must not be released without them:
+- **Phase 6 (UX Safety Net)** unblocks safe creative use — undo is a non-negotiable baseline for any tool that modifies user data.
+- **Phase 7 (MIDI Recording)** turns LiBeDAW from a sequencer-player into an actual instrument-capture DAW.
+- **Phase 8 (Piano Roll Fundamentals)** makes in-DAW MIDI editing viable for a real music production workflow.
+
+Phases 6, 7, and 8 have no audio-engine dependencies on each other and can be developed in parallel by different contributors.
