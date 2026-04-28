@@ -49,10 +49,23 @@ target_compile_options(rubberband PRIVATE
 set(CLAP_JUCE_EXTENSIONS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory(libs/clap-juce-extensions EXCLUDE_FROM_ALL)
 
+# ── Icon assets ──────────────────────────────────────────────────────────────
+# ICON_BIG  → used for macOS .icns and Linux/Windows large icon
+# ICON_SMALL → used for the 16×16 taskbar/dock icon
+# juce_add_binary_data embeds the 512px PNG for runtime use (window icon, splash)
+juce_add_binary_data(LiBeDAW_Icons SOURCES
+    Assets/icons/icon_512x512.png
+    Assets/icons/icon_256x256.png
+    Assets/icons/icon_128x128.png
+    Assets/icons/icon_32x32.png
+    Assets/icons/icon_16x16.png)
+
 # ── Application target ────────────────────────────────────────────────────────
 juce_add_gui_app(LiBeDAW
-    PRODUCT_NAME "LiBeDAW"
-    VERSION ${PROJECT_VERSION})
+    PRODUCT_NAME      "LiBeDAW"
+    VERSION           ${PROJECT_VERSION}
+    ICON_BIG          "${CMAKE_CURRENT_SOURCE_DIR}/Assets/icons/icon_512x512.png"
+    ICON_SMALL        "${CMAKE_CURRENT_SOURCE_DIR}/Assets/icons/icon_16x16.png")
 
 juce_generate_juce_header(LiBeDAW)
 
@@ -102,6 +115,7 @@ if (APPLE)
 endif()
 
 target_link_libraries(LiBeDAW PRIVATE
+    LiBeDAW_Icons
     juce::juce_core
     juce::juce_data_structures
     juce::juce_events
