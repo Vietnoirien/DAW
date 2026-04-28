@@ -31,6 +31,8 @@
 #include "ProjectManager.h"
 #include "AudioClipPlayer.h"
 #include "CompPlayer.h"
+#include "../ControlSurface/ControlSurfaceManager.h"
+#include "../ControlSurface/ApcMiniDriver.h"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PdcDelayLine — lock-free stereo ring-buffer delay used by the render thread
@@ -434,7 +436,27 @@ public:
 
     // ── Quit-time save dialog (called by MainWindow) ─────────────────────────
     bool saveIfNeededBeforeQuit();
+
+    // ── Control Surface read-only accessors (5.2) ─────────────────────────────
+    // Used by ApcMiniDriver::fullSync() to read current clip grid state.
+    // All accessors are message-thread-only (same thread as LED sends).
+    ClipState getClipState  (int trackIdx, int sceneIdx) const;
+    int       getNumTracks  () const noexcept { return numActiveTracks.load(std::memory_order_relaxed); }
+    int       getNumScenes  (int trackIdx) const;
+
+    // ── Control Surface action proxies (5.2) ──────────────────────────────────
+    // ApcMiniDriver calls these instead of accessing private sessionView members.
+    void csLaunchClip         (int trackIdx, int sceneIdx);
+    void csLaunchScene        (int sceneIdx);
+    void csPauseClip          (int trackIdx, int sceneIdx);
+    void csSelectTrack        (int trackIdx);
+    void csTrackArmChanged    (int trackIdx, bool armed);
+    void csTrackVolumeChanged (int trackIdx, float gain);
+    void csMasterVolumeChanged(float gain);
+
     bool isProjectDirty() const { return projectIsDirty; }
+
+    void shutdownControlSurfaces() { controlSurfaceManager.removeAllSurfaces(); }
 
     // ── State exposed to RenderThread and RecordingThread (friends) ───────────────────────────────
     friend class RenderThread;
@@ -631,6 +653,11 @@ private:
     // ── Lock-Free Hardware MIDI Input ────────────────────────────────────────
     juce::MidiMessageCollector midiCollector;
 
+    // ── Control Surface API (5.1) ─────────────────────────────────────────────
+    // Owns all registered hardware drivers (ApcMiniDriver, etc.).
+    // Processes incoming MIDI before standard note routing, and receives
+    // synchronous state notifications to update hardware LEDs via observers.
+    ControlSurfaceManager controlSurfaceManager;
     // ── MPE (4.1) ─────────────────────────────────────────────────────────────
     // mpeZone: message-thread-only zone detector + per-channel note tracker.
     // mpeTargetTrack: which audio track receives live MPE expression events.

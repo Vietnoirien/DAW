@@ -56,6 +56,9 @@ public:
             {
                 if (!mc->saveIfNeededBeforeQuit())
                     return; // user clicked Cancel — keep the app alive
+                
+                // Disconnect control surfaces safely while the event loop is still alive
+                mc->shutdownControlSurfaces();
             }
             JUCEApplication::getInstance()->systemRequestedQuit();
         }

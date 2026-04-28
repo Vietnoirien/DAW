@@ -58,14 +58,17 @@ public:
             menu.addItem(4, "Save Project As...");
             menu.addSeparator();
             menu.addItem(5, "Export Audio...");
+            menu.addSeparator();
+            menu.addItem(6, "Quit");
 
             menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&projectBtn),
                 [this](int result) {
-                    if (result == 1 && onNewProject) onNewProject();
-                    if (result == 2 && onOpenProject) onOpenProject();
-                    if (result == 3 && onSaveProject) onSaveProject();
+                    if (result == 1 && onNewProject)    onNewProject();
+                    if (result == 2 && onOpenProject)   onOpenProject();
+                    if (result == 3 && onSaveProject)   onSaveProject();
                     if (result == 4 && onSaveProjectAs) onSaveProjectAs();
-                    if (result == 5 && onExportAudio) onExportAudio();
+                    if (result == 5 && onExportAudio)   onExportAudio();
+                    if (result == 6 && onQuit)          onQuit();
                 });
         };
 
@@ -79,6 +82,7 @@ public:
     std::function<void()> onSaveProjectAs;
     std::function<void()> onExportAudio;
     std::function<void()> onBpmChanged;
+    std::function<void()> onQuit;
 
     // View callbacks
     std::function<void()> onSwitchToSession;

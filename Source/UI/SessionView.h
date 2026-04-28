@@ -1783,6 +1783,18 @@ public:
     }
 
     public:
+    void setTrackVolumeFader (int trackIdx, float gain)
+    {
+        if (juce::isPositiveAndBelow (trackIdx, gridContent.columns.size()))
+            gridContent.columns[trackIdx]->volFader.setValue (gain, juce::dontSendNotification);
+    }
+    
+    void setMasterVolumeFader (float gain)
+    {
+        if (masterColumn != nullptr)
+            masterColumn->volFader.setValue (gain, juce::dontSendNotification);
+    }
+
     void updateContentSize()
     {
         auto vb = gridViewport.getBounds();

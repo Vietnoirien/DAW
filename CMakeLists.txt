@@ -71,14 +71,20 @@ target_sources(LiBeDAW PRIVATE
     Source/Instruments/PluginInstrumentAdapter.cpp
     Source/Effects/BuiltInEffects.cpp
     Source/Core/AudioClipPlayer.cpp
-    Source/Core/CompPlayer.cpp)
+    Source/Core/CompPlayer.cpp
+    Source/ControlSurface/SessionComponent.cpp
+    Source/ControlSurface/MixerComponent.cpp
+    Source/ControlSurface/ControlSurfaceManager.cpp
+    Source/ControlSurface/ApcMiniDriver.cpp)
+
 
 target_include_directories(LiBeDAW PRIVATE
     Source/Core
     Source/UI
     Source/Sequencing
     Source/Instruments
-    Source/Effects)
+    Source/Effects
+    Source/ControlSurface)
 
 target_compile_features(LiBeDAW PRIVATE cxx_std_20)
 

@@ -108,6 +108,48 @@ This staged execution plan outlines the critical path to resolving the architect
 
 ---
 
+## Phase 5: Hardware Control Surface API
+*Objective: Full hardware integration with 2-way MIDI feedback and session navigation.*
+
+### 5.1 Control Surface API Foundation ✅ DONE (2026-04-27)
+- **Implementation:**
+  - New `Source/ControlSurface/` subsystem. All existing code untouched — purely additive.
+  - `ClipStateObserver.h`: `ClipState` enum (`Empty`, `HasClip`, `Queued`, `Playing`, `Recording`) + `LedColor` protocol-neutral integer constants + pure-virtual observer interface.
+  - `ControlElement.h`: `ButtonElement` (Note On/CC bidirectional) and `SliderElement` (CC bidirectional) with `sendValue()` for hardware LED/motor feedback.
+  - `ControlSurface.h`: Abstract base inheriting `ClipStateObserver`, declares `getDeviceName()` and `handleMidi()`. `setMidiOutput()` / `sendMidi()` convenience wiring.
+  - `SessionComponent.h/.cpp`: NxM session ring with `trackOffset`/`sceneOffset`, `scrollTrack()` / `scrollScene()`, `setSlotButton()`, `lastKnownState` matrix (zero idle LED sends), and `resync()` for full LED rebuild on layout change.
+  - `MixerComponent.h/.cpp`: per-track fader, mute, solo, arm button bindings forwarding to `MainComponent` callbacks.
+  - `ControlSurfaceManager.h/.cpp`: owns all `ControlSurface` instances; `findOutputForSurface()` auto-detects MIDI Out by case-insensitive device name match; `handleMidi()` routes before MPE/note path; `notifyClipState()` / `notifyTransport()` / `notifyLayout()` broadcast state changes.
+  - `MainComponent.h`: `#include "../ControlSurface/ControlSurfaceManager.h"` + `ControlSurfaceManager controlSurfaceManager` member.
+  - `MainComponent.cpp`: 8 notify call-sites wired: MIDI guard at top of `handleIncomingMidiMessage`, Transport Play/Stop, `onLaunchClip`, `onPauseClip`, `onLaunchScene`, `onDeleteTrack`, `onInstrumentDropped`.
+  - `CMakeLists.txt`: 3 new `.cpp` files + `Source/ControlSurface` include path.
+- **Validated:** Build clean — zero errors, zero new warnings.
+
+### 5.2 APC Mini Driver Implementation ✅ DONE (2026-04-27)
+- **Implementation:**
+  - New `Source/ControlSurface/ApcMiniDriver.h/.cpp` — concrete `ControlSurface` driver for the Akai APC Mini Mk1.
+  - **Hardware protocol (Mk1):** 8×8 grid on Ch.1 notes 0–63; scene buttons notes 82–89; track select/arm buttons notes 64–71; Shift button note 98; faders CC 48–55 (tracks) + CC 56 (master). LED velocity: 0=Off, 1=Green, 2=GreenBlink, 3=Red, 4=RedBlink, 5=Yellow, 6=YellowBlink.
+  - **`ApcMiniDriver`**: inherits `ControlSurface`; owns stack-allocated `std::array<std::array<ButtonElement,8>,8>` grid, 8 scene buttons, 8 track buttons, 1 shift button, and 9 `SliderElement` faders. Zero heap allocation in all hot paths.
+  - **`stateToVelocity()`**: maps `ClipState` enum → APC Mini–specific velocity values (Empty=0, HasClip=Yellow=5, Playing=Green=1, Queued=GreenBlink=2, Recording=Red=3).
+  - **`buildMapping()`**: wires all elements to `SessionComponent` and `MixerComponent` at construction time. Scene buttons call `csLaunchScene(absScene)`; track buttons select the track or stop the playing clip when Shift is held; faders CC 48–55 → track volumes, CC 56 → master volume.
+  - **`handleMidi()`**: dispatch loop routes messages to shift button first (updates `shiftHeld`), then grid, then scene/track buttons, then faders. Returns `true` only on match — consumed messages never reach the note/MPE path.
+  - **`fullSync()`**: iterates visible session ring (8×8 window from current offsets), calls `getClipState()` for each slot, and sends the correct LED velocity. Also blanks scene/track buttons. Called by `ControlSurfaceManager` after MIDI output is opened.
+  - **`onClipStateChanged()`**: delegates to `SessionComponent` for ring-window translation, then overrides the LED send with the APC Mini–specific velocity (bypasses `defaultLedForState()`).
+  - **Anti-feedback guarantee**: LED sends go via `midiOut`; DAW actions go via `cs*` proxy methods → `sessionView` callbacks → audio engine. Paths are fully separate.
+  - **`MainComponent` public API additions**: `getClipState(t,s)`, `getNumTracks()`, `getNumScenes(t)` read-only accessors; 7 `cs*` proxy methods (`csLaunchClip`, `csLaunchScene`, `csPauseClip`, `csSelectTrack`, `csTrackArmChanged`, `csTrackVolumeChanged`, `csMasterVolumeChanged`) forward to existing `sessionView` lambdas with bounds-guarding.
+  - **Registration**: `controlSurfaceManager.addSurface(make_unique<ApcMiniDriver>(*this))` at the end of `MainComponent::MainComponent()`. Auto-detect + `fullSync()` happen inside `addSurface()`.
+  - **`CMakeLists.txt`**: `Source/ControlSurface/ApcMiniDriver.cpp` added to `target_sources`.
+- **Validated:** Build clean — zero errors, zero new warnings (`cmake --build build -j$(nproc)` exit code 0).
+
+
+### 5.3 Browser & Transport Navigation
+- **Implementation:**
+  - Create a `BrowserComponent` in the API to traverse the file/plugin tree via hardware directional buttons (e.g., using Shift + Arrows on the APC Mini).
+  - Implement a hardware "Load" binding to instantiate the selected browser item onto the currently armed track.
+  - Map global transport controls (Play, Stop, Record, Session/Arrangement toggle).
+
+---
+
 ## Summary of Execution Strategy
 
-To execute this roadmap efficiently without breaking the application, development should be strictly sequential. **Phase 1** requires deep brain surgery on the `RenderThread` and atomic track structures. Only once the lock-free dynamic effect chain is stable should the team proceed to **Phase 2** (Routing). **Phases 3 and 4** are largely additive and can be developed in parallel once the core engine is finalized.
+To execute this roadmap efficiently without breaking the application, development should be strictly sequential. **Phase 1** requires deep brain surgery on the `RenderThread` and atomic track structures. Only once the lock-free dynamic effect chain is stable should the team proceed to **Phase 2** (Routing). **Phases 3, 4, and 5** are largely additive and can be developed in parallel once the core engine is finalized.

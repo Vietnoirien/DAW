@@ -908,6 +908,8 @@ MainComponent::MainComponent()
             renderTransportOffset.store(appBuffer.renderBlockPosition.load(std::memory_order_acquire), std::memory_order_release);
         }
         transportClock.play();
+        // ── 5.1 Control Surface ────────────────────────────────────────────────
+        controlSurfaceManager.notifyTransport(true, transportClock.getIsRecording());
     };
 
     topBar->stopBtn.onClick = [this] {
@@ -923,6 +925,8 @@ MainComponent::MainComponent()
                     sessionView.setClipData(t, s, clipGrid[t][s]);
                 }
         sessionView.setSceneActive(-1, false);
+        // ── 5.1 Control Surface ────────────────────────────────────────────────
+        controlSurfaceManager.notifyTransport(false, false);
     };
 
     // ── View Toggle ───────────────────────────────────────────────────────────
@@ -1241,13 +1245,18 @@ MainComponent::MainComponent()
         clipGrid[t].push_back(newClip);  // grow data model with filled clip
         sessionView.addSceneToTrack(t);  // grow UI slot
         sessionView.setClipData(t, s, clipGrid[t][s]); // paint the slot as filled
+        // ── 5.2 Control Surface: new clip slot → HasClip LED ─────────────────
+        controlSurfaceManager.notifyClipState(t, s, ClipState::HasClip);
         markDirty();
     };
 
     sessionView.onCreateClip = [this](int t, int s) {
         if (t < 0 || t >= (int)audioTracks.size()) return;
         // Ensure the scene row exists in the data model
-        while ((int)clipGrid[t].size() <= s) clipGrid[t].emplace_back();
+        while ((int)clipGrid[t].size() <= s) {
+            clipGrid[t].emplace_back();
+            sessionView.addSceneToTrack(t);
+        }
         markDirty();
         auto& clip           = clipGrid[t][s];
         clip.hasClip         = true;
@@ -1288,6 +1297,8 @@ MainComponent::MainComponent()
         }
         
         resized();
+        // ── 5.2 Control Surface: new clip slot → HasClip LED ─────────────────
+        controlSurfaceManager.notifyClipState(t, s, ClipState::HasClip);
     };
 
     sessionView.onSelectClip = [this](int t, int s) {
@@ -1388,6 +1399,8 @@ MainComponent::MainComponent()
             if (i != s && clipGrid[t][i].isPlaying) {
                 clipGrid[t][i].isPlaying = false;
                 sessionView.setClipData(t, i, clipGrid[t][i]);
+                // ── 5.1 Control Surface: notify observers of clip stop ────────────────
+                controlSurfaceManager.notifyClipState(t, i, clipGrid[t][i].hasClip ? ClipState::HasClip : ClipState::Empty);
             }
         }
 
@@ -1395,6 +1408,8 @@ MainComponent::MainComponent()
             { TrackCommand::Type::PlayPattern, p, scheduleTime });
         clip.isPlaying = true;
         sessionView.setClipData(t, s, clip);
+        // ── 5.1 Control Surface: notify observers of clip launch ───────────────
+        controlSurfaceManager.notifyClipState(t, s, ClipState::Playing);
     };
 
     sessionView.onPauseClip = [this](int t, int s) {
@@ -1405,6 +1420,9 @@ MainComponent::MainComponent()
         audioTracks[t]->commandQueue.push({ TrackCommand::Type::StopPattern, nullptr, 0 });
         clip.isPlaying = false;
         sessionView.setClipData(t, s, clip);
+        // ── 5.1 Control Surface: notify observers of clip stop ────────────────
+        controlSurfaceManager.notifyClipState(t, s,
+            clip.hasClip ? ClipState::HasClip : ClipState::Empty);
 
         // If no other clip is playing on any track, stop the transport clock
         bool anyPlaying = false;
@@ -1445,6 +1463,9 @@ MainComponent::MainComponent()
         if (clip.isPlaying)
             audioTracks[t]->commandQueue.push({ TrackCommand::Type::StopPattern, nullptr, 0 });
 
+        // ── 5.2 Control Surface: notify slot becomes empty BEFORE erasing ─────
+        controlSurfaceManager.notifyClipState(t, s, ClipState::Empty);
+
         // Erase from data model (shifts subsequent elements down)
         clipGrid[t].erase(clipGrid[t].begin() + s);
 
@@ -1480,6 +1501,8 @@ MainComponent::MainComponent()
             copy.isPlaying = false; 
             clipGrid[t][nextEmpty] = copy;
             sessionView.setClipData(t, nextEmpty, copy);
+            // ── 5.2 Control Surface: duplicated slot → HasClip LED ────────────
+            controlSurfaceManager.notifyClipState(t, nextEmpty, ClipState::HasClip);
         }
     };
 
@@ -1560,6 +1583,8 @@ MainComponent::MainComponent()
         recalculatePDC();
         resized();
         if (wasRunning) renderThread.startThread();
+        // ── 5.1 Control Surface: grid layout changed ──────────────────────────
+        controlSurfaceManager.notifyLayout();
     };
 
     sessionView.onLaunchScene = [this](int sceneIdx) {
@@ -1578,6 +1603,8 @@ MainComponent::MainComponent()
                 if (s != sceneIdx && clipGrid[t][s].isPlaying) {
                     clipGrid[t][s].isPlaying = false;
                     sessionView.setClipData(t, s, clipGrid[t][s]);
+                    // ── 5.1 Control Surface: notify observers of clip stop ────────────────
+                    controlSurfaceManager.notifyClipState(t, s, clipGrid[t][s].hasClip ? ClipState::HasClip : ClipState::Empty);
                 }
             }
 
@@ -1608,6 +1635,8 @@ MainComponent::MainComponent()
                 audioTracks[t]->commandQueue.push({ TrackCommand::Type::PlayPattern, p, schedSample });
                 clip.isPlaying = true;
                 sessionView.setClipData(t, sceneIdx, clip);
+                // ── 5.1 Control Surface ────────────────────────────────────────
+                controlSurfaceManager.notifyClipState(t, sceneIdx, ClipState::Playing);
             } else {
                 // Track has no clip at this row — stop it silently
                 audioTracks[t]->commandQueue.push({ TrackCommand::Type::StopPattern, nullptr, schedSample });
@@ -1695,6 +1724,8 @@ MainComponent::MainComponent()
 
         resized();
         markDirty();
+        // ── 5.1 Control Surface: track added ──────────────────────────────────
+        controlSurfaceManager.notifyLayout();
     };
 
     sessionView.onEffectDropped = [this](int trackIdx, const juce::String& type) {
@@ -2141,10 +2172,12 @@ MainComponent::MainComponent()
         deviceManager.setMidiInputDeviceEnabled(dev.identifier, true);
     deviceManager.addMidiInputDeviceCallback("", this);
 
+
     setWantsKeyboardFocus(true);
     setSize(1200, 800);
     startTimerHz(30);
 }
+
 
 MainComponent::~MainComponent()
 {
@@ -2597,10 +2630,122 @@ void MainComponent::timerCallback()
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Control Surface read-only accessors (5.2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+ClipState MainComponent::getClipState (int trackIdx, int sceneIdx) const
+{
+    if (trackIdx < 0 || trackIdx >= (int)clipGrid.size()) return ClipState::Empty;
+    const auto& track = clipGrid[trackIdx];
+    if (sceneIdx < 0 || sceneIdx >= (int)track.size())    return ClipState::Empty;
+    const auto& clip = track[sceneIdx];
+    if (!clip.hasClip)    return ClipState::Empty;
+    if (clip.isPlaying)   return ClipState::Playing;
+    return ClipState::HasClip;
+}
+
+int MainComponent::getNumScenes (int trackIdx) const
+{
+    if (trackIdx < 0 || trackIdx >= (int)clipGrid.size()) return 0;
+    return static_cast<int> (clipGrid[trackIdx].size());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Control Surface action proxies (5.2)
+//  Forward hardware controller actions to the existing SessionView callbacks.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void MainComponent::csLaunchClip (int trackIdx, int sceneIdx)
+{
+    juce::MessageManager::callAsync ([this, trackIdx, sceneIdx] {
+        if (trackIdx < 0 || trackIdx >= (int)audioTracks.size()) return;
+        
+        bool isEmpty = true;
+        bool isPlaying = false;
+
+        if (sceneIdx >= 0 && sceneIdx < (int)clipGrid[trackIdx].size())
+        {
+            isEmpty = !clipGrid[trackIdx][sceneIdx].hasClip;
+            isPlaying = clipGrid[trackIdx][sceneIdx].isPlaying;
+        }
+
+        if (isEmpty)
+        {
+            if (sessionView.onCreateClip) sessionView.onCreateClip (trackIdx, sceneIdx);
+            return;
+        }
+
+        if (isPlaying)
+        {
+            if (sessionView.onPauseClip) sessionView.onPauseClip (trackIdx, sceneIdx);
+        }
+        else
+        {
+            if (sessionView.onLaunchClip) sessionView.onLaunchClip (trackIdx, sceneIdx);
+        }
+    });
+}
+
+void MainComponent::csLaunchScene (int sceneIdx)
+{
+    juce::MessageManager::callAsync ([this, sceneIdx] {
+        if (sceneIdx < 0) return;
+        if (sessionView.onLaunchScene) sessionView.onLaunchScene (sceneIdx);
+    });
+}
+
+void MainComponent::csPauseClip (int trackIdx, int sceneIdx)
+{
+    juce::MessageManager::callAsync ([this, trackIdx, sceneIdx] {
+        if (trackIdx < 0 || trackIdx >= (int)audioTracks.size()) return;
+        if (sceneIdx < 0 || sceneIdx >= (int)clipGrid[trackIdx].size()) return;
+        if (sessionView.onPauseClip) sessionView.onPauseClip (trackIdx, sceneIdx);
+    });
+}
+
+void MainComponent::csSelectTrack (int trackIdx)
+{
+    juce::MessageManager::callAsync ([this, trackIdx] {
+        if (trackIdx < 0 || trackIdx >= numActiveTracks.load(std::memory_order_relaxed)) return;
+        if (sessionView.onSelectTrack) sessionView.onSelectTrack (trackIdx);
+    });
+}
+
+void MainComponent::csTrackArmChanged (int trackIdx, bool armed)
+{
+    juce::MessageManager::callAsync ([this, trackIdx, armed] {
+        if (trackIdx < 0 || trackIdx >= (int)audioTracks.size()) return;
+        if (sessionView.onTrackArmChanged) sessionView.onTrackArmChanged (trackIdx, armed);
+    });
+}
+
+void MainComponent::csTrackVolumeChanged (int trackIdx, float gain)
+{
+    if (trackIdx < 0 || trackIdx >= (int)audioTracks.size()) return;
+    audioTracks[trackIdx]->gain.store (gain, std::memory_order_relaxed);
+    juce::MessageManager::callAsync ([this, trackIdx, gain] {
+        sessionView.setTrackVolumeFader (trackIdx, gain);
+    });
+}
+
+void MainComponent::csMasterVolumeChanged (float gain)
+{
+    masterTrack.gain.store (gain, std::memory_order_relaxed);
+    juce::MessageManager::callAsync ([this, gain] {
+        sessionView.setMasterVolumeFader (gain);
+    });
+}
+
 void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source,
                                                const juce::MidiMessage& message)
 {
     juce::ignoreUnused(source);
+
+    // ── 5.1 Control Surface: consume messages meant for hardware controllers ───
+    // Must be first — prevents controller MIDI from leaking into the note path.
+    if (controlSurfaceManager.handleMidi(message))
+        return;
 
     // ── 4.1 MPE: attempt to interpret as MPE channel-voice expression ─────────
     // Note On / Note Off are forwarded to midiCollector even when MPE is active
@@ -2966,6 +3111,11 @@ void MainComponent::finishInitialisation()
     } else {
         loadDeviceSettings();
     }
+
+    // ── 5.2 Control Surface: register APC Mini driver ─────────────────────────────────────────────
+    // Registered here (after loadDeviceSettings / setAudioChannels) so the ALSA
+    // sequencer is fully initialised before we call MidiOutput::getAvailableDevices().
+    controlSurfaceManager.addSurface (std::make_unique<ApcMiniDriver> (*this));
 }
 
 void MainComponent::configureProjectMenu()
@@ -3030,6 +3180,21 @@ void MainComponent::configureProjectMenu()
     topBar->onBpmChanged = [this] {
         markDirty();
         syncWarpRatiosToTempo();
+    };
+
+    topBar->onQuit = [this] {
+        // Blank all hardware LEDs before the process exits.
+        // shutdownControlSurfaces() destroys the ApcMiniDriver, whose
+        // destructor sweeps all notes off via rawmidi + drain + 150ms sleep.
+        // We call it here explicitly, before JUCE's shutdown tears things down.
+        shutdownControlSurfaces();
+
+        // Give the USB host controller time to deliver the blank packets
+        // to the device (the 150ms sleep is inside the destructor, but we
+        // add a small margin here to be safe).
+        juce::Thread::sleep (50);
+
+        juce::JUCEApplication::getInstance()->systemRequestedQuit();
     };
 }
 
@@ -3546,6 +3711,11 @@ void MainComponent::syncUIToProject()
     }
 
     syncArrangementFromSession();
+
+    // ── 5.2 Control Surface: after project load, broadcast HasClip state ──────
+    // notifyLayout() blanks all LEDs and then performs a full sync based on the
+    // now-populated clipGrid.
+    controlSurfaceManager.notifyLayout();
 }
 
 void MainComponent::syncProjectToUI()
