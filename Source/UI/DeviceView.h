@@ -130,7 +130,40 @@ public:
         repaint();
     }
 
+    void hookUpControls(juce::Component* comp) {
+        if (auto* slider = dynamic_cast<juce::Slider*>(comp)) {
+            auto existingEnd = slider->onDragEnd;
+            slider->onDragEnd = [this, existingEnd] {
+                if (existingEnd) existingEnd();
+                if (onParamChanged) onParamChanged();
+            };
+        }
+        else if (auto* combo = dynamic_cast<juce::ComboBox*>(comp)) {
+            auto existingChange = combo->onChange;
+            combo->onChange = [this, existingChange] {
+                if (onParamDragStart) onParamDragStart();
+                if (existingChange) existingChange();
+                if (onParamChanged) onParamChanged();
+            };
+        }
+        else if (auto* btn = dynamic_cast<juce::Button*>(comp)) {
+            auto existingClick = btn->onClick;
+            btn->onClick = [this, existingClick] {
+                if (onParamDragStart) onParamDragStart();
+                if (existingClick) existingClick();
+                if (onParamChanged) onParamChanged();
+            };
+        }
+
+        for (auto* child : comp->getChildren()) {
+            hookUpControls(child);
+        }
+    }
+
     void addEditor(std::unique_ptr<juce::Component> newEditor) {
+        if (newEditor != nullptr) {
+            hookUpControls(newEditor.get());
+        }
         chainContainer.addEditor(std::move(newEditor));
         repaint();
     }
